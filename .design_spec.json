@@ -1,0 +1,220 @@
+{
+  "mandate_presets": [
+    {
+      "key": "pure_growth",
+      "label": "Pure Growth",
+      "description": "Maximize long-horizon capital appreciation; tolerates equity-or-higher volatility and deep multi-year drawdowns in exchange for upside capture. Income is irrelevant. Advisor note: young accumulator, 5y+ horizon, no income need. Typical horizon presets: 1Y / 3Y / 5Y.",
+      "target_vol_pct": 22,
+      "max_drawdown_tolerance_pct": 40,
+      "growth_orientation": 1,
+      "income_orientation": 0,
+      "typical_horizon": "3-5 years (1Y/3Y/5Y presets)",
+      "signal_weight_adjustments": {
+        "trend": 0.35,
+        "momentum": 0.25,
+        "forecast": 0.3,
+        "sentiment": 0.1
+      },
+      "rationale": "RECONCILIATION: target_vol 22% (B/C) not 28% (A) - 22% is the realized vol of a diversified all-equity sleeve (SPY sample vol 16%, high-beta single names 50%+); A's 28% conflates a concentrated single-name book with a diversified equity sleeve. max_dd 40% is the midpoint of A/B's 45% and C's 35%: a diversified equity portfolio's tolerable drawdown sits below the raw S&P 2008 -55% index extreme but above a 60/40, and a risk manager never signs uncapped loss. WEIGHTS (effective, sum=1.0): lift trend 0.30->0.35 and momentum 0.20->0.25 (Jegadeesh-Titman 3-12mo cross-section + Moskowitz time-series momentum are the best-documented long-horizon equity premia), keep forecast 0.30, cut sentiment 0.20->0.10 (news-lexicon sentiment is noise at multi-year horizons). Direction follows A/B (lift trend+momentum, cut sentiment), NOT C (which cut trend); riding momentum is correct but slow-trend confirmation is still the durable signal, so trend is lifted not cut. growth_orientation 1.0 / income 0.0 turns OFF every income insight rule entirely."
+    },
+    {
+      "key": "balanced",
+      "label": "Balanced",
+      "description": "The neutral anchor: roughly equal growth and income, classic 60/40 risk budget. The ONLY preset that uses the engine's shipped base weights unchanged. Advisor note: mid-career, 3-15y horizon, wants to participate but sleep at night. Typical horizon presets: 6M / 1Y / 3Y.",
+      "target_vol_pct": 12,
+      "max_drawdown_tolerance_pct": 22,
+      "growth_orientation": 0.6,
+      "income_orientation": 0.4,
+      "typical_horizon": "1-3 years (6M/1Y/3Y presets)",
+      "signal_weight_adjustments": {
+        "trend": 0.3,
+        "momentum": 0.2,
+        "forecast": 0.3,
+        "sentiment": 0.2
+      },
+      "rationale": "UNANIMOUS across A/B/C: keep signals.WEIGHTS unchanged (trend 0.30/mom 0.20/fc 0.30/sent 0.20) because the composite score was originally tuned to this blend - it is the natural calibration anchor against which every other preset's tilt is defined. target_vol 12% is unanimous: realized vol of a 60/40 (0.6*16% equity + 0.4*5% bond approx 11.6%). max_dd RECONCILIATION: A=25, B=25, C=18 -> 22, the worst 60/40 drawdown of the last 40y with rebalancing (2008 approx -30% gross / approx -22% rebalanced; 2022 approx -22%); 22% is below A/B's pre-rebalancing 25% and above C's slightly tight 18%. 0.6/0.4 orientation arms BOTH growth and income insight rules at partial strength."
+    },
+    {
+      "key": "income",
+      "label": "Income Seeking",
+      "description": "Prioritize durable distributions/yield with moderate price risk; capital appreciation is a bonus, not the mandate. Tolerates more drawdown than preservation in exchange for a higher distribution rate. Advisor note: retiree drawing approx 4%, dividends and coupons matter more than total return. Typical horizon presets: 6M / 1Y / 3Y.",
+      "target_vol_pct": 10,
+      "max_drawdown_tolerance_pct": 18,
+      "growth_orientation": 0.25,
+      "income_orientation": 0.85,
+      "typical_horizon": "1-3 years (6M/1Y/3Y presets)",
+      "signal_weight_adjustments": {
+        "trend": 0.3,
+        "momentum": 0.1,
+        "forecast": 0.25,
+        "sentiment": 0.35
+      },
+      "rationale": "RECONCILIATION target_vol: A=10, B=9, C=10 -> 10 (dividend-aristocrat / preferred-stock realized risk). max_dd: A=18, B=18, C=12 -> 18 (A/B agree; C's 12 is too tight for a book that still holds equity-like dividend names). growth_orientation 0.25 (A/B agree); income_orientation 0.85 (B's 0.85, between A's 1.0 and C's 0.8 - keeps a light non-income check active rather than disabling growth rules entirely). WEIGHTS: momentum 0.20->0.10 (chasing price momentum is antithetical to a hold-for-yield book and raises turnover/tax drag); sentiment 0.20->0.35 (for income names a dividend cut / downgrade / default headline IS distribution-cut risk and shows up in news before price - the engine's sentiment lexicon already flags cut/cuts/default/downgrade); forecast trimmed 0.30->0.25 (price drift matters less than distribution stability); trend kept 0.30. Chose B/A's sentiment-lift direction over C's near-balanced weights because headline risk is the single most relevant income signal."
+    },
+    {
+      "key": "capital_preservation",
+      "label": "Capital Preservation",
+      "description": "Protect principal first; modest growth is a bonus. Suitable for money the client cannot afford to lose (near-term goal, or very risk-averse client). Advisor note: do not lose money. Typical horizon presets: 6M / 1Y.",
+      "target_vol_pct": 6,
+      "max_drawdown_tolerance_pct": 8,
+      "growth_orientation": 0.1,
+      "income_orientation": 0.5,
+      "typical_horizon": "6 months - 2 years (6M/1Y presets)",
+      "signal_weight_adjustments": {
+        "trend": 0.4,
+        "momentum": 0.1,
+        "forecast": 0.2,
+        "sentiment": 0.3
+      },
+      "rationale": "target_vol 6% is UNANIMOUS (A/B/C all 6%) - a short-duration bond + cash blend. max_dd RECONCILIATION: A=8, B=10, C=5 -> 8 (A's 8% is the defensible 'hard psychological line' for preservation clients; C's 5% is too tight to distinguish from the CD mandate, B's 10% too loose). growth 0.10 unanimous; income 0.50 (midpoint of A 0.50 / B 0.60 / C 0.40). WEIGHTS RECONCILIATION - the sharpest cross-design conflict: A/C lean SENTIMENT (0.50) as the risk-off early warning; B leans TREND (0.45) to de-risk decisively when SMA50<SMA200. Merged: trend 0.40 (B's 'don't get caught in a downtrend' logic dominates because a confirmed downtrend is a more reliable de-risk trigger than noisy headline sentiment) + sentiment 0.30 (keep a strong early-warning ear, A/C's instinct) + momentum 0.10 (minimize procyclical risk-taking) + forecast 0.20 (distrust optimistic point estimates when the job is to NOT lose). A >8% drawdown breaches the mandate and fires a HIGH insight."
+    },
+    {
+      "key": "cd_alternative",
+      "label": "CD / Cash Alternative",
+      "description": "An explicit benchmark mandate: beat a CD/T-bill yield with near-cash stability. The implicit benchmark is the risk-free rate (rf, default 0.02), NOT equities. Any drawdown beyond a few percent defeats the purpose. Advisor note: client has cash earning nothing and asked if we can do a little better without real risk. Typical horizon presets: 6M / 1Y.",
+      "target_vol_pct": 4,
+      "max_drawdown_tolerance_pct": 4,
+      "growth_orientation": 0.05,
+      "income_orientation": 0.8,
+      "typical_horizon": "3-18 months (6M/1Y presets)",
+      "signal_weight_adjustments": {
+        "trend": 0.35,
+        "momentum": 0.05,
+        "forecast": 0.25,
+        "sentiment": 0.35
+      },
+      "rationale": "Tightest guardrails in the set. target_vol RECONCILIATION: A=3.5, B=4, C=4 -> 4.0 (B/C agree; brackets an ultra-short bond fund). max_dd: A=4, B=5, C=3 -> 4.0 (A's 4%; must be below preservation's 8% because a CD-alt that draws down more has mis-sold its purpose). growth 0.05 unanimous; income 0.80 (A's 0.80, between B 0.90 / C 0.60). WEIGHTS: momentum 0.05 (near-off - a cash-alt model must never trade on RSI swings; all three designs agree momentum is minimal here); forecast kept 0.25 so the long-horizon expected-return-vs-rf comparison drives the recommendation (A's point); trend 0.35 (B/C's de-risk lean) and sentiment 0.35 split the remaining weight to balance trend-following de-risk with headline early-warning. BENCHMARK: rf is read from a single configurable cd_benchmark_yield (default 0.02, the rate already in indicators.sharpe/sortino and backtest); EVERY return statement for this mandate quotes return MINUS the CD benchmark (excess), never gross. ANY projected p05 drawdown band breaching -4% fires a HIGH insight."
+    }
+  ],
+  "portfolio_construction": {
+    "method": "Reuse the existing engine.portfolio.parse_model_file (already implemented: parses Excel/.xlsx/.xlsm and CSV/.tsv/.txt, finds ticker+weight columns via alias matching, merges duplicate tickers, takes max(0,w), normalizes to sum 1.0, equal-weights when no weight column, caps at MAX_HOLDINGS=200). For analytics, build the portfolio return series via the synthetic-NAV reduction that is UNANIMOUS across all three designs: (1) per holding, resolve a close series with data.resolve_series(ticker) (returns PriceSeries{symbol, close, source in 'sample'|'live'|'simulated'}); (2) compute per-holding daily simple returns r_i = close.pct_change() (matches indicators.daily_returns); (3) align all holdings on the INTERSECTION of trading dates via pd.concat(axis=1, join='inner').dropna() into a return matrix R (T x N); (4) portfolio daily return r_p = R @ w with normalized weights w; (5) rebuild a synthetic NAV close: nav[0]=100.0, nav = 100*(1+r_p).cumprod(). Feed nav UNCHANGED into indicators.indicator_frame / metrics_summary, forecast.forecast, signals.evaluate, backtest.run - the entire single-instrument engine works on the portfolio as if it were one instrument with ZERO changes to those modules. Compute once for risk decomposition: annualized covariance Sigma_252 = R.cov()*252 and correlation C = R.corr() (full-window); trailing Sigma_60 = R.tail(60).cov()*252 for the short-horizon vol and the correlated-shock Monte-Carlo (Cholesky(Sigma_60)). Marginal risk contribution MRC_i = w_i*(Sigma@w)_i/(w'Sigma w), summing to 1.0, is reported so the advisor sees which NAME drives portfolio vol (often not the largest weight).",
+    "rebalancing_assumption": "Fixed-weight DAILY rebalancing to target weights: r_p[t] = R[t] @ w with constant w every day. UNANIMOUS across A/B/C and the honest default because the upload gives target weights, not share counts or cost basis - inventing purchase dates would be dishonest, and constant weights make r_p a clean linear function of w (required for the closed-form MRC risk contributions). STATE VERBATIM in the UI: 'Returns assume daily rebalancing to target weights; a real buy-and-hold/drifting-weight book will differ, more so over long horizons.' A secondary 'drifting weights / buy & hold' toggle (compound each holding independently, re-derive effective weights daily) is offered but default OFF.",
+    "missing_history_policy": "Align on the common-date INTERSECTION (inner join), so portfolio history length = the SHORTEST holding's overlapping history; report the BINDING ticker by name so the advisor knows exactly what truncates the analysis (B's point). Escalating history gates (merged from A/B/C, all of which use 252 as the floor for annualization): >=252 aligned rows (1y) = full analysis; 126-251 rows = run but tag 'short-history, wide uncertainty' (INFO insight) AND disable 3Y/5Y long-horizon presets with the message 'Insufficient overlapping history (need >=252 aligned trading days for multi-year projection)' (C's hard disable - a multi-year cone fit on <1y of data is statistically meaningless); <126 rows = MEDIUM insight, 1Y+ presets also disabled; <60 rows = refuse the portfolio (mirrors data.parse_csv's existing 30-row guard and app.py's guards). A holding contributing <60 valid aligned rows is DROPPED from R, its weight redistributed pro-rata across survivors, and the drop reported. If >30% of total weight is dropped, reject and ask the user for more history (A's 30% threshold, stricter than B's 10% warn - a 30% loss invalidates the analysis). Never forward-fill prices across gaps >5 trading days (phantom zero-return days deflate vol); drop those dates from the intersection instead.",
+    "concentration_metric": "Herfindahl-Hirschman Index HHI = sum(w_i^2) on normalized weights, with effective number of holdings N_eff = 1/HHI. RECONCILIATION of single-name cap: A/B=0.35, C=0.25 -> 0.35 default with a MANDATE-AWARE tightening to 0.15 for capital_preservation and cd_alternative (C's insight that a low-vol mandate cannot absorb single-name blowup risk). HHI bands: HHI<=0.15 (N_eff>=6.7) WELL-DIVERSIFIED; 0.15<HHI<=0.25 (N_eff 4-6.7) MODERATE (info); HHI>0.25 (N_eff<4) HIGH-concentration; for preservation/cd_alternative the MODERATE/HIGH line tightens to 0.20 (N_eff<5). The 0.25 HHI line = the equivalent of 4 equal-weight names and mirrors the antitrust 'highly concentrated' convention; 0.35 single-name = the RIC-style '75-5-10' regulatory diversification heuristic (no position dominating a quarter+ of the book). Also flag top-3 weight >0.60. MRC table feeds the 'concentration' insight category so trims target the vol-driving name.",
+    "data_sourcing_fallback": "Reuse data.resolve_series's EXISTING three-tier order (verified in code): per ticker (1) sidebar store / cache via data.get; (2) LIVE via yfinance 5y history if data.HAS_YF and reachable; (3) deterministic SIMULATED GBM via data._simulate_for_ticker (seed = abs(hash(('helios',ticker)))%2**31, drift U(0.04,0.22), vol U(0.14,0.45)). Source flag ('sample'|'live'|'simulated') is already returned per holding and propagated to a portfolio-level data_provenance / data_honesty block: {n_holdings, n_live, n_sample, n_simulated, simulated_weight_pct}. HONESTY (non-negotiable, all three designs): if simulated_weight_pct>0 the UI shows a PERSISTENT amber banner 'X% of portfolio weight uses SIMULATED price history - forecasts are illustrative, not market-calibrated' and every forecast/metric is tagged honesty in {'real' (0% sim), 'mixed' (0<sim<100%), 'simulated' (100%)}. No simulated number is EVER presented as real market data. PARAMETERS: weight-sum tolerance [0.90,1.10] renormalize silently else WARN 'weights summed to Z%, rescaled'; reject negative weights as unsupported shorts; synthetic NAV seed price 100.0; MAX_HOLDINGS 200; cd_benchmark_yield / rf configurable (env HELIOS_RF, default 0.02)."
+  },
+  "long_horizon_forecast": {
+    "horizon_presets": "Short slider NARROWS to 5-90 trading days per the new requirement (the engine in app.py currently clamps max(5,min(h,120)); tighten the surfaced max to 90, keep engine able to accept 120). Long presets map to trading-day counts (UNANIMOUS across A/B/C): 6M=126, 1Y=252, 3Y=756, 5Y=1260 (21 trading days/month, 252/year, round(years*252)). A horizon_class field tags each: H<=90='short' (per-step daily MC, full Ridge feature regression, existing fine cone); H>90='long' (drift from the shrinkage/regime model below, wider uncertainty, coarser cone explicitly labeled 'strategic projection, not a trading forecast'). The UI MUST visually separate the two.",
+    "drift_methodology": "CRITICAL (unanimous across A/B/C): the next-day Ridge drift from forecast.forecast (model_mu, already Sharpe-capped at 1.5) is a SHORT-horizon signal and must NOT be extrapolated 1260 days - that is the momentum-blowup overfitting trap. The short Ridge mu is used ONLY for H<=90. For H>90, annualized expected drift mu_LT is a SHRINKAGE blend toward a defensible long-run anchor: mu_LT = (1-lambda)*mu_hist_capped + lambda*mu_anchor. ANCHOR (merge of A's per-mandate prior and B/C's CAPM): mu_anchor = rf + ERP*growth_orientation, with rf=0.02 (reuses indicators.sharpe) and ERP=0.045 (deliberately BELOW the historical realized approx 5.5% so we under-promise; B/C agree on 0.045). This makes the anchor scale smoothly with each mandate's growth_orientation (pure_growth 1.0 -> 0.02+0.045=6.5%; balanced 0.6 -> 4.7%; income 0.25 -> 3.1%; preservation 0.10 -> 2.5%; cd_alternative 0.05 -> approx 2.2% approx rf) - this reproduces A's intended per-mandate anchors (growth ~7%, balanced ~5%, income ~4%, preservation ~2.5%, cd~rf) from ONE defensible CAPM formula rather than five hardcoded magic numbers. mu_hist_capped = portfolio trailing-252d annualized mean return, capped so implied annualized Sharpe <=1.5 (reuse the engine's existing |mu_ann/vol_ann|<=1.5 discipline). SHRINKAGE WEIGHT lambda = clip(H/1260, 0, 0.8) (A's schedule, reframed as the weight ON THE ANCHOR so it is monotone increasing and bounded): 6M lambda=0.10, 1Y=0.20, 3Y=0.60, 5Y=0.80 - the further out, the more drift comes from the defensible anchor and the less from the noisy trailing signal; at 5Y, 80% is anchor. (A's H/1260 and C's 126/(126+H) encode the SAME intent with opposite labels; A's is adopted because it is monotone in horizon and bounded at 0.8, never letting the noisy signal fully vanish nor fully dominate.) FINAL CAP: after blending, re-cap mu_LT so implied annualized Sharpe (mu_LT-rf)/sigma_ann <= 0.60 for long horizons (C's 0.60, chosen over B's 0.75 - no diversified long-only book sustains a >0.6 Sharpe over 3-5y; half the 1.5 tactical cap encodes 'we believe our edge less the further out we look').",
+    "volatility_scaling": "Uncertainty cone widens as sigma_ann*sqrt(t_years), standard Brownian/GBM scaling (verified: sqrt(126/252)=0.707, sqrt(252/252)=1.0, sqrt(756/252)=1.732, sqrt(1260/252)=2.236). sigma_ann for long horizons = portfolio trailing-252d daily-return std * sqrt(252) (B/C's full-window vol, NOT the 60d short-horizon window - multi-year cones need a full-cycle vol estimate). REGIME WIDENING (merge of A's kappa schedule and B/C's data-driven bump): effective sigma_eff = sigma_252 * max(kappa_H, sigma_60/sigma_252), where kappa_H is the horizon-uncertainty floor {1.10 at 6M, 1.20 at 1Y, 1.35 at 3Y, 1.50 at 5Y, linear interp} (A's schedule, encoding that volatility is non-stationary and itself uncertain) and sigma_60/sigma_252 widens to the current regime if recent vol is elevated (C's 'currently stormy' flag). The cone is only ever WIDENED, never narrowed - the only safe direction for a risk manager to err. Additionally the OUTER bands (p05/p95) use sigma_eff*1.15 to acknowledge parameter uncertainty in sigma itself (B/C's 1.15x vol-of-vol haircut). Monte-Carlo uses CORRELATED holding shocks via Cholesky(Sigma_60) so genuine diversification correctly narrows the cone relative to summing standalone vols.",
+    "outputs": "Per long horizon: (1) terminal portfolio value bands p05/p25/p50/p75/p95 (existing band structure, on a $10,000 base, NAV multiples + %); (2) prob_positive = P(terminal>start); (3) prob_meets_mandate = P(annualized return over horizon >= mandate target), targets derived from the SAME CAPM anchor for consistency: pure_growth 6.5%, balanced 4.7%, income 3.1%, capital_preservation 2.5%, cd_alternative = cd_benchmark_yield (approx rf); (4) annualized CAGR band: (p_q_terminal/start)^(252/H)-1 for q in {05,25,50,75,95}, e.g. '5Y median 5.8%/yr, p05-p95 -2.1% to 13.4%/yr'; (5) max-drawdown-WITHIN-path distribution (median and p95 of worst intra-path drawdown) AND prob_breach_maxdd = share of paths whose path drawdown exceeds the mandate's max_drawdown_tolerance_pct (C's point - binding for preservation 8% and cd_alternative 4%). EVERY long panel carries the disclaimer 'Statistical projection, not a guarantee; bands widen with the square root of time and assume the trailing-vol regime persists' plus an explicit 'low confidence beyond available history' flag when H>available_history_days.",
+    "parameters": "rf / cd_benchmark = 0.02 (existing, configurable). ERP = 0.045 (below historical realized approx 5.5%). short-horizon drift Sharpe cap = 1.5 (existing, unchanged). long-horizon Sharpe cap = 0.60. shrinkage anchor weight lambda = clip(H/1260, 0, 0.8) {6M 0.10, 1Y 0.20, 3Y 0.60, 5Y 0.80}. kappa regime floor = {6M 1.10, 1Y 1.20, 3Y 1.35, 5Y 1.50}, taken as max with sigma_60/sigma_252. outer-band vol inflation = 1.15x. vol window: 60d short / 252d long. drift window: 252d historical. n_paths: 2000 for short horizons (existing forecast default, MC tail SE approx 1/sqrt(2000)=2.2%), RAISED to 4000 for LONG horizons (compromise between A's 2000 and C's 5000; SE approx 1.6%, and a 4000x1260 daily sim benchmarked at 48ms / 40MB - fully tractable). RNG seed = 12345 (matches forecast.py for reproducibility). horizon day-counts 126/252/756/1260. base value $10,000.",
+    "step_resolution": "H<=90 -> DAILY steps (existing per-day feature dynamics preserved). H>90 -> MONTHLY steps, count = round(H/21) (6M=6, 1Y=12, 3Y=36, 5Y=60 steps), with monthly drift = mu_LT/12 and monthly vol = sigma_eff/sqrt(12). VERIFIED EQUIVALENT: a 4000x60 monthly 5Y sim (2ms) reproduces the daily-sim terminal p05/p50/p95 within MC noise (monthly 60.7/118.1/224.4 vs daily 61.8/117.8/230.3), so monthly stepping is a pure performance win with zero statistical cost under GBM and keeps the path matrix <=4000x60. Terminal-value percentiles taken at the final step; intra-path drawdown computed on the monthly path. Only approx 120 evenly-spaced percentile-band points are serialized to the client (reuse backtest._downsample_index), not all 1260 days.",
+    "why_intentional": "Every constant traces to a defensible source, surfaced in a single CONFIG dict with an inline origin comment so NO number is magic: sqrt-time from Brownian motion (numerically verified); the 1.5 short / 0.60 long Sharpe caps are the engine's existing anti-extrapolation discipline halved-and-then-some for the long horizon (a sustained >0.6 Sharpe over 3-5y is historically rare for long-only books); lambda=clip(H/1260,0,0.8) formalizes Bayesian shrinkage / credibility - trust the long-run anchor more as horizon grows, never letting a noisy 1-day Ridge signal dominate a 5-year projection nor fully vanish; mu_anchor=rf+ERP*growth_orientation derives all five per-mandate priors from ONE CAPM formula (replacing five hardcoded constants), with rf reused from indicators and ERP intentionally below realized history; kappa + sigma_60/sigma_252 + 1.15x outer-band inflation all bias the cone toward MORE uncertainty, the only safe direction; n_paths 2000/4000 and seed 12345 inherit from the existing forecast for consistency."
+  },
+  "conviction_rationale": {
+    "component_templates": "Each of the four components emits ONE numbers-backed clause built from the raw/weight/contribution values signals.evaluate already computes, assembled in DESCENDING order of |contribution| (dominant driver leads - C's ordering). TREND: 'Trend {dir} (raw {trend_raw:+.2f}, base wt {0.30:.0%} -> effective {w_trend:.0%}, contrib {contrib_trend:+.2f}): SMA50 {above/below} SMA200, price {above/below} SMA50, MACD histogram {positive/negative}' (uses the existing _trend_score 0.5 golden/death-cross + 0.25 price-vs-SMA50 + 0.25 MACD-sign structure). MOMENTUM: 'Momentum {oversold/overbought/neutral} (RSI {rsi:.0f} vs 30/70 bands, raw {mom_raw:+.2f}, contrib {contrib_mom:+.2f})'. FORECAST: 'Model projects {exp_ret:+.1f}% over {H}d (p(up)={prob_up:.0%}, ann. drift {ann_drift:+.1f}% capped at Sharpe {1.5 short / 0.60 long}; raw {fc_raw:+.2f}, contrib {contrib_fc:+.2f}); OOS directional accuracy {dir_acc:.0%} on {n_test} days' - surfaces forecast.quality so conviction is tied to MEASURED out-of-sample skill, not just the point estimate. SENTIMENT: 'News {label} (aggregate {agg:+.2f} across {count} headlines; raw {sent_raw:+.2f}, contrib {contrib_sent:+.2f})'. Then a VOL-PENALTY clause when it bites: 'Conviction scaled x{vol_penalty:.2f} because annualized vol {vol:.0%} exceeds the 35% penalty threshold (floor 0.60 at vol>=70%)'. Then a MANDATE-FIT clause: 'Mandate {mandate}: target vol {tgt_vol:.0%} vs realized {vol:.0%} ({within/breach}); weights tilted from base {base} to effective {effective}'. For PORTFOLIOS prefix: 'This MODEL ({N} holdings, top weight {top_w:.0%} in {top_ticker})...' so the advisor knows it describes the blend.",
+    "intentional_parameters": "Every threshold is the SHIPPED codebase value, quoted in the rationale so none reads as magic, and GENERATED from a single CONFIG dict so text and math can never drift apart. ACTION bands BUY>+0.25 / SELL<-0.25 (signals._to_action) - quoted as 'score {score:+.2f} vs BUY line +0.25'; 0.25 means at least a quarter-of-full-scale weighted move, so a single component can't trigger a trade alone (trend at full 0.46 effective * 0.5 cross = 0.23 needs corroboration). conviction_pct = |score|*100 (signals.evaluate). Forecast saturation +/-5% over horizon (signals._forecast_score /5.0) - stated so a +12% forecast still caps the component at 1.0. RSI bands 30/70 (signals._momentum_score, Wilder's standard oversold/overbought lines), mid-range tilt x0.4. Vol-penalty clip(1-max(0,vol-0.35)*0.5, 0.6, 1.0) (signals.evaluate) - kicks in above 0.35 annualized vol, slope 0.5, floored at 0.60, so a 55% vol name keeps 0.6x and a 70%+ vol name hits the floor; EXPLAINED in words. Trend sub-weights 0.5 golden/death cross + 0.25 price-vs-SMA50 + 0.25 MACD-sign (signals._trend_score) - the cross gets double weight as the slower, more reliable regime signal. Base weights 0.30/0.20/0.30/0.20 (signals.WEIGHTS), MULTIPLIED/overridden by the mandate's signal_weight_adjustments (already normalized to sum 1.0 in the presets) - the rationale prints BOTH base and effective so the mandate's influence is auditable. MANDATE-FIT OVERLAY (C's addition): after weights apply, conviction is additionally scaled by mandate_fit in [0.5,1.0]: if the action would push projected vol above target_vol, fit = max(0.5, target_vol/projected_vol), and the rationale appends 'conviction reduced x{fit} - signal vol {vol:.0%} exceeds {mandate} target {tgt:.0%}'.",
+    "overall_format": "A structured conviction object: {action, score, conviction_pct, conviction_band, components:[{name, raw, base_weight, effective_weight, contribution, clause}], vol_penalty, mandate_fit, headline_rationale, caveats:[]}. headline_rationale reuses the existing signals._rationale verb map (BUY=Constructive / SELL=Cautious / HOLD=Balanced) + '({conviction_pct:.0f}% conviction, {band})' + the top-2 component clauses (by |contribution|) + the mandate-fit clause + any caveat. conviction_band buckets |score|*100: <20 'low', 20-45 'moderate', 45-70 'high', >70 'very high' - stated so a 30% conviction is never oversold. caveats AUTO-APPEND (the honesty layer, unanimous across designs) when: OOS directional accuracy <0.50 ('forecast shown but model has no measured edge - directional accuracy {dir_acc:.0%} <= coin-flip; treat the forecast contribution skeptically'); aligned history <252d; or data_honesty.simulated_weight_pct>0. The whole rationale is a DETERMINISTIC string assembled from the numbers - no LLM, fully offline, reproducible, unit-testable - so identical inputs always yield the identical explanation."
+  },
+  "insight_rules": [
+    {
+      "id": "conc_single_name",
+      "category": "concentration",
+      "trigger": "any normalized weight w_i > 0.35 (tightened to > 0.15 for capital_preservation and cd_alternative mandates)",
+      "severity": "high",
+      "message": "{sym} is {w:.0%} of the portfolio - above the {cap:.0%} single-name limit for a {mandate_label} mandate. Its marginal risk contribution is {mrc:.0%} of total portfolio volatility.",
+      "suggested_action": "Trim {sym} toward {cap:.0%} and redistribute into uncorrelated holdings, or document it as a deliberate concentrated single-name thesis that breaches the mandate's diversification norm.",
+      "rationale": "A >35% single weight means one issuer's idiosyncratic shock (earnings, fraud, downgrade) can breach the mandate's drawdown tolerance alone. 35% is the RIC-style regulatory diversification line (A/B); tightened to 15% for low-vol mandates because a preservation/CD book cannot absorb single-name blowup risk (C). Quotes MRC, not just weight, so the advisor trims the vol-driving name."
+    },
+    {
+      "id": "conc_hhi",
+      "category": "concentration",
+      "trigger": "HHI = sum(w_i^2) > 0.25 (N_eff = 1/HHI < 4), tightened to > 0.20 (N_eff < 5) for capital_preservation/cd_alternative, AND no single weight already flagged by conc_single_name",
+      "severity": "medium",
+      "message": "Portfolio behaves like only {N_eff:.1f} independent holdings (HHI {HHI:.2f}); diversification is thinner than the holding count suggests.",
+      "suggested_action": "Add 2-4 lowly-correlated positions (correlation <0.4) to lift N_eff above 4-5, where diversification benefit flattens; concentration this high makes drawdowns lumpy and the forecast cone understate tail risk.",
+      "rationale": "HHI 0.25 = four equal-weight names, the practical floor below which idiosyncratic single-name risk dominates; mirrors the antitrust 'highly concentrated' convention and the concentration_metric thresholds. Severity medium (not high) since no single name breaches the cap."
+    },
+    {
+      "id": "vol_above_mandate",
+      "category": "mandate-fit",
+      "trigger": "realized trailing-252d annualized vol > mandate.target_vol_pct/100 * 1.15 (15% tolerance band)",
+      "severity": "high",
+      "message": "Realized volatility {vol:.0%} exceeds the {mandate_label} target of {tgt:.0%} by more than 15% - this portfolio is running hotter than its stated mandate.",
+      "suggested_action": "Shift weight from the highest-vol sleeves toward lower-vol/income holdings (or add a cash/short-duration sleeve) until realized vol is within {tgt:.0%}, or re-rate the mandate to a tier whose risk budget matches. The mandate-fit module quantifies how much each holding must shrink.",
+      "rationale": "RECONCILIATION: A=1.15x, B/C=1.20x/1.15x tolerance -> 1.15x (the tighter, more protective band). The mandate's target_vol is a contract with the client; a 15% band avoids false alarms on noise while catching genuine drift. This is the single most common and most actionable finding on uploaded models."
+    },
+    {
+      "id": "drawdown_breaches_tolerance",
+      "category": "risk",
+      "trigger": "historical max_drawdown (indicators.max_drawdown on the NAV) worse than -mandate.max_drawdown_tolerance_pct, OR long-horizon MC prob_breach_maxdd over the 1Y horizon > 0.20, OR p05 terminal CAGR < 0",
+      "severity": "high",
+      "message": "Historical max drawdown {maxdd:.0%} breaches the {mandate_label} tolerance of {tol:.0%}, and {p_breach:.0%} of 1-year simulated paths breach it again. There is a {p_loss:.0%} chance of ending the {horizon} horizon below today's value.",
+      "suggested_action": "De-risk (reduce equity/high-beta, add a defensive sleeve) to bring projected drawdown within {tol:.0%}, or with the client formally re-rate the mandate. For CD/preservation mandates this is a HARD breach - the portfolio is not fit for purpose.",
+      "rationale": "Ties realized max-DD AND the long-horizon MC drawdown distribution to each mandate's max_drawdown_tolerance (merge of B's realized check and A/C's MC-path check). A >20% one-year breach probability is actionable, not hypothetical (C). Especially binding for cd_alternative (4%) and capital_preservation (8%) where principal protection is the whole point."
+    },
+    {
+      "id": "high_pairwise_correlation",
+      "category": "diversification",
+      "trigger": "mean off-diagonal correlation of the holding return matrix C > 0.70 (computed on the common-date intersection, >=60 rows)",
+      "severity": "medium",
+      "message": "Holdings move together: average pairwise correlation is {corr:.2f}. Diversification benefit is limited - the portfolio behaves like {N_eff_corr:.1f} independent bets.",
+      "suggested_action": "Add holdings from different sectors/asset classes (bonds, commodities, international) with correlation <0.4 to genuinely reduce vol.",
+      "rationale": "High correlation means nominal diversification (many names) overstates real diversification; 0.70 is where correlation-adjusted effective breadth collapses. Uses correlation matrix C from portfolio_construction. From Design A; B/C agree correlation-aware breadth matters."
+    },
+    {
+      "id": "no_forecast_edge",
+      "category": "signal",
+      "trigger": "forecast.quality.directional_accuracy is not None AND directional_accuracy <= 0.50 (escalate to a stronger warning when |forecast raw| >= 0.8 AND dir_acc < 0.52: a confident call on an unskilled model)",
+      "severity": "medium",
+      "message": "The return model shows no measured edge: out-of-sample directional accuracy is {dir_acc:.0%} on {n_test} days (coin-flip is 50%){', yet the forecast is leaning strongly' if strong_call}.",
+      "suggested_action": "Down-weight or ignore the forecast component for this portfolio; rely on trend, mandate-fit, and realized risk signals instead until OOS accuracy clears 55%. Disclose the weak forecast to the client rather than quoting the point estimate.",
+      "rationale": "Honesty requirement: the engine already computes walk-forward OOS metrics (forecast._evaluate, 70/30 split). A confident forecast on an unskilled model is worse than no forecast; <=0.50 is indistinguishable from a coin flip (A/B), and the 0.52+strong-call escalation is C's sharper test. The insight panel must say so rather than letting a meaningless forecast inflate conviction."
+    },
+    {
+      "id": "vol_penalty_active",
+      "category": "signal",
+      "trigger": "signals.evaluate vol_penalty < 0.85 (annualized vol > ~0.65); informational",
+      "severity": "info",
+      "message": "Conviction was reduced {pct_cut:.0f}% by the volatility penalty because realized vol is {vol:.0%} (penalty floor 0.60 at vol>=70%). The raw signal is stronger than the displayed conviction.",
+      "suggested_action": "If the high vol is expected for this asset class the penalty is doing its job; if not, investigate what is driving the volatility and size positions smaller, requiring trend+forecast agreement before acting.",
+      "rationale": "Explains WHY conviction looks muted so an advisor isn't confused by a strong-looking setup showing modest conviction - turns the opaque vol_penalty haircut into an honest talking point (B/C). Info severity: the tool still works, this is transparency."
+    },
+    {
+      "id": "income_yield_gap",
+      "category": "income",
+      "trigger": "mandate.income_orientation >= 0.40 AND estimated portfolio yield < income floor (cd_alternative/capital_preservation: < cd_benchmark_yield 0.02; income: < 0.035); yield estimated from holdings or flagged 'unknown' if absent",
+      "severity": "medium",
+      "message": "This is an income-oriented mandate ({mandate_label}) but estimated yield {yld:.1%} is below the {floor:.1%} income floor - it is taking risk without paying the income it promises.",
+      "suggested_action": "Add income-producing holdings (dividend equity, REIT, preferreds, bond funds) or document why total-return is being substituted for current yield. If yield data is unavailable, prompt the advisor to supply it.",
+      "rationale": "Gated on income_orientation>=0.40 so it never fires for growth mandates. Floor reconciliation: cd_alternative/preservation compare to the SAME cd_benchmark_yield used elsewhere (an income book under-yielding an actual CD fails its core purpose - C); income_seeking uses 0.035 (C). Only fires when yield is known, to stay honest about data gaps (A)."
+    },
+    {
+      "id": "growth_overdefensive",
+      "category": "mandate-fit",
+      "trigger": "mandate.growth_orientation >= 0.8 AND realized trailing-252d annualized vol < mandate.target_vol_pct/100 * 0.5",
+      "severity": "low",
+      "message": "Growth mandate but realized vol {vol:.0%} is less than half the {tgt:.0%} target - the portfolio may be under-risked for its objective, leaving expected return on the table.",
+      "suggested_action": "Consider adding higher-beta/growth holdings or reducing cash/bond ballast to align risk-taking with the growth objective.",
+      "rationale": "Mandate-fit cuts both ways: an over-risked preservation book is bad, but a massively under-risked growth book is also a mismatch. The 0.5x target-vol floor flags clear under-utilization without nagging on minor shortfalls. From Design A; the symmetric complement to vol_above_mandate."
+    },
+    {
+      "id": "mandate_label_mismatch",
+      "category": "mandate-fit",
+      "trigger": "mandate in {capital_preservation, cd_alternative} AND (growth-style sleeve weight > 0.30 OR realized annualized vol > 1.5x mandate.target_vol_pct)",
+      "severity": "high",
+      "message": "A {mandate_label} book is carrying {growth_w:.0%} growth-style risk and {vol_mult:.1f}x its target volatility - this is a growth book wearing a preservation/CD label.",
+      "suggested_action": "Rotate the growth sleeve into low-vol/income holdings, or correct the mandate with the client. Selling preservation while running growth risk is the costliest mis-classification.",
+      "rationale": "Mandate-label mismatch is the failure most likely to harm a client and trigger a complaint (C's FIT-001). Checked first and rated high regardless of recent performance, because a tail event - not the average - is what breaches a preservation client's trust."
+    },
+    {
+      "id": "simulated_data_warning",
+      "category": "risk",
+      "trigger": "data_provenance.simulated_weight_pct > 0",
+      "severity": "high",
+      "message": "{pct:.0%} of portfolio weight uses SIMULATED price history ({n_sim} of {n_total} holdings had no live/sample data). Forecasts and metrics for this portfolio are illustrative, not market-calibrated.",
+      "suggested_action": "Provide real price history (CSV upload or enable live data) for: {sim_syms}. Until then, treat every return/risk number as a structural illustration only.",
+      "rationale": "RECONCILIATION of severity: A/B treat simulated data as HIGH (it invalidates downstream calibration), C as info (the tool still works). Resolved to HIGH because presenting simulated bands as real in a client meeting is the exact honesty failure all three designs forbid - it must be loud and persistent, with the simulated weight quantified."
+    },
+    {
+      "id": "short_history_low_confidence",
+      "category": "risk",
+      "trigger": "common-date aligned history < 252 trading days; escalating: <252 = info, <126 = medium (and 3Y/5Y presets disabled per missing_history_policy)",
+      "severity": "info",
+      "message": "Portfolio common history is only {n_days} trading days (~{months:.0f} months), capped by {binding_ticker} (shortest history). Long-horizon (1Y+) projections extrapolate beyond the data; 3Y/5Y are disabled below 126 days.",
+      "suggested_action": "Supply longer price history for {binding_ticker} (or substitute a longer-history proxy) before relying on 1Y/3Y/5Y projections. Short-horizon (<=90d) signals remain usable.",
+      "rationale": "Annualized vol/return and the long-horizon cone need enough data to be stable; 252 days = 1 year is the minimum for credible annualization, 126 the floor below which even that is shaky (all three designs). Names the binding ticker (B) so the advisor knows exactly what to fix. Matches missing_history_policy's escalation and hard 3Y/5Y disable."
+    }
+  ]
+}

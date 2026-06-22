@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Helios · Investment-Model Analytics</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">◢◤</span>
+      <div>
+        <h1>Helios</h1>
+        <p>Investment-Model Analytics &amp; Trade-Signal Engine</p>
+      </div>
+    </div>
+    <div class="status">
+      <span id="dataMode" class="badge badge-muted">offline · sample data</span>
+      <span class="disclaimer">Analysis only — not investment advice or order execution</span>
+    </div>
+  </header>
+
+  <div class="layout">
+    <!-- Sidebar ------------------------------------------------------------ -->
+    <aside class="sidebar">
+      <section class="panel">
+        <h2>Client models</h2>
+        <ul id="modelList" class="ticker-list"></ul>
+        <p class="hint" id="noModels">No models yet — import one below.</p>
+      </section>
+
+      <section class="panel">
+        <h2>Import model (Excel / CSV)</h2>
+        <input type="file" id="modelFile" accept=".xlsx,.xlsm,.csv,.tsv" />
+        <input type="text" id="modelName" placeholder="Model name (e.g. Smith IRA)" style="margin-top:8px" />
+        <select id="modelMandate" style="margin-top:8px"></select>
+        <textarea id="modelContext" rows="2" placeholder="What is this model for? (e.g. retiree income, CD alternative…)" style="margin-top:8px"></textarea>
+        <button id="modelUploadBtn" class="btn" style="margin-top:8px; width:100%">Analyze model</button>
+        <p class="hint">File needs a <b>Ticker</b> column and (optionally) a <b>Weight</b> column.</p>
+      </section>
+
+      <section class="panel">
+        <h2>Forecast horizon</h2>
+        <input type="range" id="horizon" min="5" max="90" value="21" step="1" />
+        <div class="horizon-label"><span id="horizonVal">21</span> trading days <span class="subtle">(tactical signal)</span></div>
+        <div class="horizon-presets" id="horizonPresets">
+          <button data-h="6M" class="hbtn">6M</button>
+          <button data-h="1Y" class="hbtn">1Y</button>
+          <button data-h="3Y" class="hbtn">3Y</button>
+          <button data-h="5Y" class="hbtn">5Y</button>
+        </div>
+        <p class="hint">Presets give a multi-year <b>strategic projection</b> (models only).</p>
+      </section>
+
+      <section class="panel">
+        <h2>Single instruments</h2>
+        <ul id="tickerList" class="ticker-list"></ul>
+      </section>
+
+      <section class="panel" id="livePanel" hidden>
+        <h2>Live market data</h2>
+        <div class="field-row">
+          <input type="text" id="liveSymbol" placeholder="e.g. GOOG" />
+          <button id="liveBtn" class="btn">Fetch</button>
+        </div>
+        <p class="hint">Pulls history + free news headlines via yfinance.</p>
+      </section>
+
+      <section class="panel">
+        <h2>Import price series (CSV)</h2>
+        <input type="file" id="csvFile" accept=".csv" />
+        <div class="field-row">
+          <input type="text" id="csvSymbol" placeholder="Symbol/label" />
+          <button id="uploadBtn" class="btn">Upload</button>
+        </div>
+        <p class="hint">CSV with a Date column and a Close/Price/NAV column.</p>
+      </section>
+    </aside>
+
+    <!-- Main --------------------------------------------------------------- -->
+    <main class="content">
+      <div id="loading" class="loading">Loading analytics…</div>
+      <div id="dashboard" hidden>
+        <div class="content-head">
+          <div>
+            <h2 id="instName">—</h2>
+            <span id="instMeta" class="subtle"></span>
+            <div id="mandateRow" class="mandate-row" hidden>
+              <span id="mandateBadge" class="badge"></span>
+              <span id="modelContextText" class="subtle"></span>
+            </div>
+          </div>
+          <span id="horizonTag" class="badge badge-muted" hidden></span>
+        </div>
+
+        <!-- Data provenance banner (model only) -->
+        <div id="provenanceBanner" class="banner" hidden></div>
+
+        <!-- Signal hero + metrics -->
+        <div class="hero-grid">
+          <div id="signalCard" class="card signal-card">
+            <div class="signal-action" id="signalAction">—</div>
+            <div class="gauge"><div class="gauge-fill" id="gaugeFill"></div></div>
+            <div class="conviction"><span id="convictionVal">0</span>% conviction
+              <span id="convictionBand" class="subtle"></span></div>
+            <p class="rationale" id="rationale"></p>
+            <ul id="caveats" class="caveats"></ul>
+          </div>
+          <div class="metrics-grid" id="metricsGrid"></div>
+        </div>
+
+        <!-- Mandate fit (model only) -->
+        <div class="card" id="mandatePanel" hidden>
+          <div class="card-head"><h3>Mandate fit</h3>
+            <span id="mandateFitNote" class="legend-note"></span></div>
+          <div id="mandateFit" class="mandate-fit"></div>
+        </div>
+
+        <!-- Holdings (model only) -->
+        <div class="card" id="holdingsPanel" hidden>
+          <div class="card-head"><h3>Holdings</h3>
+            <span id="concNote" class="legend-note"></span></div>
+          <div class="table-wrap"><table class="holdings">
+            <thead><tr><th>Ticker</th><th>Weight</th><th>Source</th>
+              <th>Window&nbsp;return</th><th>Risk&nbsp;contrib</th><th>Signal</th></tr></thead>
+            <tbody id="holdingsBody"></tbody></table></div>
+        </div>
+
+        <!-- Insights (model only) -->
+        <div class="card" id="insightsPanel" hidden>
+          <div class="card-head"><h3>Insights &amp; suggestions</h3>
+            <span id="insightsCount" class="legend-note"></span></div>
+          <div id="insightsList" class="insights"></div>
+        </div>
+
+        <!-- Price chart -->
+        <div class="card">
+          <div class="card-head"><h3 id="priceTitle">Price, trend &amp; signal markers</h3>
+            <span class="legend-note">SMA50 / SMA200 · Bollinger band · ▲ buy ▼ sell</span></div>
+          <canvas id="priceChart" height="110"></canvas>
+        </div>
+
+        <!-- Forecast chart -->
+        <div class="card">
+          <div class="card-head"><h3 id="forecastTitle">Return forecast &amp; confidence cone</h3>
+            <span id="forecastNote" class="legend-note"></span></div>
+          <canvas id="forecastChart" height="100"></canvas>
+          <div class="forecast-stats" id="forecastStats"></div>
+          <p id="forecastDisclaimer" class="hint" hidden></p>
+        </div>
+
+        <!-- Oscillators -->
+        <div class="two-col">
+          <div class="card"><div class="card-head"><h3>RSI (14)</h3></div>
+            <canvas id="rsiChart" height="80"></canvas></div>
+          <div class="card"><div class="card-head"><h3>MACD</h3></div>
+            <canvas id="macdChart" height="80"></canvas></div>
+        </div>
+
+        <!-- Signal breakdown + news -->
+        <div class="two-col">
+          <div class="card"><div class="card-head"><h3>Signal breakdown</h3>
+            <span class="legend-note">effective (mandate-tilted) weights</span></div>
+            <div id="breakdown" class="breakdown"></div>
+            <div id="componentClauses" class="clauses"></div>
+            <div id="featuresWrap"><div class="card-head"><h3>Model feature weights</h3></div>
+              <div id="features" class="features"></div></div>
+          </div>
+          <div class="card" id="newsCard"><div class="card-head"><h3>News &amp; sentiment</h3>
+            <span id="sentBadge" class="badge"></span></div>
+            <ul id="newsList" class="news-list"></ul>
+          </div>
+        </div>
+
+        <!-- Backtest -->
+        <div class="card">
+          <div class="card-head"><h3>Tactical-signal backtest vs buy &amp; hold</h3>
+            <span class="legend-note">Long when signal is active, else cash · 5bps cost</span></div>
+          <canvas id="backtestChart" height="90"></canvas>
+          <div class="backtest-stats" id="backtestStats"></div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
