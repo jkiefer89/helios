@@ -239,7 +239,6 @@ def build_series(model: Model, base: float = 100.0, min_days: int = 200) -> Port
     and data provenance are computed from the same return matrix.
     """
     closes, warnings = {}, []
-    last_starts = {}
     deadline = time.monotonic() + _RESOLVE_TIME_BUDGET_S
     live_used = 0
     for h in model.holdings:
@@ -251,67 +250,141 @@ def build_series(model: Model, base: float = 100.0, min_days: int = 200) -> Port
             live_used += 1
         h.source = ps.source
         closes[h.ticker] = ps.close
-        last_starts[h.ticker] = ps.close.index.min()
 
     order = [h.ticker for h in model.holdings]
-    rets = pd.DataFrame({tk: closes[tk].pct_change() for tk in order})
-    rets = rets.dropna(how="any")  # common window where every holding has data
-    if rets.empty:
-        raise ValueError("Holdings have no overlapping price history to combine.")
-    if len(rets) < min_days:
-        warnings.append(
-            f"Only {len(rets)} overlapping sessions across holdings; metrics use this shorter window."
-        )
-    binding = max(last_starts, key=lambda t: last_starts[t]) if last_starts else ""
+    weights0 = {h.ticker: h.weight for h in model.holdings}
+    src_by = {h.ticker: h.source for h in model.holdings}
 
-    w = np.array([h.weight for h in model.holdings], dtype=float)
-    w = w / w.sum() if w.sum() > 0 else np.full(len(w), 1.0 / len(w))
-    port_ret = (rets[order] * w).sum(axis=1)
+    # Resilient alignment: drop holdings with too little / non-overlapping history
+    # (redistributing their weight) instead of letting one bad ticker wipe the join.
+    common, keep, dropped, kw, daily = _align_returns(closes, order, weights0, min_overlap=60)
+    dropped_map = dict(dropped)
+
+    R = pd.DataFrame({tk: daily[tk].pct_change() for tk in keep}).reindex(common).dropna(how="any")
+    w = np.array([kw[tk] for tk in keep], dtype=float)
+    port_ret = (R[keep] * w).sum(axis=1)
     nav = base * (1 + port_ret).cumprod()
 
-    # Risk decomposition from the annualized covariance.
-    sigma = rets[order].cov().to_numpy() * 252.0
-    port_var = float(w @ sigma @ w)
-    if port_var > 1e-12:
-        mrc = w * (sigma @ w) / port_var          # marginal risk contributions, sum=1
-    else:
-        mrc = np.full(len(w), 1.0 / len(w))
-    corr = rets[order].corr().to_numpy()
-    n = len(order)
-    corr_mean = float((corr.sum() - n) / (n * (n - 1))) if n > 1 else 1.0
-    hhi = float(np.sum(w**2))
-    n_eff = float(1.0 / hhi) if hhi > 0 else float(n)
+    if len(R) < min_days:
+        warnings.append(f"Only {len(R)} overlapping sessions; metrics use this shorter window.")
+    if dropped:
+        dw = sum(weights0[tk] for tk, _ in dropped)
+        warnings.append(
+            f"Excluded {len(dropped)} holding(s) ({dw * 100:.0f}% of weight) with unusable price "
+            "history — " + "; ".join(f"{tk} ({why})" for tk, why in dropped)
+            + ". Remaining weights were rescaled to 100%.")
 
-    win_ret = closes_window_return(closes, rets.index)
+    binding = max(keep, key=lambda tk: daily[tk].index.min()) if keep else ""
+
+    # Risk decomposition on the kept holdings (annualized covariance).
+    sigma = R[keep].cov().to_numpy() * 252.0
+    port_var = float(w @ sigma @ w)
+    mrc = w * (sigma @ w) / port_var if port_var > 1e-12 else np.full(len(w), 1.0 / len(w))
+    mrc_map = dict(zip(keep, mrc))
+    corr = R[keep].corr().to_numpy()
+    nk = len(keep)
+    corr_mean = float((corr.sum() - nk) / (nk * (nk - 1))) if nk > 1 else 1.0
+    hhi = float(np.sum(w**2))
+    n_eff = float(1.0 / hhi) if hhi > 0 else float(nk)
+
+    win_ret = closes_window_return({tk: daily[tk] for tk in keep}, R.index)
     holdings_out = []
-    for idx, h in enumerate(model.holdings):
+    for h in model.holdings:
+        excluded = h.ticker in dropped_map
         holdings_out.append({
             "ticker": h.ticker,
-            "weight": h.weight,
-            "source": h.source,
+            "weight": h.weight,                       # original uploaded weight
+            "source": "excluded" if excluded else h.source,
             "window_return_pct": win_ret.get(h.ticker, 0.0) * 100,
-            "mrc_pct": float(mrc[idx]) * 100,
+            "mrc_pct": None if excluded else float(mrc_map.get(h.ticker, 0.0)) * 100,
+            "excluded": excluded,
+            "note": dropped_map.get(h.ticker, ""),
         })
 
+    # Provenance over the KEPT (analyzed) holdings.
     sources: dict = {}
     sim_weight = 0.0
-    for h in model.holdings:
-        sources[h.source] = sources.get(h.source, 0) + 1
-        if h.source == "simulated":
-            sim_weight += h.weight
+    sim_syms = []
+    for tk in keep:
+        s = src_by[tk]
+        sources[s] = sources.get(s, 0) + 1
+        if s == "simulated":
+            sim_weight += kw[tk]
+            sim_syms.append(tk)
     provenance = {
         "n_holdings": len(model.holdings),
+        "n_kept": len(keep),
+        "n_excluded": len(dropped),
+        "excluded": [{"ticker": tk, "reason": why} for tk, why in dropped],
         "n_live": sources.get("live", 0),
         "n_sample": sources.get("sample", 0),
         "n_simulated": sources.get("simulated", 0),
         "simulated_weight_pct": round(sim_weight * 100, 1),
-        "simulated_symbols": [h.ticker for h in model.holdings if h.source == "simulated"],
+        "simulated_symbols": sim_syms,
         "honesty": "real" if sim_weight == 0 else "simulated" if sim_weight >= 0.999 else "mixed",
     }
 
     return PortfolioSeries(close=nav, holdings=holdings_out, n_days=len(nav),
                            sources=sources, warnings=warnings, hhi=hhi, n_eff=n_eff,
                            corr_mean=corr_mean, binding_ticker=binding, provenance=provenance)
+
+
+def _to_daily(s: pd.Series) -> pd.Series:
+    """Normalize a price series to one row per calendar date (dedup, sorted)."""
+    s = s.dropna()
+    s.index = pd.to_datetime(s.index).normalize()
+    return s[~s.index.duplicated(keep="last")].sort_index()
+
+
+def _align_returns(closes: dict, order: list, weights: dict, min_overlap: int = 60):
+    """Find a shared return window across holdings.
+
+    Holdings with fewer than `min_overlap` days, or whose history doesn't overlap
+    the rest, are dropped and their weight redistributed — so one bad ticker can't
+    collapse the whole portfolio. Raises ValueError naming the culprits only when a
+    usable window genuinely can't be formed (or >30% of weight would be dropped).
+
+    Returns (common_index, kept, dropped[(ticker, reason)], kept_weights, daily_closes).
+    """
+    daily = {tk: _to_daily(closes[tk]) for tk in order}
+    rets = {tk: daily[tk].pct_change().dropna() for tk in order}
+
+    dropped: list = []
+    keep = list(order)
+    for tk in list(keep):                       # individually too short to annualize
+        if len(rets[tk]) < min_overlap:
+            dropped.append((tk, f"only {len(rets[tk])} days of price history"))
+            keep.remove(tk)
+
+    def common(keys):
+        idx = None
+        for tk in keys:
+            idx = rets[tk].index if idx is None else idx.intersection(rets[tk].index)
+        return idx if idx is not None else pd.DatetimeIndex([])
+
+    cur = common(keep)
+    while len(keep) > 1 and len(cur) < min_overlap:   # drop the worst window-breaker
+        best_tk, best_len = None, len(cur)
+        for tk in keep:
+            c = common([k for k in keep if k != tk])
+            if len(c) > best_len:
+                best_len, best_tk = len(c), tk
+        if best_tk is None:
+            break
+        dropped.append((best_tk, "price history doesn't overlap the other holdings"))
+        keep.remove(best_tk)
+        cur = common(keep)
+
+    dropped_weight = sum(weights.get(tk, 0.0) for tk, _ in dropped)
+    if len(keep) < 1 or len(cur) < min_overlap or dropped_weight > 0.30:
+        names = "; ".join(f"{tk} — {why}" for tk, why in dropped) or "the holdings"
+        raise ValueError(
+            "Couldn't assemble a shared price history across the holdings. "
+            f"Problem holding(s): {names}. Remove them or supply longer history, then retry."
+        )
+    w = np.array([weights[tk] for tk in keep], dtype=float)
+    w = w / w.sum() if w.sum() > 0 else np.full(len(w), 1.0 / len(w))
+    return cur, keep, dropped, dict(zip(keep, w)), daily
 
 
 def closes_window_return(closes: dict, index) -> dict:

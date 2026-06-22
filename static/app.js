@@ -489,12 +489,20 @@ function setPresetsAvailability(avail) {
 
 function renderProvenance(p) {
   const el = document.getElementById("provenanceBanner");
-  if (!p || !p.simulated_weight_pct) { el.hidden = true; return; }
+  const parts = [];
+  if (p && p.n_excluded > 0) {
+    const ex = (p.excluded || []).map((e) => `${esc(e.ticker)} (${esc(e.reason)})`).join(", ");
+    parts.push(`<div>⛔ <b>${p.n_excluded} holding(s) excluded</b> — no usable overlapping price history: ${ex}.
+      Weights were rescaled; the analysis covers the remaining ${p.n_kept}.</div>`);
+  }
+  if (p && p.simulated_weight_pct) {
+    parts.push(`<div>⚠ <b>${p.simulated_weight_pct}% of (analyzed) weight uses simulated price history</b>
+      (${esc((p.simulated_symbols || []).join(", "))}). Forecasts are illustrative, not market-calibrated.</div>`);
+  }
+  if (!parts.length) { el.hidden = true; return; }
   el.hidden = false;
   el.className = "banner amber";
-  el.innerHTML = `⚠ <b>${p.simulated_weight_pct}% of portfolio weight uses simulated price history</b>
-    (${p.n_simulated} of ${p.n_holdings} holdings had no live/sample data: ${esc((p.simulated_symbols || []).join(", "))}).
-    Forecasts and metrics are illustrative, not market-calibrated.`;
+  el.innerHTML = parts.join("");
 }
 
 function renderMetricsModel(m, mn) {
@@ -544,13 +552,13 @@ function renderHoldings(holdings, conc, mn) {
   document.getElementById("concNote").textContent =
     `HHI ${conc.hhi.toFixed(2)} · ${conc.n_eff.toFixed(1)} effective holdings · avg corr ${conc.corr_mean.toFixed(2)}`;
   document.getElementById("holdingsBody").innerHTML = holdings
-    .map((h) => `<tr>
-      <td class="tk">${esc(h.ticker)}</td>
+    .map((h) => `<tr class="${h.excluded ? "excluded" : ""}">
+      <td class="tk">${esc(h.ticker)}${h.excluded && h.note ? `<span class="reason">${esc(h.note)}</span>` : ""}</td>
       <td>${(h.weight * 100).toFixed(1)}%</td>
-      <td><span class="src-tag src-${h.source}">${h.source}</span></td>
-      <td class="${h.window_return_pct >= 0 ? "up" : "down"}">${FMT.pct(h.window_return_pct)}</td>
+      <td><span class="src-tag src-${esc(h.source)}">${esc(h.source)}</span></td>
+      <td class="${h.window_return_pct >= 0 ? "up" : "down"}">${h.excluded ? "—" : FMT.pct(h.window_return_pct)}</td>
       <td>${h.mrc_pct != null ? h.mrc_pct.toFixed(0) + "%" : "—"}</td>
-      <td><span class="sig-tag sig-${h.signal}">${h.signal}</span></td></tr>`)
+      <td>${h.excluded ? "—" : `<span class="sig-tag sig-${esc(h.signal)}">${esc(h.signal)}</span>`}</td></tr>`)
     .join("");
 }
 

@@ -235,6 +235,9 @@ table.holdings .tk { font-weight: 700; }
 .src-sample { color: var(--muted); background: var(--panel-2); }
 .src-live { color: var(--buy); background: rgba(34,201,138,0.12); }
 .src-simulated { color: var(--hold); background: rgba(233,185,73,0.14); }
+.src-excluded { color: var(--sell); background: rgba(240,86,109,0.12); }
+tr.excluded td { opacity: 0.55; }
+tr.excluded .reason { font-size: 10px; color: var(--sell); display: block; }
 .sig-tag { font-size: 10px; font-weight: 700; padding: 1px 8px; border-radius: 999px; }
 .sig-BUY { color: var(--buy); background: rgba(34,201,138,0.12); }
 .sig-SELL { color: var(--sell); background: rgba(240,86,109,0.12); }
