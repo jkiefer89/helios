@@ -24,9 +24,29 @@ from pathlib import Path
 
 import app as helios
 
-HOST = os.environ.get("HELIOS_HOST", "0.0.0.0")
-PORT = int(os.environ.get("HELIOS_PORT", "5000"))
-TLS = os.environ.get("HELIOS_TLS", "0") == "1"
+def parse_port(value: str | None = None) -> int:
+    raw = os.environ.get("HELIOS_PORT", "5000") if value is None else value
+    try:
+        port = int(raw)
+    except (TypeError, ValueError):
+        raise SystemExit("HELIOS_PORT must be an integer between 1 and 65535.")
+    if not 1 <= port <= 65535:
+        raise SystemExit("HELIOS_PORT must be an integer between 1 and 65535.")
+    return port
+
+
+def parse_bool_env(name: str, default: str = "0") -> bool:
+    raw = os.environ.get(name, default).strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    raise SystemExit(f"{name} must be 0/1, true/false, yes/no, or on/off.")
+
+
+HOST = os.environ.get("HELIOS_HOST", "0.0.0.0") or "0.0.0.0"
+PORT = parse_port()
+TLS = parse_bool_env("HELIOS_TLS", "0")
 
 CERT_DIR = Path(__file__).resolve().parent / "certs"
 CERT = CERT_DIR / "helios-cert.pem"

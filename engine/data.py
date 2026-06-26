@@ -11,6 +11,7 @@ column; 'open'/'high'/'low'/'volume' are included when known.
 from __future__ import annotations
 
 import io
+import hashlib
 import re
 import threading
 from dataclasses import dataclass, field
@@ -299,8 +300,9 @@ class PriceSeries:
 
 
 def _ticker_seed(ticker: str) -> int:
-    # Deterministic per-ticker seed (stable across runs; no RNG-at-import).
-    return abs(hash(("helios", ticker))) % (2**31)
+    # Deterministic per-ticker seed (stable across processes; no RNG-at-import).
+    digest = hashlib.sha256(f"helios:{clean_symbol(ticker, fallback='')}".encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") % (2**31)
 
 
 def _simulate_for_ticker(ticker: str) -> pd.Series:

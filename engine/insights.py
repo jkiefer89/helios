@@ -150,11 +150,13 @@ def generate(model, ps, metrics: dict, sig: dict,
         sev = "info" if ps.n_days >= 126 else "medium"
         months = ps.n_days / 21.0
         add("short_history_low_confidence", "risk", sev,
-            f"Portfolio common history is only {ps.n_days} trading days (~{months:.0f} months), capped by "
-            f"{ps.binding_ticker} (shortest history). Long-horizon (1Y+) projections extrapolate beyond the data.",
-            f"Supply longer price history for {ps.binding_ticker} (or a longer-history proxy) before relying on "
+            f"Portfolio analyzed history is only {ps.n_days} trading days (~{months:.0f} months). Mixed-history "
+            "holdings are weight-rescaled over their available dates, so long-horizon projections extrapolate "
+            "beyond some observed data.",
+            f"Supply longer price history for {ps.binding_ticker or 'the shortest-history holding'} "
+            f"(or a longer-history proxy) before relying on "
             f"multi-year projections. Short-horizon (≤90d) signals remain usable.",
-            "≥252 aligned days (1y) is the floor for trustworthy annualization.")
+            "≥252 analyzed days (1y) is the floor for more trustworthy annualization.")
 
     sev_rank = {"high": 0, "medium": 1, "low": 2, "info": 3}
     out.sort(key=lambda d: sev_rank.get(d["severity"], 9))

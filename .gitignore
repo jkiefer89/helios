@@ -3,6 +3,14 @@ __pycache__/
 *.pyc
 certs/
 .DS_Store
+.env
+.env.*
+!.env.example
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+logs/
 
 # Client data (kept local, never published)
 *.numbers

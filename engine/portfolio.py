@@ -75,7 +75,7 @@ def register(model: Model) -> None:
 # --------------------------------------------------------------------------- #
 # Parsing an uploaded model file
 # --------------------------------------------------------------------------- #
-_TICKER_ALIASES = ("ticker", "symbol", "security", "holding", "asset", "fund", "stock", "name")
+_TICKER_ALIASES = ("ticker", "symbol", "security", "holding", "asset", "fund", "stock")
 _WEIGHT_ALIASES = ("weight", "weighting", "allocation", "alloc", "percent", "percentage",
                    "%", "target", "target weight", "pct", "wt")
 _ID_RE = re.compile(r"[^A-Z0-9]+")
@@ -124,7 +124,7 @@ def _read_table(raw: bytes, filename: str) -> pd.DataFrame:
     is_zip = raw[:4] == b"PK\x03\x04"
     if name.endswith((".xlsx", ".xlsm")) or (is_zip and not name.endswith((".csv", ".txt", ".tsv"))):
         return _read_xlsx(raw)
-    sep = "\t" if name.endswith(".tsv") else None
+    sep = "\t" if name.endswith(".tsv") else ","
     return pd.read_csv(io.BytesIO(raw), sep=sep, engine="python", nrows=MAX_HOLDINGS + 5)
 
 
@@ -216,7 +216,7 @@ def parse_model_file(raw: bytes, filename: str, name: str,
 # --------------------------------------------------------------------------- #
 @dataclass
 class PortfolioSeries:
-    close: pd.Series        # portfolio NAV (base 100) over the common window
+    close: pd.Series        # portfolio NAV (base 100) over the union/rescaled analysis window
     holdings: list          # list[dict]: ticker, weight, source, window_return_pct, mrc
     n_days: int
     sources: dict           # count of holdings by data source
@@ -224,21 +224,24 @@ class PortfolioSeries:
     hhi: float = 0.0        # Herfindahl concentration index
     n_eff: float = 0.0      # effective number of holdings = 1/HHI
     corr_mean: float = 0.0  # mean off-diagonal pairwise correlation
-    binding_ticker: str = ""  # holding with the shortest history (truncates the window)
+    binding_ticker: str = ""  # shortest-history holding, used for guidance only
     provenance: dict = field(default_factory=dict)  # data-source honesty block
 
 
 def build_series(model: Model, base: float = 100.0, min_days: int = 200) -> PortfolioSeries:
-    """Construct a fixed-weight (daily-rebalanced) portfolio NAV from holdings.
+    """Construct a weight-rescaled portfolio NAV from holdings.
 
-    Each holding's close is resolved (live/sample/simulated), aligned on the
-    common date window, and combined as a weight-weighted sum of daily returns.
-    The NAV behaves like any single-instrument close series, so the existing
-    indicator / forecast / signal / backtest engine runs on it unchanged. Risk
-    decomposition (HHI, effective N, marginal risk contributions, correlation)
-    and data provenance are computed from the same return matrix.
+    Each holding's close is resolved (live/sample/simulated), then daily returns
+    are outer-joined on the union of available dates. On any given day the target
+    weights are rescaled across holdings with data for that day. This is a
+    forward-analysis basis for mixed-history models, not a performance track
+    record. The NAV behaves like any single-instrument close series, so the
+    existing indicator / forecast / signal / backtest engine runs on it
+    unchanged. Risk decomposition and data provenance are computed from the same
+    return matrix.
     """
     closes, warnings = {}, []
+    src_by = {}
     deadline = time.monotonic() + _RESOLVE_TIME_BUDGET_S
     live_used = 0
     for h in model.holdings:
@@ -248,12 +251,11 @@ def build_series(model: Model, base: float = 100.0, min_days: int = 200) -> Port
         ps = data.resolve_series(h.ticker, allow_live=allow_live)
         if ps.source == "live":
             live_used += 1
-        h.source = ps.source
+        src_by[h.ticker] = ps.source
         closes[h.ticker] = ps.close
 
     order = [h.ticker for h in model.holdings]
     weights0 = {h.ticker: h.weight for h in model.holdings}
-    src_by = {h.ticker: h.source for h in model.holdings}
     daily = {tk: _to_daily(closes[tk]) for tk in order}
 
     # Per-holding daily returns aligned on the UNION of dates (outer join). No
@@ -316,7 +318,7 @@ def build_series(model: Model, base: float = 100.0, min_days: int = 200) -> Port
         holdings_out.append({
             "ticker": h.ticker,
             "weight": h.weight,
-            "source": "excluded" if ex else h.source,
+            "source": "excluded" if ex else src_by.get(h.ticker, "unknown"),
             "window_return_pct": 0.0 if ex else wret,
             "mrc_pct": None if ex else float(mrc_map.get(h.ticker, 0.0)) * 100,
             "excluded": ex,
@@ -356,5 +358,3 @@ def _to_daily(s: pd.Series) -> pd.Series:
     s = s.dropna()
     s.index = pd.to_datetime(s.index).normalize()
     return s[~s.index.duplicated(keep="last")].sort_index()
-
-

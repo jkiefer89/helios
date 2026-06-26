@@ -29,7 +29,9 @@ bound to all interfaces) behind a password gate. It prints something like:
 ```
 
 Open the **LAN URL** on any device on the same Wi-Fi/office network and log in.
-The first run creates the virtualenv and installs dependencies.
+The first run creates the virtualenv and installs dependencies, including
+`openpyxl` for Excel model uploads. `yfinance` is installed for optional live
+data, but the app remains fully usable offline with bundled sample data.
 
 ### Going live on your network
 
@@ -41,6 +43,7 @@ The first run creates the virtualenv and installs dependencies.
 | `HELIOS_HOST` | `0.0.0.0` | Bind address (`127.0.0.1` = localhost only) |
 | `HELIOS_TLS` | `0` | `1` serves self-signed **HTTPS** (encrypts the login) |
 | `HELIOS_AUTH` | `1` | `0` disables the password gate (localhost dev only) |
+| `HELIOS_RF` | `0.02` | Risk-free / CD benchmark rate used by mandates and projections |
 
 ```bash
 HELIOS_USER=jkiefer HELIOS_PASSWORD='choose-a-strong-one' ./run.sh
@@ -76,11 +79,13 @@ SPY, BTC-USD) so it works **fully offline** out of the box.
 
 ### Importing a client model (portfolio)
 
-Upload an **Excel (`.xlsx`) or CSV** with a **Ticker** column and (optionally) a
-**Weight** column, pick a **mandate**, and add free-text context. Weights given as
-percentages (summing ~100) or fractions (summing ~1) are both accepted; duplicate
-tickers are merged; missing weights become equal weight. Prices for each holding are
-resolved live (yfinance) → sample → deterministic simulation, with the source flagged.
+Upload an **Excel (`.xlsx` / `.xlsm`) or CSV/TSV** with a **Ticker** column and
+(optionally) a **Weight** column, pick a **mandate**, and add free-text context.
+Weights given as percentages (summing ~100) or fractions (summing ~1) are both
+accepted; duplicate tickers are merged; missing weights become equal weight.
+Prices for each holding are resolved from samples/uploads/cache, then live
+`yfinance` when available, then deterministic simulation, with every source
+flagged.
 
 ```csv
 Ticker,Weight
@@ -144,6 +149,21 @@ static/styles.css     dark dashboard theme
 
 ---
 
+## Developer verification
+
+```bash
+./.venv/bin/python -m pip install -r requirements-dev.txt
+./.venv/bin/python -m pytest
+./.venv/bin/python -m compileall app.py serve.py engine tests
+```
+
+The test suite is offline-only: it exercises deterministic sample/upload data,
+portfolio parsing/NAV construction, indicator/sign/forecast output shapes,
+sentiment scoring, Flask JSON API smoke paths, and startup env validation. CI
+runs the same checks on push and pull request.
+
+---
+
 ## Security
 
 Going live on a network was reviewed adversarially; the following safeguards are
@@ -158,6 +178,9 @@ built in:
   names, news headlines) are HTML-escaped before display; a strict
   Content-Security-Policy (`script-src 'self'` + the Chart.js CDN) is the second
   layer.
+- **CSP tradeoff** — `style-src 'unsafe-inline'` remains because the current
+  single-file UI uses a few inline styles and dynamic bar widths. It is scoped to
+  styles only; scripts remain self/CDN restricted.
 - **Input sanitization** — ticker symbols are constrained to valid characters
   (closes injection / SSRF surface); request bodies are capped at 16 MB and CSV
   parsing is row-bounded.
@@ -168,8 +191,9 @@ built in:
   `X-Frame-Options`, `Referrer-Policy`) are set and internal errors are not
   echoed to clients.
 
-**Residual notes:** the instrument store is *shared* across all logged-in users
-(a shared advisor view, by design — not multi-tenant). The self-signed TLS cert
+**Residual notes:** uploaded instruments and portfolio models are process-local:
+they are shared within the running app process and disappear on restart. This is
+a shared advisor view, not a multi-tenant system. The self-signed TLS cert
 triggers a one-time browser warning; delete `certs/` to regenerate it (e.g.
 after your LAN IP changes). On an untrusted network, prefer `HELIOS_TLS=1` or
 bind to `127.0.0.1` and reach it over an SSH tunnel.
@@ -194,8 +218,12 @@ bind to `127.0.0.1` and reach it over an SSH tunnel.
   (`λ = clip(H/1260, 0, 0.8)`), the cone widens with √time plus a regime cushion,
   and the implied long-run Sharpe is capped at 0.60. Bands assume the trailing-vol
   regime persists; they are not a guarantee.
-- **Portfolio returns assume daily rebalancing to target weights.** A real
-  buy-and-hold / drifting-weight book will differ, more so over long horizons.
+- **Portfolio model NAV uses a union/rescaled analysis basis.** Holdings with
+  different histories are combined over the union of available dates; each day
+  weights are rescaled across holdings that have data. This keeps a
+  mixed-history model analyzable for forward research, but it is **not** a
+  performance track record and will differ from a daily-rebalanced common-window
+  book or real buy-and-hold/drifting-weight account.
 - **Holding prices may be simulated.** Any ticker that can't be resolved live or
   from samples falls back to a deterministic simulation, flagged per-holding and
   with a portfolio-level honesty banner. Simulated numbers are never presented as

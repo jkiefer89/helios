@@ -57,7 +57,11 @@ function bindControls() {
 }
 
 function setActivePreset(h) {
-  document.querySelectorAll(".hbtn").forEach((b) => b.classList.toggle("active", b.dataset.h === h));
+  document.querySelectorAll(".hbtn").forEach((b) => {
+    const active = b.dataset.h === h && !b.disabled;
+    b.classList.toggle("active", active);
+    b.setAttribute("aria-pressed", active ? "true" : "false");
+  });
 }
 
 /* Re-run whatever is currently selected at the current horizon. */
@@ -71,9 +75,55 @@ function refresh() {
 /* ----------------------------------------------------------------------- */
 async function api(url, opts) {
   const r = await fetch(url, opts);
-  const j = await r.json();
-  if (!r.ok || j.error) throw new Error(j.error || "Request failed");
+  const ctype = r.headers.get("content-type") || "";
+  let j = null;
+  let text = "";
+  if (ctype.includes("application/json")) {
+    try {
+      j = await r.json();
+    } catch (_) {
+      text = "";
+    }
+  } else {
+    text = await r.text();
+  }
+  if (!r.ok || (j && j.error)) {
+    throw new Error((j && j.error) || text.trim() || `Request failed (${r.status})`);
+  }
+  if (!j) throw new Error("Server returned a non-JSON response.");
   return j;
+}
+
+function makeListRow(el, onSelect, label) {
+  el.tabIndex = 0;
+  el.setAttribute("role", "button");
+  el.setAttribute("aria-label", label);
+  el.addEventListener("click", onSelect);
+  el.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" || ev.key === " ") {
+      ev.preventDefault();
+      onSelect();
+    }
+  });
+}
+
+function showLoading(message = "Loading analytics…") {
+  const loading = document.getElementById("loading");
+  loading.textContent = message;
+  loading.hidden = false;
+  document.getElementById("dashboard").hidden = true;
+}
+
+function showDashboard() {
+  document.getElementById("loading").hidden = true;
+  document.getElementById("dashboard").hidden = false;
+}
+
+function showError(message) {
+  const loading = document.getElementById("loading");
+  loading.textContent = "Error: " + message;
+  loading.hidden = false;
+  document.getElementById("dashboard").hidden = true;
 }
 
 async function loadTickers(selectSymbol) {
@@ -94,7 +144,7 @@ async function loadTickers(selectSymbol) {
       <div><div class="sym">${esc(t.symbol)}${dot}</div><div class="nm">${esc(t.name)}</div></div>
       <div class="px"><div class="p">${FMT.money(t.last_price)}</div>
         <div class="c ${dir}">${FMT.pct(t.change_pct)}</div></div>`;
-    li.addEventListener("click", () => analyze(t.symbol));
+    makeListRow(li, () => analyze(t.symbol), `Analyze ${t.symbol} ${t.name}`);
     list.appendChild(li);
   });
   const first = selectSymbol || (tickers[0] && tickers[0].symbol);
@@ -105,20 +155,21 @@ async function analyze(symbol) {
   state.mode = "instrument";
   state.ticker = symbol;
   state.modelId = null;
+  if (typeof state.horizon !== "number") {
+    state.horizon = +document.getElementById("horizon").value || 21;
+  }
   document.querySelectorAll("#modelList li").forEach((li) => li.classList.remove("active"));
   document.querySelectorAll("#tickerList li").forEach((li) =>
     li.classList.toggle("active", li.dataset.symbol === symbol));
   setPresetsEnabled(false); // long-horizon presets are for models
-  const hz = typeof state.horizon === "number" ? state.horizon : 21;
-  document.getElementById("loading").hidden = false;
-  document.getElementById("dashboard").hidden = true;
+  const hz = state.horizon;
+  showLoading("Loading instrument analytics…");
   try {
     const d = await api(`/api/analyze?ticker=${encodeURIComponent(symbol)}&horizon=${hz}`);
     render(d);
-    document.getElementById("loading").hidden = true;
-    document.getElementById("dashboard").hidden = false;
+    showDashboard();
   } catch (e) {
-    document.getElementById("loading").textContent = "Error: " + e.message;
+    showError(e.message);
   }
 }
 
@@ -150,7 +201,7 @@ async function loadModels(selectId) {
       <div><div class="sym">${esc(m.name)}</div>
         <div class="nm">${esc(m.mandate_label)} · ${m.n_holdings} holdings</div></div>
       <div class="px"><div class="c subtle">${esc(m.top || "")}</div></div>`;
-    li.addEventListener("click", () => analyzeModel(m.id));
+    makeListRow(li, () => analyzeModel(m.id), `Analyze model ${m.name}`);
     list.appendChild(li);
   });
   if (selectId) analyzeModel(selectId);
@@ -164,21 +215,19 @@ async function analyzeModel(id) {
   document.querySelectorAll("#modelList li").forEach((li) =>
     li.classList.toggle("active", li.dataset.id === id));
   setPresetsEnabled(true);
-  document.getElementById("loading").hidden = false;
-  document.getElementById("dashboard").hidden = true;
+  showLoading("Resolving holdings and running model analysis…");
   try {
     const d = await api(`/api/model/analyze?id=${encodeURIComponent(id)}&horizon=${state.horizon}`);
     renderModel(d);
-    document.getElementById("loading").hidden = true;
-    document.getElementById("dashboard").hidden = false;
+    showDashboard();
   } catch (e) {
-    document.getElementById("loading").textContent = "Error: " + e.message;
+    showError(e.message);
   }
 }
 
 function setPresetsEnabled(on) {
-  document.querySelectorAll(".hbtn").forEach((b) => { if (!on) b.disabled = true; });
-  if (!on) setActivePreset(typeof state.horizon === "string" ? state.horizon : null);
+  document.querySelectorAll(".hbtn").forEach((b) => { b.disabled = !on; });
+  if (!on) setActivePreset(null);
 }
 
 /* ----------------------------------------------------------------------- */
@@ -232,7 +281,7 @@ function renderMetrics(m) {
   const cards = [
     ["Last price", FMT.money(m.last_price)],
     ["Daily move", FMT.pct(m.daily_change_pct), m.daily_change_pct],
-    ["Annual return", FMT.pct(m.annual_return_pct), m.annual_return_pct],
+    ["Mean annual return", FMT.pct(m.annual_return_pct), m.annual_return_pct],
     ["Volatility", FMT.num(m.annual_vol_pct, 1) + "%"],
     ["Sharpe", FMT.num(m.sharpe, 2), m.sharpe],
     ["Sortino", FMT.num(m.sortino, 2), m.sortino],
@@ -285,6 +334,10 @@ function renderPriceChart(s) {
 
 function renderForecast(s, fc) {
   destroy("forecastChart");
+  document.getElementById("forecastTitle").textContent = "Return forecast & confidence cone";
+  const dis = document.getElementById("forecastDisclaimer");
+  dis.hidden = true;
+  dis.textContent = "";
   document.getElementById("forecastNote").textContent =
     `${fc.horizon_days}d horizon · p(up) ${(fc.prob_up * 100).toFixed(0)}%`;
   // Stats row
@@ -478,13 +531,30 @@ function renderModel(d) {
   renderMacd(d.series);
   renderBreakdown(d.signal, d.forecast_short);
   renderBacktest(d.backtest);
+  syncHorizonControls(d.horizon);
   setPresetsAvailability(d.horizon.available_long);
 }
 
 function setPresetsAvailability(avail) {
+  const available = avail || [];
   document.querySelectorAll(".hbtn").forEach((b) => {
-    b.disabled = !avail.includes(b.dataset.h);
+    b.disabled = state.mode !== "model" || !available.includes(b.dataset.h);
   });
+  if (typeof state.horizon === "string") setActivePreset(state.horizon);
+}
+
+function syncHorizonControls(horizon) {
+  const slider = document.getElementById("horizon");
+  const label = document.getElementById("horizonVal");
+  if (horizon.kind === "long") {
+    state.horizon = horizon.label;
+    setActivePreset(horizon.label);
+    return;
+  }
+  state.horizon = horizon.value;
+  slider.value = horizon.value;
+  label.textContent = horizon.value;
+  setActivePreset(null);
 }
 
 function renderProvenance(p) {
@@ -492,7 +562,7 @@ function renderProvenance(p) {
   const parts = [];
   if (p && p.n_excluded > 0) {
     const ex = (p.excluded || []).map((e) => `${esc(e.ticker)} (${esc(e.reason)})`).join(", ");
-    parts.push(`<div>⛔ <b>${p.n_excluded} holding(s) excluded</b> — no usable overlapping price history: ${ex}.
+    parts.push(`<div>⛔ <b>${p.n_excluded} holding(s) excluded</b> — no usable price history: ${ex}.
       Weights were rescaled; the analysis covers the remaining ${p.n_kept}.</div>`);
   }
   if (p && p.simulated_weight_pct) {
@@ -509,7 +579,7 @@ function renderMetricsModel(m, mn) {
   const tgt = mn.target_vol_pct;
   const cards = [
     ["NAV (base 100)", FMT.num(m.last_price, 1)],
-    ["Annual return", FMT.pct(m.annual_return_pct), m.annual_return_pct],
+    ["Mean annual return", FMT.pct(m.annual_return_pct), m.annual_return_pct],
     ["Volatility", FMT.num(m.annual_vol_pct, 1) + "%", tgt ? (m.annual_vol_pct <= tgt * 1.15 ? 1 : -1) : null],
     ["Sharpe", FMT.num(m.sharpe, 2), m.sharpe],
     ["Sortino", FMT.num(m.sortino, 2), m.sortino],

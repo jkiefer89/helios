@@ -74,7 +74,8 @@ def _ridge_fit(X, y, alpha=1.0):
 
 def _ridge_predict(Xrow, w, b, mean, std):
     with np.errstate(all="ignore"):
-        return float(_standardize(Xrow, mean, std) @ w + b)
+        pred = _standardize(Xrow, mean, std) @ w + b
+        return float(np.asarray(pred).reshape(-1)[0])
 
 
 # --------------------------------------------------------------------------- #

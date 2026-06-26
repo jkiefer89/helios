@@ -33,9 +33,13 @@
 
       <section class="panel">
         <h2>Import model (Excel / CSV)</h2>
+        <label class="sr-only" for="modelFile">Model file</label>
         <input type="file" id="modelFile" accept=".xlsx,.xlsm,.csv,.tsv" />
+        <label class="sr-only" for="modelName">Model name</label>
         <input type="text" id="modelName" placeholder="Model name (e.g. Smith IRA)" style="margin-top:8px" />
+        <label class="sr-only" for="modelMandate">Model mandate</label>
         <select id="modelMandate" style="margin-top:8px"></select>
+        <label class="sr-only" for="modelContext">Model context</label>
         <textarea id="modelContext" rows="2" placeholder="What is this model for? (e.g. retiree income, CD alternative…)" style="margin-top:8px"></textarea>
         <button id="modelUploadBtn" class="btn" style="margin-top:8px; width:100%">Analyze model</button>
         <p class="hint">File needs a <b>Ticker</b> column and (optionally) a <b>Weight</b> column.</p>
@@ -43,13 +47,14 @@
 
       <section class="panel">
         <h2>Forecast horizon</h2>
+        <label class="sr-only" for="horizon">Tactical forecast horizon in trading days</label>
         <input type="range" id="horizon" min="5" max="90" value="21" step="1" />
         <div class="horizon-label"><span id="horizonVal">21</span> trading days <span class="subtle">(tactical signal)</span></div>
         <div class="horizon-presets" id="horizonPresets">
-          <button data-h="6M" class="hbtn">6M</button>
-          <button data-h="1Y" class="hbtn">1Y</button>
-          <button data-h="3Y" class="hbtn">3Y</button>
-          <button data-h="5Y" class="hbtn">5Y</button>
+          <button data-h="6M" class="hbtn" aria-label="6 month strategic projection">6M</button>
+          <button data-h="1Y" class="hbtn" aria-label="1 year strategic projection">1Y</button>
+          <button data-h="3Y" class="hbtn" aria-label="3 year strategic projection">3Y</button>
+          <button data-h="5Y" class="hbtn" aria-label="5 year strategic projection">5Y</button>
         </div>
         <p class="hint">Presets give a multi-year <b>strategic projection</b> (models only).</p>
       </section>
@@ -62,6 +67,7 @@
       <section class="panel" id="livePanel" hidden>
         <h2>Live market data</h2>
         <div class="field-row">
+          <label class="sr-only" for="liveSymbol">Live ticker symbol</label>
           <input type="text" id="liveSymbol" placeholder="e.g. GOOG" />
           <button id="liveBtn" class="btn">Fetch</button>
         </div>
@@ -70,8 +76,10 @@
 
       <section class="panel">
         <h2>Import price series (CSV)</h2>
+        <label class="sr-only" for="csvFile">Price series CSV file</label>
         <input type="file" id="csvFile" accept=".csv" />
         <div class="field-row">
+          <label class="sr-only" for="csvSymbol">Uploaded series symbol or label</label>
           <input type="text" id="csvSymbol" placeholder="Symbol/label" />
           <button id="uploadBtn" class="btn">Upload</button>
         </div>

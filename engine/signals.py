@@ -179,7 +179,7 @@ def _caveats(fc, history_days, data_honesty) -> list:
         out.append(f"Forecast shown but the model has no measured edge — directional accuracy "
                    f"{da*100:.0f}% ≤ coin-flip; treat the forecast contribution skeptically.")
     if history_days is not None and history_days < 252:
-        out.append(f"Only {history_days} aligned trading days of history (<1y); estimates carry wide uncertainty.")
+        out.append(f"Only {history_days} analyzed trading days of history (<1y); estimates carry wide uncertainty.")
     if data_honesty and data_honesty.get("simulated_weight_pct", 0) > 0:
         out.append(f"{data_honesty['simulated_weight_pct']:.0f}% of weight uses simulated prices — "
                    f"this signal is illustrative, not market-calibrated.")

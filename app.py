@@ -15,6 +15,7 @@ from hmac import compare_digest
 import numpy as np
 import pandas as pd
 from flask import Flask, Response, jsonify, render_template, request
+from werkzeug.exceptions import HTTPException
 
 from engine import (
     backtest, data, forecast, indicators, insights, mandate, portfolio, sentiment, signals,
@@ -168,6 +169,48 @@ def err(message, code=400):
     return jsonify({"error": message}), code
 
 
+def _safe_int_arg(name: str, default: int, min_value: int, max_value: int) -> tuple[int | None, str | None]:
+    raw = request.args.get(name, default)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None, f"{name} must be an integer between {min_value} and {max_value}."
+    return max(min_value, min(value, max_value)), None
+
+
+def _json_http_error(e: HTTPException):
+    code = e.code or 500
+    message = {
+        400: "Bad request.",
+        404: "Not found.",
+        413: "Uploaded file is too large.",
+        415: "Unsupported media type.",
+        500: "Internal server error.",
+    }.get(code, e.description or "Request failed.")
+    return err(message, code)
+
+
+@app.errorhandler(400)
+@app.errorhandler(404)
+@app.errorhandler(413)
+@app.errorhandler(415)
+def handle_http_error(e: HTTPException):
+    return _json_http_error(e)
+
+
+@app.errorhandler(500)
+def handle_internal_error(e: HTTPException):
+    return err("Internal server error.", 500)
+
+
+@app.errorhandler(Exception)
+def handle_unexpected_error(e: Exception):
+    if isinstance(e, HTTPException):
+        return _json_http_error(e)
+    app.logger.exception("Unhandled server error")
+    return err("Internal server error.", 500)
+
+
 # --------------------------------------------------------------------------- #
 # Series helpers for the price/indicator chart (downsampled for transport)
 # --------------------------------------------------------------------------- #
@@ -216,6 +259,11 @@ def index():
     return render_template("index.html")
 
 
+@app.route("/favicon.ico")
+def favicon():
+    return Response(status=204)
+
+
 @app.route("/api/tickers")
 def tickers():
     out = []
@@ -237,7 +285,9 @@ def tickers():
 @app.route("/api/analyze")
 def analyze():
     symbol = request.args.get("ticker", "").upper()
-    horizon = max(5, min(int(request.args.get("horizon", 21)), 120))
+    horizon, error = _safe_int_arg("horizon", 21, 5, 90)
+    if error:
+        return err(error, 400)
     inst = data.get(symbol)
     if inst is None:
         return err(f"Unknown ticker '{symbol}'.", 404)
@@ -288,7 +338,8 @@ def upload():
 def live():
     if not data.HAS_YF:
         return err("Live data unavailable (yfinance not installed).", 400)
-    symbol = data.clean_symbol((request.json or {}).get("symbol", ""), fallback="")
+    payload = request.get_json(silent=True) or {}
+    symbol = data.clean_symbol(payload.get("symbol", ""), fallback="")
     if not symbol:
         return err("Provide a valid ticker symbol.")
     if not _LIVE_SEMAPHORE.acquire(blocking=False):
@@ -352,14 +403,14 @@ def model_upload():
 
 
 def _resolve_horizon(raw: str):
-    """Return (kind, value). kind 'short' -> int days; 'long' -> preset days."""
+    """Return (kind, value, error). kind 'short' -> int days; 'long' -> preset days."""
     raw = (raw or "21").strip().upper()
     if raw in forecast.LONG_HORIZONS:
-        return "long", forecast.LONG_HORIZONS[raw]
+        return "long", forecast.LONG_HORIZONS[raw], None
     try:
-        return "short", max(5, min(int(float(raw)), 90))
-    except ValueError:
-        return "short", 21
+        return "short", max(5, min(int(float(raw)), 90)), None
+    except (TypeError, ValueError, OverflowError):
+        return None, None, "horizon must be an integer between 5 and 90 or one of 6M, 1Y, 3Y, 5Y."
 
 
 def _available_long(n_days: int) -> list[str]:
@@ -378,7 +429,9 @@ def model_analyze():
     mdl = portfolio.get(request.args.get("id", ""))
     if mdl is None:
         return err("Unknown model.", 404)
-    hkind, hval = _resolve_horizon(request.args.get("horizon"))
+    hkind, hval, horizon_error = _resolve_horizon(request.args.get("horizon"))
+    if horizon_error:
+        return err(horizon_error, 400)
 
     try:
         ps = portfolio.build_series(mdl)
@@ -386,12 +439,13 @@ def model_analyze():
         return err(str(e), 400)
     close = ps.close
     if len(close) < 60:
-        return err("Holdings have too little overlapping history (need 60+ sessions).", 400)
+        return err("Holdings have too little available analyzed history (need 60+ sessions).", 400)
 
     avail = _available_long(ps.n_days)
     long_label = forecast._long_label(hval) if hkind == "long" else None
     if hkind == "long" and long_label not in avail:
         hkind, hval = "short", 21  # requested long horizon unavailable for this history
+        long_label = None
 
     # Aggregate any known headlines from holdings (sample tickers carry demo news).
     headlines = []
