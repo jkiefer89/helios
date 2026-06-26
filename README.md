@@ -33,6 +33,18 @@ The first run creates the virtualenv and installs dependencies, including
 `openpyxl` for Excel model uploads. `yfinance` is installed for optional live
 data, but the app remains fully usable offline with bundled sample data.
 
+Helios now uses a React + Vite + TypeScript frontend. For normal local use,
+build the frontend once and then start Flask:
+
+```bash
+npm --prefix frontend install
+npm --prefix frontend run build
+./run.sh
+```
+
+If `frontend/dist/` is absent, Flask falls back to the legacy vanilla dashboard
+at `/`; the legacy page is also available at `/legacy`.
+
 ### Going live on your network
 
 | Variable | Default | Purpose |
@@ -59,6 +71,19 @@ HELIOS_USER=jkiefer HELIOS_PASSWORD='choose-a-strong-one' ./run.sh
 The app ships with a synthetic 6-instrument universe (AAPL, MSFT, NVDA, TSLA,
 SPY, BTC-USD) so it works **fully offline** out of the box.
 
+### Frontend development
+
+Run Flask on port 5000 and Vite on port 5173:
+
+```bash
+HELIOS_AUTH=0 ./.venv/bin/python app.py
+npm --prefix frontend run dev
+```
+
+Vite proxies `/api` and `/legacy` to Flask. The React app does not contain
+placeholder rankings or mock research rows; unavailable research surfaces render
+the backend's demo, mixed, or blocked provenance state.
+
 ---
 
 ## What it does
@@ -76,6 +101,17 @@ SPY, BTC-USD) so it works **fully offline** out of the box.
 | **Long-horizon projection** | 5–90 day tactical signal **plus** 6-month / 1-year / 3-year / 5-year strategic value cones (terminal value, CAGR bands, probability of meeting the mandate, drawdown-breach odds) |
 | **Conviction rationale** | Every signal explains itself: per-component clauses with the actual numbers, the mandate tilt, the vol penalty, and honesty caveats |
 | **Insights** | 12 rule-based suggestions per model — concentration, mandate fit, drawdown, correlation, forecast skill, data honesty — each with a concrete action |
+
+### Data quality modes
+
+Helios separates interface demos from advisor-grade research:
+
+| Mode | Meaning |
+|------|---------|
+| `demo` | Bundled sample data can demonstrate workflow, but cannot populate real rankings or model-level research evidence. |
+| `real` | Live or uploaded history is available for the analyzed surface. |
+| `mixed` | Some evidence is real but some holdings or sources require verification. The UI displays a warning and required action. |
+| `invalid_for_research` | Research is blocked because required live/uploaded history is missing or unsuitable. |
 
 ### Importing a client model (portfolio)
 
@@ -119,6 +155,9 @@ platform degrades gracefully to sample/uploaded data when offline.
 ```
 serve.py              production entrypoint — waitress on the local network
 app.py                Flask app + JSON API + Basic-Auth gate + payload sanitation
+frontend/            React + Vite + TypeScript research terminal
+  src/api/           typed client for existing Flask APIs
+  src/views/         Command Center, Opportunity Radar, Strategy Lab, Clinic, Reports
 engine/
   data.py             data store, samples, CSV import, live fetch, holding resolution
   indicators.py       SMA/EMA/RSI/MACD/Bollinger + performance metrics
@@ -129,15 +168,22 @@ engine/
   sentiment.py        finance-lexicon news sentiment
   signals.py          mandate-aware BUY/SELL/HOLD with numbers-backed rationale
   backtest.py         historical validation vs buy-and-hold
-templates/index.html  single-page dashboard
-static/app.js         front-end logic + Chart.js rendering
-static/styles.css     dark dashboard theme
+templates/index.html  legacy vanilla dashboard fallback (/legacy)
+static/app.js         legacy front-end logic
+static/styles.css     legacy dashboard theme
 ```
 
 ### API
 
 | Endpoint | Purpose |
 |----------|---------|
+| `GET /api/command-center` | Pro dashboard payload with regime, real-data opportunities, risks, model alerts and research queue |
+| `GET /api/opportunities` | Opportunity Radar rankings; returns no placeholder rows when real data is unavailable |
+| `GET /api/strategy/analyze` | Strategy Lab for a single instrument with no-lookahead evidence |
+| `GET /api/model/strategy/analyze` | Strategy Lab for a client model; blocks when model provenance is invalid |
+| `GET /api/model/clinic` | Portfolio Clinic diagnostics and hypothetical, analysis-only suggestions |
+| `GET /api/report/instrument` | Analysis-only advisor report for an instrument |
+| `GET /api/report/model` | Analysis-only advisor report for a model |
 | `GET /api/mandates` | list mandate presets for the model-import form |
 | `GET /api/models` | list imported portfolio models |
 | `POST /api/model/upload` | import an Excel/CSV model (multipart `file`, `name`, `mandate`, `context`) |
@@ -153,6 +199,9 @@ static/styles.css     dark dashboard theme
 
 ```bash
 ./.venv/bin/python -m pip install -r requirements-dev.txt
+npm --prefix frontend install
+npm --prefix frontend run typecheck
+npm --prefix frontend run build
 ./.venv/bin/python -m pytest
 ./.venv/bin/python -m compileall app.py serve.py engine tests
 ```

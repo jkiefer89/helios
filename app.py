@@ -12,10 +12,11 @@ import socket
 import threading
 from datetime import datetime, timezone
 from hmac import compare_digest
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from flask import Flask, Response, jsonify, render_template, request
+from flask import Flask, Response, abort, jsonify, render_template, request, send_from_directory
 from werkzeug.exceptions import HTTPException
 
 from engine import (
@@ -26,6 +27,7 @@ from engine import (
 app = Flask(__name__)
 # Cap request bodies so a huge upload can't exhaust memory (16 MB is ample for CSVs).
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024
+FRONTEND_DIST = Path(__file__).resolve().parent / "frontend" / "dist"
 data.load_samples()
 
 
@@ -433,8 +435,23 @@ def _series_payload(inst: data.Instrument, lookback: int = 400):
 # --------------------------------------------------------------------------- #
 # Routes
 # --------------------------------------------------------------------------- #
+def _react_frontend_ready() -> bool:
+    return (FRONTEND_DIST / "index.html").is_file()
+
+
+def _serve_react_index():
+    return send_from_directory(FRONTEND_DIST, "index.html")
+
+
 @app.route("/")
 def index():
+    if _react_frontend_ready():
+        return _serve_react_index()
+    return render_template("index.html")
+
+
+@app.route("/legacy")
+def legacy_index():
     return render_template("index.html")
 
 
@@ -846,6 +863,25 @@ def report_model():
         return ok(reporting.model_report(mdl))
     except ValueError as e:
         return err(str(e), 400)
+
+
+@app.route("/assets/<path:filename>")
+def frontend_assets(filename: str):
+    if not _react_frontend_ready():
+        abort(404)
+    return send_from_directory(FRONTEND_DIST / "assets", filename)
+
+
+@app.route("/<path:path>")
+def react_spa(path: str):
+    if path.startswith("api/"):
+        abort(404)
+    if not _react_frontend_ready():
+        abort(404)
+    requested = FRONTEND_DIST / path
+    if requested.is_file():
+        return send_from_directory(FRONTEND_DIST, path)
+    return _serve_react_index()
 
 
 def _holdings_with_signals(ps: portfolio.PortfolioSeries, mdl: portfolio.Model) -> list:

@@ -11,6 +11,9 @@ certs/
 htmlcov/
 *.log
 logs/
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
 
 # Client data (kept local, never published)
 *.numbers
