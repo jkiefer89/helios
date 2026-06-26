@@ -228,7 +228,13 @@ class PortfolioSeries:
     provenance: dict = field(default_factory=dict)  # data-source honesty block
 
 
-def build_series(model: Model, base: float = 100.0, min_days: int = 200) -> PortfolioSeries:
+def build_series(
+    model: Model,
+    base: float = 100.0,
+    min_days: int = 200,
+    allow_sample: bool = True,
+    allow_simulated: bool = True,
+) -> PortfolioSeries:
     """Construct a weight-rescaled portfolio NAV from holdings.
 
     Each holding's close is resolved (live/sample/simulated), then daily returns
@@ -242,17 +248,35 @@ def build_series(model: Model, base: float = 100.0, min_days: int = 200) -> Port
     """
     closes, warnings = {}, []
     src_by = {}
+    resolution_errors = {}
     deadline = time.monotonic() + _RESOLVE_TIME_BUDGET_S
     live_used = 0
     for h in model.holdings:
         # Budget new live fetches so a model of many unknown tickers can't pin a
         # worker; cached/sample holdings are unaffected, the rest fall to simulated.
         allow_live = live_used < _LIVE_FETCH_BUDGET and time.monotonic() < deadline
-        ps = data.resolve_series(h.ticker, allow_live=allow_live)
-        if ps.source == "live":
-            live_used += 1
-        src_by[h.ticker] = ps.source
-        closes[h.ticker] = ps.close
+        try:
+            try:
+                ps = data.resolve_series(
+                    h.ticker,
+                    allow_live=allow_live,
+                    allow_sample=allow_sample,
+                    allow_simulated=allow_simulated,
+                )
+            except TypeError as e:
+                if "allow_sample" not in str(e) and "allow_simulated" not in str(e):
+                    raise
+                # Backward-compatible with narrow test doubles that still expose
+                # the pre-Pro signature.
+                ps = data.resolve_series(h.ticker, allow_live=allow_live)
+            if ps.source == "live":
+                live_used += 1
+            src_by[h.ticker] = ps.source
+            closes[h.ticker] = ps.close
+        except ValueError as e:
+            src_by[h.ticker] = "missing"
+            resolution_errors[h.ticker] = str(e)
+            closes[h.ticker] = pd.Series(dtype=float)
 
     order = [h.ticker for h in model.holdings]
     weights0 = {h.ticker: h.weight for h in model.holdings}
@@ -266,7 +290,10 @@ def build_series(model: Model, base: float = 100.0, min_days: int = 200) -> Port
     # performance track record.
     R = pd.DataFrame({tk: daily[tk].pct_change() for tk in order})
     usable = [tk for tk in order if int(R[tk].notna().sum()) >= 2]
-    excluded = [(tk, "no price data found") for tk in order if tk not in usable]
+    excluded = [
+        (tk, resolution_errors.get(tk, "no price data found"))
+        for tk in order if tk not in usable
+    ]
     dropped_map = dict(excluded)
     if not usable:
         names = "; ".join(f"{tk} ({why})" for tk, why in excluded) or "the holdings"
@@ -329,6 +356,11 @@ def build_series(model: Model, base: float = 100.0, min_days: int = 200) -> Port
     sources: dict = {}
     sim_weight = 0.0
     sim_syms = []
+    source_weight: dict[str, float] = {}
+    for h in model.holdings:
+        s = src_by.get(h.ticker, "missing")
+        source_weight[s] = source_weight.get(s, 0.0) + float(h.weight)
+
     for tk in usable:
         s = src_by[tk]
         sources[s] = sources.get(s, 0) + 1
@@ -343,8 +375,18 @@ def build_series(model: Model, base: float = 100.0, min_days: int = 200) -> Port
         "n_live": sources.get("live", 0),
         "n_sample": sources.get("sample", 0),
         "n_simulated": sources.get("simulated", 0),
+        "n_missing": sum(1 for s in src_by.values() if s == "missing"),
         "simulated_weight_pct": round(sim_weight * 100, 1),
         "simulated_symbols": sim_syms,
+        "missing_symbols": [tk for tk, src in src_by.items() if src == "missing"],
+        "source_weight_pct": {k: round(v * 100, 1) for k, v in source_weight.items()},
+        "sample_weight_pct": round(source_weight.get("sample", 0.0) * 100, 1),
+        "real_weight_pct": round((source_weight.get("live", 0.0) + source_weight.get("upload", 0.0)) * 100, 1),
+        "non_real_weight_pct": round((
+            source_weight.get("sample", 0.0)
+            + source_weight.get("simulated", 0.0)
+            + source_weight.get("missing", 0.0)
+        ) * 100, 1),
         "honesty": "real" if sim_weight == 0 else "simulated" if sim_weight >= 0.999 else "mixed",
     }
 

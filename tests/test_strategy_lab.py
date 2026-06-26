@@ -1,0 +1,106 @@
+from io import BytesIO
+
+import numpy as np
+import pandas as pd
+
+import app as helios
+from tests.conftest import price_csv, price_series
+
+
+def _client():
+    helios.app.config.update(TESTING=True, PROPAGATE_EXCEPTIONS=False)
+    return helios.app.test_client()
+
+
+def test_strategy_uses_next_day_position_and_does_not_capture_signal_day_jump():
+    from engine.strategy import analyze_strategy
+
+    idx = pd.bdate_range("2024-01-02", periods=140)
+    values = np.r_[np.full(80, 100.0), [130.0], np.full(59, 130.0)]
+    close = pd.Series(values, index=idx, name="close")
+
+    result = analyze_strategy(close, cost_bps=0, slippage_bps=0)
+    jump_i = result["dates"].index(idx[80].strftime("%Y-%m-%d"))
+
+    assert result["position"][jump_i] == 0
+    assert result["strategy_curve"][jump_i] == 1.0
+
+
+def test_strategy_costs_and_slippage_reduce_total_return():
+    from engine.strategy import analyze_strategy
+
+    close = price_series(days=320, daily=0.001)
+    free = analyze_strategy(close, cost_bps=0, slippage_bps=0)
+    costly = analyze_strategy(close, cost_bps=25, slippage_bps=10)
+
+    assert costly["strategy"]["total_return_pct"] < free["strategy"]["total_return_pct"]
+    assert costly["assumptions"]["round_trip_cost_bps"] == 35
+
+
+def test_strategy_drawdown_curve_uses_negative_percentage_convention():
+    from engine.strategy import analyze_strategy
+
+    idx = pd.bdate_range("2024-01-02", periods=180)
+    values = np.r_[np.linspace(100, 150, 90), np.linspace(150, 90, 90)]
+    close = pd.Series(values, index=idx, name="close")
+
+    result = analyze_strategy(close)
+
+    assert min(result["drawdown_curve"]) <= 0
+    assert max(result["drawdown_curve"]) == 0
+    assert result["strategy"]["max_drawdown_pct"] <= 0
+
+
+def test_strategy_endpoint_labels_sample_data_as_demo_not_real_evidence(monkeypatch):
+    monkeypatch.setattr("engine.data.HAS_YF", False)
+    client = _client()
+
+    instrument = client.get("/api/strategy/analyze?ticker=AAPL&cost_bps=5&slippage_bps=2")
+    assert instrument.status_code == 200
+    ibody = instrument.get_json()
+    assert ibody["symbol"] == "AAPL"
+    assert "beat_benchmark" in ibody
+    assert ibody["methodology"]["no_lookahead"] is True
+    assert ibody["eligible_for_real_research"] is False
+    assert ibody["data_mode"] == "demo"
+    assert "demo strategy result" in ibody["display_label"].lower()
+
+
+def test_strategy_endpoints_work_with_uploaded_real_instrument_and_model(monkeypatch):
+    monkeypatch.setattr("engine.data.HAS_YF", False)
+    client = _client()
+    for symbol in ("MODA", "MODB"):
+        upload_price = client.post(
+            "/api/upload",
+            data={
+                "file": (BytesIO(price_csv(days=260)), f"{symbol}.csv"),
+                "symbol": symbol,
+                "name": symbol,
+            },
+            content_type="multipart/form-data",
+        )
+        assert upload_price.status_code == 200
+
+    instrument = client.get("/api/strategy/analyze?ticker=MODA&cost_bps=5&slippage_bps=2")
+    assert instrument.status_code == 200
+    ibody = instrument.get_json()
+    assert ibody["eligible_for_real_research"] is True
+    assert ibody["data_mode"] == "real"
+
+    payload = {
+        "file": (BytesIO(b"Ticker,Weight\nMODA,60\nMODB,40\n"), "strategy-model.csv"),
+        "name": "Strategy Model",
+        "mandate": "balanced",
+    }
+    upload = client.post("/api/model/upload", data=payload, content_type="multipart/form-data")
+    assert upload.status_code == 200
+    model_id = upload.get_json()["id"]
+
+    model = client.get(f"/api/model/strategy/analyze?id={model_id}&cost_bps=5&slippage_bps=2")
+    assert model.status_code == 200
+    mbody = model.get_json()
+    assert mbody["id"] == model_id
+    assert mbody["series_kind"] == "model"
+    assert mbody["eligible_for_real_research"] is True
+    assert mbody["data_mode"] == "real"
+    assert mbody["methodology"]["analysis_only"] is True

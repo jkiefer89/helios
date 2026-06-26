@@ -296,7 +296,7 @@ _CACHE_LOCK = threading.RLock()
 class PriceSeries:
     symbol: str
     close: pd.Series  # DatetimeIndex -> close
-    source: str       # "sample" | "live" | "simulated"
+    source: str       # "sample" | "upload" | "live" | "simulated"
 
 
 def _ticker_seed(ticker: str) -> int:
@@ -320,7 +320,20 @@ def _simulate_for_ticker(ticker: str) -> pd.Series:
 MAX_PRICE_CACHE = 400
 
 
-def resolve_series(ticker: str, allow_live: bool = True) -> PriceSeries:
+def _allowed_source(source: str, allow_sample: bool, allow_simulated: bool) -> bool:
+    if source == "sample":
+        return allow_sample
+    if source == "simulated":
+        return allow_simulated
+    return source in {"upload", "live"}
+
+
+def resolve_series(
+    ticker: str,
+    allow_live: bool = True,
+    allow_sample: bool = True,
+    allow_simulated: bool = True,
+) -> PriceSeries:
     """Return a close-price series for one holding ticker, with fallback.
 
     allow_live=False skips the (potentially slow) yfinance call and goes straight
@@ -332,12 +345,12 @@ def resolve_series(ticker: str, allow_live: bool = True) -> PriceSeries:
         raise ValueError(f"Invalid ticker: {ticker!r}")
 
     with _CACHE_LOCK:
-        if sym in _PRICE_CACHE:
+        if sym in _PRICE_CACHE and _allowed_source(_PRICE_CACHE[sym].source, allow_sample, allow_simulated):
             return _PRICE_CACHE[sym]
 
     # 1) a sidebar instrument already has good history
     inst = get(sym)
-    if inst is not None:
+    if inst is not None and _allowed_source(inst.source, allow_sample, allow_simulated):
         ps = PriceSeries(sym, inst.df["close"].dropna(), inst.source)
     else:
         ps = None
@@ -352,12 +365,17 @@ def resolve_series(ticker: str, allow_live: bool = True) -> PriceSeries:
             except Exception:
                 ps = None
         # 3) deterministic simulation
-        if ps is None:
+        if ps is None and allow_simulated:
             ps = PriceSeries(sym, _simulate_for_ticker(sym), "simulated")
             # A simulation forced only by the live budget isn't cached, so a later
             # (un-budgeted) call can still resolve it live.
             if not allow_live:
                 return ps
+        if ps is None:
+            raise ValueError(
+                f"No eligible real price history for {sym}. Upload a CSV price history "
+                "or fetch live data before using this ticker in Pro research."
+            )
 
     with _CACHE_LOCK:
         # Bound cache growth (FIFO eviction), mirroring the instrument-store cap.

@@ -1,0 +1,335 @@
+"""Conservative Opportunity Radar scoring.
+
+The radar ranks review candidates, not trades. Scores are deliberately
+penalized for simulated/sample data, weak out-of-sample forecast quality,
+high volatility/drawdown, weak backtest evidence, and risk-off regimes.
+"""
+from __future__ import annotations
+
+import numpy as np
+
+from . import (
+    data, forecast, indicators, mandate, portfolio, provenance,
+    regime as regime_mod, sentiment, signals, strategy,
+)
+
+
+def score_candidate(candidate: dict, regime: dict | None = None) -> dict:
+    regime = regime or {"label": "neutral"}
+    source = candidate.get("source", "sample")
+    signal_score = float(candidate.get("signal_score", 0.0))
+    expected_return = float(candidate.get("expected_return_pct", 0.0))
+    expected_vol = float(candidate.get("expected_vol_pct", 0.0))
+    max_drawdown = float(candidate.get("max_drawdown_pct", 0.0))
+    action = candidate.get("action") or _action_from_signal(signal_score)
+
+    data_quality = _data_quality(source, candidate)
+    forecast_quality = _forecast_quality(candidate.get("forecast_quality") or {})
+    backtest_quality = _backtest_quality(candidate.get("backtest") or {})
+    risk_score = float(np.clip(expected_vol * 1.05 + abs(max_drawdown) * 0.85, 0, 100))
+    signal_quality = float(np.clip(50 + signal_score * 45, 0, 100))
+    upside_quality = float(np.clip(50 + expected_return * 3.0, 0, 100))
+    evidence_score = float(np.clip(
+        forecast_quality * 0.32 + backtest_quality * 0.36 + data_quality * 0.20 + signal_quality * 0.12,
+        0,
+        100,
+    ))
+    score = (
+        evidence_score * 0.42
+        + upside_quality * 0.26
+        + signal_quality * 0.18
+        + data_quality * 0.14
+        - max(risk_score - 35, 0) * 0.50
+    )
+
+    warnings = list(candidate.get("warnings") or [])
+    if source in {"sample", "simulated"} or candidate.get("simulated_weight_pct", 0):
+        warnings.append("Sample or simulated data lowers confidence; verify with client/live price history.")
+        score -= 12
+    if forecast_quality < 50:
+        warnings.append("Weak forecast quality; out-of-sample directional evidence is below the review threshold.")
+        score -= 8
+    if backtest_quality < 45:
+        warnings.append("Weak backtest quality; historical signal evidence did not clear the benchmark.")
+        score -= 7
+    if risk_score >= 65:
+        warnings.append("Risk is elevated; volatility or drawdown could invalidate the setup.")
+        score -= 10
+    if regime.get("label") == "risk-off" and evidence_score < 70:
+        warnings.append("Risk-off regime requires stronger evidence before a constructive review.")
+        score -= 8
+
+    scored = {
+        "id": candidate.get("id") or f"{candidate.get('kind', 'instrument')}:{candidate.get('symbol', '')}",
+        "kind": candidate.get("kind", "instrument"),
+        "name": candidate.get("name", candidate.get("symbol", "")),
+        "symbol": candidate.get("symbol", ""),
+        "model_id": candidate.get("model_id"),
+        "action": action,
+        "opportunity_score": round(float(np.clip(score, 0, 100)), 1),
+        "risk_score": round(risk_score, 1),
+        "evidence_score": round(evidence_score, 1),
+        "expected_return_pct": round(expected_return, 2),
+        "expected_vol_pct": round(expected_vol, 2),
+        "max_drawdown_pct": round(max_drawdown, 2),
+        "forecast_quality": round(forecast_quality, 1),
+        "backtest_quality": round(backtest_quality, 1),
+        "data_quality": round(data_quality, 1),
+        "top_positive_drivers": _positive_drivers(expected_return, signal_score, forecast_quality, backtest_quality),
+        "top_negative_drivers": _negative_drivers(source, risk_score, forecast_quality, backtest_quality, regime),
+        "plain_english_summary": _summary(candidate, evidence_score, risk_score, action),
+        "recommended_next_step": _next_step(action),
+        "warnings": _dedupe(warnings)[:5],
+        "eligible_for_real_research": provenance.is_real_source(source) and not candidate.get("simulated_weight_pct", 0),
+        "data_mode": "real" if provenance.is_real_source(source) else "demo",
+    }
+    return scored
+
+
+def rank_candidates(candidates: list[dict], regime: dict | None = None) -> list[dict]:
+    return sorted(
+        [score_candidate(candidate, regime=regime) for candidate in candidates],
+        key=lambda item: (item["opportunity_score"], item["evidence_score"]),
+        reverse=True,
+    )
+
+
+def opportunities(
+    instruments: list[data.Instrument] | None = None,
+    models: list[portfolio.Model] | None = None,
+    kind: str = "all",
+    include_hold: bool = True,
+    min_score: float = 0.0,
+    limit: int = 25,
+) -> dict:
+    instruments = data.all_instruments() if instruments is None else instruments
+    models = portfolio.all_models() if models is None else models
+    uprov = provenance.universe(instruments)
+    market = regime_mod.market_regime(instruments)
+    raw: list[dict] = []
+    blocked: list[dict] = []
+    if kind in {"all", "instrument"}:
+        raw.extend(_instrument_candidates(instruments))
+    if kind in {"all", "model"}:
+        model_candidates, blocked_models = _model_candidates(models)
+        raw.extend(model_candidates)
+        blocked.extend(blocked_models)
+    ranked = rank_candidates(raw, regime=market)
+    ranked = [item for item in ranked if item.get("eligible_for_real_research")]
+    if not include_hold:
+        ranked = [item for item in ranked if item["action"] != "HOLD"]
+    ranked = [item for item in ranked if item["opportunity_score"] >= min_score]
+    return {
+        "regime": market,
+        "items": ranked[:limit],
+        "blocked_items": blocked,
+        "count": len(ranked[:limit]),
+        "total_candidates": len(raw),
+        "data_mode": "real" if ranked else uprov["data_mode"],
+        "display_label": "Real Research Mode" if ranked else uprov["display_label"],
+        "eligible_for_real_research": bool(ranked),
+        "reason": "" if ranked else uprov["reason"],
+        "required_action": "" if ranked else uprov["required_action"],
+        "data_provenance": {"source_counts": uprov["source_counts"], "warnings": uprov["warnings"]},
+        "methodology": {
+            "scoring": "Evidence, upside, signal strength, data quality, risk penalty, and regime compatibility.",
+            "analysis_only": True,
+        },
+    }
+
+
+def _instrument_candidates(instruments: list[data.Instrument]) -> list[dict]:
+    out = []
+    for inst in instruments:
+        if not provenance.is_real_source(inst.source):
+            continue
+        close = inst.df["close"].dropna()
+        if len(close) < 60:
+            continue
+        try:
+            fc = forecast.forecast(close, horizon=21, n_paths=700)
+            sent = sentiment.score_headlines(inst.headlines)
+            sig = signals.evaluate(close, fc, sent, history_days=len(close))
+            st = strategy.analyze_strategy(close)
+            metrics = indicators.metrics_summary(close)
+        except Exception:
+            continue
+        out.append({
+            "id": f"instrument:{inst.symbol}",
+            "kind": "instrument",
+            "name": inst.name,
+            "symbol": inst.symbol,
+            "source": inst.source,
+            "action": sig["action"],
+            "signal_score": sig["score"],
+            "expected_return_pct": fc["expected_return_pct"],
+            "expected_vol_pct": fc["expected_vol_pct"],
+            "max_drawdown_pct": metrics["max_drawdown_pct"],
+            "forecast_quality": fc.get("quality", {}),
+            "backtest": {
+                "strategy_return_pct": st["strategy"]["total_return_pct"],
+                "benchmark_return_pct": st["benchmark"]["total_return_pct"],
+                "sharpe": st["strategy"]["sharpe"],
+            },
+            "warnings": sig.get("caveats", []),
+        })
+    return out
+
+
+def _model_candidates(models: list[portfolio.Model]) -> tuple[list[dict], list[dict]]:
+    out = []
+    blocked = []
+    for mdl in models:
+        try:
+            ps = portfolio.build_series(mdl, allow_sample=False, allow_simulated=False)
+            p = provenance.portfolio(ps.provenance)
+            if not p["eligible_for_real_research"]:
+                blocked.append(_blocked_model(mdl, p))
+                continue
+            fc = forecast.forecast(ps.close, horizon=21, n_paths=700)
+            sig = signals.evaluate(ps.close, fc, {"aggregate_score": 0, "aggregate_label": "neutral", "count": 0},
+                                   mandate_key=mdl.mandate_key, history_days=ps.n_days, data_honesty=ps.provenance)
+            st = strategy.analyze_strategy(ps.close)
+            metrics = indicators.metrics_summary(ps.close)
+            m = mandate.get(mdl.mandate_key)
+        except Exception as exc:
+            blocked.append(_blocked_model(mdl, {
+                "data_mode": "invalid_for_research",
+                "display_label": "Data Quality Blocked",
+                "eligible_for_real_research": False,
+                "reason": str(exc),
+                "required_action": provenance.DEMO_ACTION,
+                "missing_tickers": [h.ticker for h in mdl.holdings],
+                "warnings": [str(exc)],
+            }))
+            continue
+        out.append({
+            "id": f"model:{mdl.id}",
+            "kind": "model",
+            "name": mdl.name,
+            "symbol": mdl.id,
+            "model_id": mdl.id,
+            "source": "simulated" if ps.provenance.get("simulated_weight_pct", 0) else "upload",
+            "simulated_weight_pct": ps.provenance.get("simulated_weight_pct", 0),
+            "action": sig["action"],
+            "signal_score": sig["score"],
+            "expected_return_pct": fc["expected_return_pct"],
+            "expected_vol_pct": fc["expected_vol_pct"],
+            "max_drawdown_pct": metrics["max_drawdown_pct"],
+            "forecast_quality": fc.get("quality", {}),
+            "backtest": {
+                "strategy_return_pct": st["strategy"]["total_return_pct"],
+                "benchmark_return_pct": st["benchmark"]["total_return_pct"],
+                "sharpe": st["strategy"]["sharpe"],
+            },
+            "warnings": ps.warnings + sig.get("caveats", []),
+            "mandate_label": m["label"],
+        })
+    return out, blocked
+
+
+def _blocked_model(mdl: portfolio.Model, p: dict) -> dict:
+    return {
+        "id": f"model:{mdl.id}",
+        "kind": "model",
+        "name": mdl.name,
+        "symbol": mdl.id,
+        "model_id": mdl.id,
+        "action": "REVIEW",
+        "opportunity_score": 0.0,
+        "risk_score": 0.0,
+        "evidence_score": 0.0,
+        "eligible_for_real_research": False,
+        "data_mode": p.get("data_mode", "invalid_for_research"),
+        "display_label": p.get("display_label", "Data Quality Blocked"),
+        "reason": p.get("reason", "Model data quality is blocked."),
+        "required_action": p.get("required_action", provenance.DEMO_ACTION),
+        "missing_tickers": p.get("missing_tickers", []),
+        "warnings": p.get("warnings", []),
+    }
+
+
+def _data_quality(source: str, candidate: dict) -> float:
+    if candidate.get("simulated_weight_pct", 0):
+        return max(20.0, 75.0 - float(candidate["simulated_weight_pct"]) * 0.7)
+    return {"live": 92.0, "upload": 82.0, "sample": 42.0, "simulated": 28.0}.get(source, 55.0)
+
+
+def _forecast_quality(quality: dict) -> float:
+    da = quality.get("directional_accuracy")
+    n_test = int(quality.get("n_test") or 0)
+    if da is None:
+        base = 42.0
+    else:
+        base = 50.0 + (float(da) - 0.50) * 180.0
+    if n_test < 30:
+        base -= 12
+    elif n_test < 60:
+        base -= 5
+    return float(np.clip(base, 0, 100))
+
+
+def _backtest_quality(backtest: dict) -> float:
+    alpha = float(backtest.get("strategy_return_pct", 0.0)) - float(backtest.get("benchmark_return_pct", 0.0))
+    sharpe = float(backtest.get("sharpe", 0.0))
+    return float(np.clip(50 + alpha * 1.1 + sharpe * 13, 0, 100))
+
+
+def _positive_drivers(expected_return: float, signal_score: float, forecast_quality: float, backtest_quality: float) -> list[str]:
+    drivers = []
+    if expected_return > 0:
+        drivers.append(f"Forecast expects {expected_return:+.1f}% over the tactical horizon.")
+    if signal_score > 0.25:
+        drivers.append(f"Composite signal is constructive ({signal_score:+.2f}).")
+    if forecast_quality >= 60:
+        drivers.append(f"Forecast quality score is {forecast_quality:.0f}/100.")
+    if backtest_quality >= 60:
+        drivers.append(f"Backtest quality score is {backtest_quality:.0f}/100.")
+    return drivers[:3] or ["No strong positive driver cleared the review threshold."]
+
+
+def _negative_drivers(source: str, risk_score: float, forecast_quality: float, backtest_quality: float, regime: dict) -> list[str]:
+    drivers = []
+    if source in {"sample", "simulated"}:
+        drivers.append("Data quality is penalized because the source is sample or simulated.")
+    if risk_score >= 55:
+        drivers.append(f"Risk score is elevated at {risk_score:.0f}/100.")
+    if forecast_quality < 50:
+        drivers.append("Forecast quality is below the evidence threshold.")
+    if backtest_quality < 45:
+        drivers.append("Backtest quality is weak versus benchmark evidence.")
+    if regime.get("label") == "risk-off":
+        drivers.append("Risk-off regime raises the evidence bar.")
+    return drivers[:3] or ["No major negative driver dominated the score."]
+
+
+def _summary(candidate: dict, evidence_score: float, risk_score: float, action: str) -> str:
+    return (
+        f"{candidate.get('symbol', '')} is a {action} review candidate with evidence "
+        f"{evidence_score:.0f}/100 and risk {risk_score:.0f}/100. "
+        "Use this as a research queue item, not an instruction to trade."
+    )
+
+
+def _next_step(action: str) -> str:
+    if action == "BUY":
+        return "Verify data provenance, inspect Strategy Lab, and document invalidating risks before any recommendation."
+    if action == "SELL":
+        return "Verify the risk drivers and review whether exposure should be watched or reduced in a model context."
+    return "Verify whether stronger evidence emerges before escalating beyond hold/review."
+
+
+def _action_from_signal(signal_score: float) -> str:
+    if signal_score > 0.25:
+        return "BUY"
+    if signal_score < -0.25:
+        return "SELL"
+    return "HOLD"
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    out = []
+    for item in items:
+        if item and item not in out:
+            out.append(item)
+    return out

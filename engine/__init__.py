@@ -10,6 +10,12 @@ Modules:
     sentiment   - news / headline sentiment scoring
     signals     - composite BUY / SELL / HOLD trade signals
     backtest    - historical validation of the signal rule
+    regime      - market-regime classification for the command center
+    strategy    - no-lookahead strategy evidence and trade statistics
+    opportunity - conservative review ranking for opportunity radar
+    portfolio_clinic - model diagnostics and hypothetical rebalance suggestions
+    reporting   - printable advisor report composition
+    provenance  - demo/real/mixed data eligibility gates
 """
 
 __all__ = [
@@ -22,4 +28,10 @@ __all__ = [
     "sentiment",
     "signals",
     "backtest",
+    "regime",
+    "strategy",
+    "opportunity",
+    "portfolio_clinic",
+    "reporting",
+    "provenance",
 ]

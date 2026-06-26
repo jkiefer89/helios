@@ -10,6 +10,7 @@ import os
 import secrets
 import socket
 import threading
+from datetime import datetime, timezone
 from hmac import compare_digest
 
 import numpy as np
@@ -18,7 +19,8 @@ from flask import Flask, Response, jsonify, render_template, request
 from werkzeug.exceptions import HTTPException
 
 from engine import (
-    backtest, data, forecast, indicators, insights, mandate, portfolio, sentiment, signals,
+    backtest, data, forecast, indicators, insights, mandate, opportunity, portfolio, portfolio_clinic,
+    provenance, regime, reporting, sentiment, signals, strategy,
 )
 
 app = Flask(__name__)
@@ -178,6 +180,15 @@ def _safe_int_arg(name: str, default: int, min_value: int, max_value: int) -> tu
     return max(min_value, min(value, max_value)), None
 
 
+def _safe_float_arg(name: str, default: float, min_value: float, max_value: float) -> tuple[float | None, str | None]:
+    raw = request.args.get(name, default)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None, f"{name} must be a number between {min_value:g} and {max_value:g}."
+    return max(min_value, min(value, max_value)), None
+
+
 def _json_http_error(e: HTTPException):
     code = e.code or 500
     message = {
@@ -209,6 +220,174 @@ def handle_unexpected_error(e: Exception):
         return _json_http_error(e)
     app.logger.exception("Unhandled server error")
     return err("Internal server error.", 500)
+
+
+# --------------------------------------------------------------------------- #
+# Command Center helpers
+# --------------------------------------------------------------------------- #
+ANALYSIS_ONLY_DISCLAIMER = (
+    "Analysis only — Helios provides research evidence and does not provide "
+    "investment advice, brokerage services, order execution, or return guarantees."
+)
+
+
+def _quick_instrument_screen(inst: data.Instrument) -> dict | None:
+    close = inst.df["close"].dropna()
+    if len(close) < 60:
+        return None
+    try:
+        fc = forecast.forecast(close, horizon=21, n_paths=600)
+        sent = sentiment.score_headlines(inst.headlines)
+        sig = signals.evaluate(close, fc, sent, history_days=len(close))
+        bt = backtest.run(close)
+        metrics = indicators.metrics_summary(close)
+    except Exception:
+        app.logger.exception("command-center screen failed for %s", inst.symbol)
+        return None
+
+    quality = fc.get("quality", {}) or {}
+    dir_acc = quality.get("directional_accuracy")
+    evidence = 50.0
+    if dir_acc is not None:
+        evidence += (float(dir_acc) - 0.50) * 80
+    evidence += max(min(bt["strategy"]["sharpe"], 3.0), -3.0) * 8
+    if inst.source == "sample":
+        evidence -= 18
+    risk_score = max(0.0, metrics["annual_vol_pct"] * 0.75 + abs(metrics["max_drawdown_pct"]) * 0.70)
+    opportunity_score = (
+        48.0
+        + sig["score"] * 28.0
+        + max(min(fc["expected_return_pct"], 12.0), -12.0) * 1.2
+        + max(min(evidence - 50.0, 25.0), -25.0) * 0.45
+        - max(risk_score - 35.0, 0.0) * 0.35
+    )
+    warnings = list(sig.get("caveats") or [])
+    if inst.source == "sample":
+        warnings.append("Uses bundled sample data; treat as a workflow demonstration, not live market evidence.")
+    if dir_acc is not None and dir_acc <= 0.50:
+        warnings.append("Forecast edge is weak or below coin-flip on the out-of-sample window.")
+
+    return {
+        "id": f"instrument:{inst.symbol}",
+        "kind": "instrument",
+        "symbol": inst.symbol,
+        "name": inst.name,
+        "source": inst.source,
+        "action": sig["action"],
+        "score": round(float(np.clip(opportunity_score, 0, 100)), 1),
+        "risk_score": round(float(np.clip(risk_score, 0, 100)), 1),
+        "evidence_score": round(float(np.clip(evidence, 0, 100)), 1),
+        "expected_return_pct": round(float(fc["expected_return_pct"]), 2),
+        "expected_vol_pct": round(float(fc["expected_vol_pct"]), 2),
+        "max_drawdown_pct": round(float(metrics["max_drawdown_pct"]), 2),
+        "strategy_return_pct": round(float(bt["strategy"]["total_return_pct"]), 2),
+        "benchmark_return_pct": round(float(bt["benchmark"]["total_return_pct"]), 2),
+        "beat_benchmark": bool(bt["strategy"]["total_return_pct"] > bt["benchmark"]["total_return_pct"]),
+        "reason": sig.get("headline_rationale", ""),
+        "warnings": warnings[:3],
+    }
+
+
+def _command_center_payload() -> dict:
+    instruments = data.all_instruments()
+    prov = provenance.universe(instruments)
+    market = regime.market_regime(instruments)
+    real_instruments = [inst for inst in instruments if provenance.is_real_source(inst.source)]
+    cards = [c for inst in real_instruments if (c := _quick_instrument_screen(inst))]
+    ranked = sorted(cards, key=lambda c: c["score"], reverse=True)
+    risks = sorted(cards, key=lambda c: (c["risk_score"], abs(c["max_drawdown_pct"])), reverse=True)
+
+    model_alerts = []
+    for mdl in portfolio.all_models():
+        try:
+            ps = portfolio.build_series(mdl, allow_sample=False, allow_simulated=False)
+            pprov = provenance.portfolio(ps.provenance)
+            if not pprov["eligible_for_real_research"]:
+                model_alerts.append({
+                    "id": mdl.id,
+                    "name": mdl.name,
+                    "severity": "high",
+                    "message": f"{mdl.name}: data quality blocked. {pprov['reason']}",
+                    "next_step": pprov["required_action"],
+                    "eligible_for_real_research": False,
+                    "missing_tickers": pprov["missing_tickers"],
+                })
+                continue
+            metrics = indicators.metrics_summary(ps.close)
+            source_weights = ps.provenance.get("source_weight_pct", {})
+            source_summary = ", ".join(
+                f"{src} {weight:.0f}%" for src, weight in sorted(source_weights.items()) if weight
+            ) or "live/uploaded history"
+            model_alerts.append({
+                "id": mdl.id,
+                "name": mdl.name,
+                "severity": "medium",
+                "message": (
+                    f"{mdl.name}: vol {metrics['annual_vol_pct']:.1f}%, "
+                    f"max drawdown {metrics['max_drawdown_pct']:.1f}%, "
+                    f"sources {source_summary}."
+                ),
+                "next_step": "Open Portfolio Clinic when this model is selected.",
+                "eligible_for_real_research": True,
+            })
+        except Exception as exc:
+            model_alerts.append({
+                "id": mdl.id,
+                "name": mdl.name,
+                "severity": "high",
+                "message": f"{mdl.name}: data quality blocked ({exc}).",
+                "next_step": "Upload real price history for every model holding before running Pro research.",
+                "eligible_for_real_research": False,
+            })
+
+    research_queue = []
+    if ranked:
+        top = ranked[0]
+        research_queue.append({
+            "priority": "high",
+            "title": f"Validate {top['symbol']} before any recommendation",
+            "detail": "Check data source, forecast quality, historical strategy evidence, and invalidating risks.",
+        })
+    if risks:
+        risk = risks[0]
+        research_queue.append({
+            "priority": "medium",
+            "title": f"Review risk in {risk['symbol']}",
+            "detail": f"Risk score {risk['risk_score']}/100 with max drawdown {risk['max_drawdown_pct']:.1f}%.",
+        })
+    if not ranked and not risks:
+        research_queue.append({
+            "priority": "high",
+            "title": "Demo mode: real research is locked",
+            "detail": provenance.DEMO_ACTION,
+        })
+    if not model_alerts:
+        research_queue.append({
+            "priority": "medium",
+            "title": "Upload a client model for portfolio-level diagnostics",
+            "detail": "Use uploaded or live price history for every holding to unlock Pro model alerts.",
+        })
+    for warning in market.get("warnings", []):
+        research_queue.append({"priority": "medium", "title": "Verify regime proxy", "detail": warning})
+
+    return {
+        "data_mode": prov["data_mode"],
+        "display_label": prov["display_label"],
+        "eligible_for_real_research": bool(ranked or risks),
+        "reason": "" if ranked or risks else prov["reason"],
+        "required_action": "" if ranked or risks else prov["required_action"],
+        "data_provenance": {
+            "source_counts": prov["source_counts"],
+            "warnings": prov["warnings"],
+        },
+        "regime": {**market, "data_mode": prov["data_mode"], "display_label": prov["display_label"]},
+        "top_opportunities": ranked[:5],
+        "top_risks": risks[:5],
+        "model_alerts": model_alerts[:5],
+        "research_queue": research_queue[:6],
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -264,6 +443,11 @@ def favicon():
     return Response(status=204)
 
 
+@app.route("/api/command-center")
+def command_center():
+    return ok(_command_center_payload())
+
+
 @app.route("/api/tickers")
 def tickers():
     out = []
@@ -313,6 +497,77 @@ def analyze():
         "signal": sig,
         "backtest": bt,
     })
+
+
+def _strategy_request_args():
+    cost_bps, cost_error = _safe_float_arg("cost_bps", 5.0, 0.0, 500.0)
+    if cost_error:
+        return None, None, None, cost_error
+    slippage_bps, slippage_error = _safe_float_arg("slippage_bps", 0.0, 0.0, 500.0)
+    if slippage_error:
+        return None, None, None, slippage_error
+    return cost_bps, slippage_bps, {
+        "start": request.args.get("start") or None,
+        "end": request.args.get("end") or None,
+    }, None
+
+
+@app.route("/api/strategy/analyze")
+def strategy_analyze():
+    symbol = data.clean_symbol(request.args.get("ticker", ""), fallback="")
+    if not symbol:
+        return err("Provide a ticker symbol.", 400)
+    inst = data.get(symbol)
+    if inst is None:
+        return err(f"Unknown ticker '{symbol}'.", 404)
+    cost_bps, slippage_bps, window, arg_error = _strategy_request_args()
+    if arg_error:
+        return err(arg_error, 400)
+    try:
+        result = strategy.analyze_strategy(
+            inst.df["close"], cost_bps=cost_bps, slippage_bps=slippage_bps, **window)
+    except ValueError as e:
+        return err(str(e), 400)
+    p = provenance.instrument(inst.source, len(inst.df["close"].dropna()))
+    return ok({
+        "series_kind": "instrument",
+        "symbol": inst.symbol,
+        "name": inst.name,
+        "source": inst.source,
+        "data_mode": p["data_mode"],
+        "display_label": (
+            "Demo strategy result — synthetic data, not investment evidence."
+            if p["data_mode"] == "demo" else p["display_label"]
+        ),
+        "eligible_for_real_research": p["eligible_for_real_research"],
+        "reason": p["reason"],
+        "required_action": p["required_action"],
+        "data_provenance": p,
+        "warnings": p["warnings"],
+        **result,
+        "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+    })
+
+
+@app.route("/api/opportunities")
+def opportunities_api():
+    limit, limit_error = _safe_int_arg("limit", 25, 1, 100)
+    if limit_error:
+        return err(limit_error, 400)
+    min_score, score_error = _safe_float_arg("min_score", 0.0, 0.0, 100.0)
+    if score_error:
+        return err(score_error, 400)
+    kind = (request.args.get("kind") or "all").lower()
+    if kind not in {"all", "instrument", "model"}:
+        return err("kind must be all, instrument, or model.", 400)
+    include_hold = (request.args.get("include_hold", "1").lower() not in {"0", "false", "no"})
+    payload = opportunity.opportunities(
+        kind=kind,
+        include_hold=include_hold,
+        min_score=min_score,
+        limit=limit,
+    )
+    return ok({**payload, "disclaimer": ANALYSIS_ONLY_DISCLAIMER})
 
 
 @app.route("/api/upload", methods=["POST"])
@@ -494,6 +749,103 @@ def model_analyze():
         "insights": ins,
         "warnings": ps.warnings,
     })
+
+
+@app.route("/api/model/strategy/analyze")
+def model_strategy_analyze():
+    mdl = portfolio.get(request.args.get("id", ""))
+    if mdl is None:
+        return err("Unknown model.", 404)
+    cost_bps, slippage_bps, window, arg_error = _strategy_request_args()
+    if arg_error:
+        return err(arg_error, 400)
+    try:
+        ps = portfolio.build_series(mdl, allow_sample=False, allow_simulated=False)
+        p = provenance.portfolio(ps.provenance)
+        if not p["eligible_for_real_research"]:
+            return ok({
+                "series_kind": "model",
+                "id": mdl.id,
+                "name": mdl.name,
+                "data_mode": p["data_mode"],
+                "display_label": p["display_label"],
+                "eligible_for_real_research": False,
+                "reason": p["reason"],
+                "required_action": p["required_action"],
+                "missing_tickers": p["missing_tickers"],
+                "warnings": p["warnings"],
+                "data_provenance": p,
+                "methodology": {"analysis_only": True, "no_lookahead": True},
+                "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+            })
+        result = strategy.analyze_strategy(
+            ps.close, cost_bps=cost_bps, slippage_bps=slippage_bps, **window)
+    except ValueError as e:
+        return ok({
+            "series_kind": "model",
+            "id": mdl.id,
+            "name": mdl.name,
+            "data_mode": "invalid_for_research",
+            "display_label": "Data Quality Blocked",
+            "eligible_for_real_research": False,
+            "reason": str(e),
+            "required_action": "Upload real price history for every model holding before running Strategy Lab.",
+            "missing_tickers": [h.ticker for h in mdl.holdings],
+            "warnings": [str(e)],
+            "data_provenance": {"missing_tickers": [h.ticker for h in mdl.holdings]},
+            "methodology": {"analysis_only": True, "no_lookahead": True},
+            "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+        })
+    return ok({
+        "series_kind": "model",
+        "id": mdl.id,
+        "name": mdl.name,
+        "mandate": {"key": mdl.mandate_key, **mandate.get(mdl.mandate_key)},
+        "provenance": ps.provenance,
+        "data_mode": p["data_mode"],
+        "display_label": p["display_label"],
+        "eligible_for_real_research": p["eligible_for_real_research"],
+        "reason": p["reason"],
+        "required_action": p["required_action"],
+        "data_provenance": p,
+        "warnings": ps.warnings,
+        **result,
+        "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+    })
+
+
+@app.route("/api/model/clinic")
+def model_clinic():
+    mdl = portfolio.get(request.args.get("id", ""))
+    if mdl is None:
+        return err("Unknown model.", 404)
+    try:
+        result = portfolio_clinic.analyze_clinic(mdl)
+    except ValueError as e:
+        return err(str(e), 400)
+    return ok({**result, "disclaimer": ANALYSIS_ONLY_DISCLAIMER})
+
+
+@app.route("/api/report/instrument")
+def report_instrument():
+    symbol = data.clean_symbol(request.args.get("ticker", ""), fallback="")
+    if not symbol:
+        return err("Provide a ticker symbol.", 400)
+    inst = data.get(symbol)
+    if inst is None:
+        return err(f"Unknown ticker '{symbol}'.", 404)
+    return ok(reporting.instrument_report(inst))
+
+
+@app.route("/api/report/model")
+def report_model():
+    mdl = portfolio.get(request.args.get("id", ""))
+    if mdl is None:
+        return err("Unknown model.", 404)
+    try:
+        return ok(reporting.model_report(mdl))
+    except ValueError as e:
+        return err(str(e), 400)
 
 
 def _holdings_with_signals(ps: portfolio.PortfolioSeries, mdl: portfolio.Model) -> list:
