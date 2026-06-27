@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
 import type { ModelSummary, StrategyResponse, TickerSummary } from "../api/types";
 import { DataQualityBanner } from "../components/badges/DataModeBadge";
@@ -12,11 +12,15 @@ export function StrategyLab({
   models,
   selectedInstrument,
   selectedModel,
+  onSelectInstrument,
+  onSelectModel,
 }: {
   tickers: TickerSummary[];
   models: ModelSummary[];
   selectedInstrument?: string;
   selectedModel?: string;
+  onSelectInstrument: (symbol: string) => void;
+  onSelectModel: (id: string) => void;
 }) {
   const defaultTarget = selectedModel ? `model:${selectedModel}` : selectedInstrument ? `instrument:${selectedInstrument}` : tickers[0] ? `instrument:${tickers[0].symbol}` : "";
   const [target, setTarget] = useState(defaultTarget);
@@ -24,32 +28,39 @@ export function StrategyLab({
   const [slippageBps, setSlippageBps] = useState(0);
   const [payload, setPayload] = useState<StrategyResponse | null>(null);
   const [error, setError] = useState("");
+  const requestSeq = useRef(0);
   const options = useMemo(() => [
     ...tickers.map((ticker) => ({ value: `instrument:${ticker.symbol}`, label: `${ticker.symbol} · ${ticker.name}` })),
     ...models.map((model) => ({ value: `model:${model.id}`, label: `${model.name} · model` })),
   ], [tickers, models]);
 
-  const run = async () => {
-    const [kind, id] = (target || defaultTarget).split(":");
+  const run = async (requestedTarget = target || defaultTarget) => {
+    const [kind, id] = requestedTarget.split(":");
     if (!kind || !id) return;
+    const requestId = requestSeq.current + 1;
+    requestSeq.current = requestId;
     try {
       setError("");
+      setPayload(null);
+      if (kind === "model") onSelectModel(id);
+      else onSelectInstrument(id);
       const result = kind === "model"
         ? await api.strategyModel(id, costBps, slippageBps)
         : await api.strategyInstrument(id, costBps, slippageBps);
+      if (requestId !== requestSeq.current) return;
       setPayload(result);
     } catch (err) {
+      if (requestId !== requestSeq.current) return;
+      setPayload(null);
       setError(err instanceof Error ? err.message : "Strategy Lab failed.");
     }
   };
 
   useEffect(() => {
-    if (!target && defaultTarget) setTarget(defaultTarget);
-  }, [defaultTarget, target]);
-
-  useEffect(() => {
-    if (target || defaultTarget) void run();
-  }, []);
+    if (!defaultTarget) return;
+    setTarget(defaultTarget);
+    void run(defaultTarget);
+  }, [defaultTarget]);
 
   return (
     <div className="view-stack">

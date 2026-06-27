@@ -41,7 +41,7 @@ export default function App() {
     setMandates(mandatePayload.mandates);
     setLiveAvailable(tickerPayload.live_available);
     setSelectedInstrument((current) => current || tickerPayload.tickers[0]?.symbol || "");
-    setSelectedModel((current) => current || modelPayload.models[0]?.id || "");
+    setSelectedModel((current) => current || (tickerPayload.tickers.length ? "" : modelPayload.models[0]?.id || ""));
   };
 
   const refreshCommand = async () => {
@@ -68,15 +68,26 @@ export default function App() {
     label: command?.display_label,
   }), [command]);
 
+  const selectInstrumentOnly = (symbol: string) => {
+    setSelectedInstrument(symbol);
+    setSelectedModel("");
+  };
+
+  const selectModelOnly = (id: string) => {
+    setSelectedModel(id);
+    setSelectedInstrument("");
+  };
+
   const onUploadPrice = async (file: File, symbol: string) => {
     try {
       const result = await api.uploadPrice(file, symbol);
       setNotice(`Uploaded ${result.symbol} with ${result.rows} rows.`);
       await Promise.all([refreshLists(), refreshCommand()]);
-      setSelectedInstrument(result.symbol);
+      selectInstrumentOnly(result.symbol);
       setActiveView("analysis");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Price upload failed.");
+      throw error;
     }
   };
 
@@ -85,10 +96,11 @@ export default function App() {
       const result = await api.uploadModel(file, name, mandate, context);
       setNotice(`Imported ${result.name} with ${result.n_holdings} holdings.`);
       await Promise.all([refreshLists(), refreshCommand()]);
-      setSelectedModel(result.id);
+      selectModelOnly(result.id);
       setActiveView("clinic");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Model upload failed.");
+      throw error;
     }
   };
 
@@ -97,35 +109,34 @@ export default function App() {
       const result = await api.fetchLive(symbol);
       setNotice(`Fetched ${result.symbol} with ${result.rows} rows.`);
       await Promise.all([refreshLists(), refreshCommand()]);
-      setSelectedInstrument(result.symbol);
+      selectInstrumentOnly(result.symbol);
       setActiveView("analysis");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Live data fetch failed.");
+      throw error;
     }
   };
 
   const openInstrument = (symbol: string) => {
-    setSelectedInstrument(symbol);
-    setSelectedModel("");
+    selectInstrumentOnly(symbol);
     setActiveView("analysis");
   };
 
   const openModel = (id: string) => {
-    setSelectedModel(id);
-    setSelectedInstrument("");
+    selectModelOnly(id);
     setActiveView("analysis");
   };
 
   const content = (() => {
     if (loading) return <div className="loading">Loading Helios Pro APIs...</div>;
     if (activeView === "command") {
-      return <CommandCenter payload={command} onOpenInstrument={openInstrument} onOpenModel={openModel} />;
+      return <CommandCenter payload={command} onOpenInstrument={openInstrument} onOpenModel={openModel} onOpenView={setActiveView} />;
     }
     if (activeView === "instruments") {
       return <Instruments tickers={tickers} onOpenInstrument={openInstrument} />;
     }
     if (activeView === "models") {
-      return <Models models={models} onOpenModel={openModel} onOpenClinic={(id) => { setSelectedModel(id); setActiveView("clinic"); }} />;
+      return <Models models={models} onOpenModel={openModel} onOpenClinic={(id) => { selectModelOnly(id); setActiveView("clinic"); }} />;
     }
     if (activeView === "opportunities") {
       return (
@@ -138,13 +149,31 @@ export default function App() {
       );
     }
     if (activeView === "strategy") {
-      return <StrategyLab tickers={tickers} models={models} selectedInstrument={selectedInstrument} selectedModel={selectedModel} />;
+      return (
+        <StrategyLab
+          tickers={tickers}
+          models={models}
+          selectedInstrument={selectedInstrument}
+          selectedModel={selectedModel}
+          onSelectInstrument={selectInstrumentOnly}
+          onSelectModel={selectModelOnly}
+        />
+      );
     }
     if (activeView === "clinic") {
-      return <PortfolioClinic models={models} selectedModel={selectedModel} onSelectModel={setSelectedModel} />;
+      return <PortfolioClinic models={models} selectedModel={selectedModel} onSelectModel={selectModelOnly} />;
     }
     if (activeView === "reports") {
-      return <Reports tickers={tickers} models={models} selectedInstrument={selectedInstrument} selectedModel={selectedModel} />;
+      return (
+        <Reports
+          tickers={tickers}
+          models={models}
+          selectedInstrument={selectedInstrument}
+          selectedModel={selectedModel}
+          onSelectInstrument={selectInstrumentOnly}
+          onSelectModel={selectModelOnly}
+        />
+      );
     }
     return (
       <Analysis
@@ -152,8 +181,8 @@ export default function App() {
         models={models}
         selectedInstrument={selectedInstrument}
         selectedModel={selectedModel}
-        onSelectInstrument={setSelectedInstrument}
-        onSelectModel={setSelectedModel}
+        onSelectInstrument={selectInstrumentOnly}
+        onSelectModel={selectModelOnly}
       />
     );
   })();

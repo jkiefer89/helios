@@ -1,3 +1,4 @@
+import type { KeyboardEvent } from "react";
 import type { TickerSummary } from "../api/types";
 import { SourcePill } from "../components/badges/DataModeBadge";
 import { Panel } from "../components/cards/Panel";
@@ -24,7 +25,7 @@ export function Instruments({
         {tickers.length === 0 ? (
           <EmptyState title="No instruments loaded" body="Upload a price CSV or fetch a live ticker to begin." />
         ) : (
-          <div className="terminal-table instruments-table">
+          <div className="terminal-table instruments-table" tabIndex={0} aria-label="Scrollable instrument universe table" onKeyDown={scrollTableByKey}>
             <div className="terminal-table__head">
               <span>Symbol</span><span>Name</span><span>Source</span><span>Last</span><span>1D</span><span>Action</span>
             </div>
@@ -43,4 +44,27 @@ export function Instruments({
       </Panel>
     </div>
   );
+}
+
+function scrollTableByKey(event: KeyboardEvent<HTMLDivElement>) {
+  const table = event.currentTarget;
+  const pageStep = Math.max(160, table.clientHeight - 56);
+  if (event.key === "ArrowRight") {
+    event.preventDefault();
+    table.scrollLeft += 80;
+    return;
+  }
+  if (event.key === "ArrowLeft") {
+    event.preventDefault();
+    table.scrollLeft -= 80;
+    return;
+  }
+  if (event.key === "PageDown") {
+    event.preventDefault();
+    table.scrollTop += pageStep;
+  }
+  if (event.key === "PageUp") {
+    event.preventDefault();
+    table.scrollTop -= pageStep;
+  }
 }

@@ -3,7 +3,7 @@ import { sourceSummary } from "../../utils/format";
 
 export function modeTone(mode?: string) {
   if (mode === "real") return "positive";
-  if (mode === "mixed") return "warning";
+  if (mode === "mixed" || mode === "demo") return "warning";
   if (mode === "invalid_for_research") return "negative";
   return "neutral";
 }
@@ -37,5 +37,10 @@ export function DataQualityBanner({ payload, compact = false }: { payload: Prove
 }
 
 export function SourcePill({ source }: { source?: string }) {
-  return <span className={`source-pill source-${source || "unknown"}`}>{source || "unavailable"}</span>;
+  return <span className={`source-pill source-${sourceTone(source)}`}>{source || "unavailable"}</span>;
+}
+
+function sourceTone(source?: string) {
+  if (source === "live" || source === "upload" || source === "model" || source === "demo") return source;
+  return "unknown";
 }

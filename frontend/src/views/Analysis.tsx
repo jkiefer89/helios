@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
 import type { AnalysisResponse, DataMode, ModelSummary, ProvenancePayload, TickerSummary } from "../api/types";
 import { DataQualityBanner, SourcePill } from "../components/badges/DataModeBadge";
@@ -27,35 +27,43 @@ export function Analysis({
   const [horizon, setHorizon] = useState<string | number>(21);
   const [payload, setPayload] = useState<AnalysisResponse | null>(null);
   const [error, setError] = useState("");
+  const requestSeq = useRef(0);
   const options = useMemo(() => [
     ...tickers.map((ticker) => ({ value: `instrument:${ticker.symbol}`, label: `${ticker.symbol} · ${ticker.name}` })),
     ...models.map((model) => ({ value: `model:${model.id}`, label: `${model.name} · model` })),
   ], [tickers, models]);
 
-  const load = async () => {
-    const [kind, id] = (target || defaultTarget).split(":");
+  const load = async (requestedTarget = target || defaultTarget) => {
+    const [kind, id] = requestedTarget.split(":");
     if (!kind || !id) return;
+    const requestId = requestSeq.current + 1;
+    requestSeq.current = requestId;
     try {
       setError("");
+      setPayload(null);
       if (kind === "model") {
         onSelectModel(id);
-        setPayload(await api.analyzeModel(id, horizon));
+        const result = await api.analyzeModel(id, horizon);
+        if (requestId !== requestSeq.current) return;
+        setPayload(result);
       } else {
         onSelectInstrument(id);
-        setPayload(await api.analyzeInstrument(id, Number(horizon) || 21));
+        const result = await api.analyzeInstrument(id, Number(horizon) || 21);
+        if (requestId !== requestSeq.current) return;
+        setPayload(result);
       }
     } catch (err) {
+      if (requestId !== requestSeq.current) return;
+      setPayload(null);
       setError(err instanceof Error ? err.message : "Analysis failed.");
     }
   };
 
   useEffect(() => {
-    if (!target && defaultTarget) setTarget(defaultTarget);
-  }, [defaultTarget, target]);
-
-  useEffect(() => {
-    if (target || defaultTarget) void load();
-  }, []);
+    if (!defaultTarget) return;
+    setTarget(defaultTarget);
+    void load(defaultTarget);
+  }, [defaultTarget]);
 
   return (
     <div className="view-stack">
@@ -69,56 +77,74 @@ export function Analysis({
       </header>
       {error && <div className="notice danger">{error}</div>}
       {!payload ? <EmptyState title="Select a target" body="Choose an instrument or model to load analytics." /> : (
-        <>
-          <DataQualityBanner payload={analysisQuality(payload)} />
-          <Panel title={payload.name} meta={payload.source ? <SourcePill source={payload.source} /> : payload.mandate?.label}>
-            <div className="signal-strip">
-              <strong className={`signal-action action-${payload.signal.action.toLowerCase()}`}>{payload.signal.action}</strong>
-              <p>{payload.signal.headline_rationale || payload.signal.rationale}</p>
-              <span>{fmtNumber(payload.signal.conviction_pct, 0)}% conviction</span>
-            </div>
-            {payload.signal.caveats?.length ? <div className="warning-list">{payload.signal.caveats.map((caveat) => <span key={caveat}>{caveat}</span>)}</div> : null}
-          </Panel>
-          <section className="dashboard-grid three">
-            <Panel title="Metrics">
-              <div className="metric-grid">
-                {Object.entries(payload.metrics).slice(0, 8).map(([key, value]) => (
-                  <StatTile key={key} label={titleCase(key)} value={typeof value === "number" ? fmtNumber(value, 2) : String(value ?? "—")} />
-                ))}
-              </div>
-            </Panel>
-            <Panel title="Forecast">
-              <KeyObject data={payload.forecast} />
-            </Panel>
-            <Panel title="Backtest">
-              <KeyObject data={payload.backtest} />
-            </Panel>
-          </section>
-          <Panel title="Price and Trend">
-            <LineChart labels={payload.series.dates} series={[
-              { label: "Close", values: payload.series.close, tone: "info" },
-              { label: "SMA 50", values: payload.series.sma50 || [], tone: "positive" },
-              { label: "SMA 200", values: payload.series.sma200 || [], tone: "warning" },
-            ]} />
-          </Panel>
-          {payload.holdings && (
-            <Panel title="Holdings">
-              <div className="holdings-table">
-                {payload.holdings.map((holding) => (
-                  <div key={String(holding.ticker)}>
-                    <strong>{String(holding.ticker)}</strong>
-                    <span>{fmtPct(Number(holding.weight) * 100)}</span>
-                    <span>{String(holding.source || "unavailable")}</span>
-                    <span>{String(holding.signal || "—")}</span>
-                  </div>
-                ))}
-              </div>
-            </Panel>
-          )}
-        </>
+        <AnalysisPayload payload={payload} />
       )}
     </div>
   );
+}
+
+function AnalysisPayload({ payload }: { payload: AnalysisResponse }) {
+  const quality = analysisQuality(payload);
+  const eligible = quality.eligible_for_real_research === true;
+  const actionClass = eligible ? safeAction(payload.signal.action) : "preview";
+  const signalLabel = eligible ? payload.signal.action : "PREVIEW";
+  const panelSuffix = eligible ? "" : " preview";
+  return (
+    <>
+      <DataQualityBanner payload={quality} />
+      <Panel title={`${payload.name}${eligible ? "" : " preview"}`} meta={payload.source ? <SourcePill source={payload.source} /> : payload.mandate?.label}>
+        <div className={`signal-strip ${eligible ? "" : "signal-strip--preview"}`}>
+          <strong className={`signal-action action-${actionClass}`}>{signalLabel}</strong>
+          <p>{payload.signal.headline_rationale || payload.signal.rationale}</p>
+          <span>{eligible ? `${fmtNumber(payload.signal.conviction_pct, 0)}% conviction` : "Research locked"}</span>
+        </div>
+        {!eligible && <div className="warning-list"><span>{quality.required_action || "Replace demo or mixed inputs before treating this as research evidence."}</span></div>}
+        {payload.signal.caveats?.length ? <div className="warning-list">{payload.signal.caveats.map((caveat) => <span key={caveat}>{caveat}</span>)}</div> : null}
+      </Panel>
+      <section className="dashboard-grid three">
+        <Panel title={`Metrics${panelSuffix}`}>
+          <div className="metric-grid">
+            {Object.entries(payload.metrics).slice(0, 8).map(([key, value]) => (
+              <StatTile key={key} label={titleCase(key)} value={typeof value === "number" ? fmtNumber(value, 2) : String(value ?? "—")} />
+            ))}
+          </div>
+        </Panel>
+        <Panel title={`Forecast${panelSuffix}`}>
+          <KeyObject data={payload.forecast} />
+        </Panel>
+        <Panel title={`Backtest${panelSuffix}`}>
+          <KeyObject data={payload.backtest} />
+        </Panel>
+      </section>
+      <Panel title={`Price and Trend${panelSuffix}`}>
+        <LineChart labels={payload.series.dates} series={[
+          { label: "Close", values: payload.series.close, tone: "info" },
+          { label: "SMA 50", values: payload.series.sma50 || [], tone: "positive" },
+          { label: "SMA 200", values: payload.series.sma200 || [], tone: "warning" },
+        ]} />
+      </Panel>
+      {payload.holdings && (
+        <Panel title={`Holdings${panelSuffix}`}>
+          <div className="holdings-table">
+            {payload.holdings.map((holding) => (
+              <div key={String(holding.ticker)}>
+                <strong>{String(holding.ticker)}</strong>
+                <span>{fmtPct(Number(holding.weight) * 100)}</span>
+                <span>{String(holding.source || "unavailable")}</span>
+                <span>{String(holding.signal || "—")}</span>
+              </div>
+            ))}
+          </div>
+        </Panel>
+      )}
+    </>
+  );
+}
+
+function safeAction(action?: string) {
+  const normalized = String(action || "").toLowerCase();
+  if (normalized === "buy" || normalized === "sell" || normalized === "hold" || normalized === "review") return normalized;
+  return "review";
 }
 
 function analysisQuality(payload: AnalysisResponse): ProvenancePayload {

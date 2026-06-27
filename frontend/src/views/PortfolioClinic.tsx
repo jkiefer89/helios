@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../api/client";
 import type { ClinicResponse, ModelSummary } from "../api/types";
 import { DataQualityBanner } from "../components/badges/DataModeBadge";
@@ -16,28 +16,35 @@ export function PortfolioClinic({
   selectedModel?: string;
   onSelectModel: (id: string) => void;
 }) {
-  const [modelId, setModelId] = useState(selectedModel || models[0]?.id || "");
+  const defaultModelId = selectedModel || models[0]?.id || "";
+  const [modelId, setModelId] = useState(defaultModelId);
   const [payload, setPayload] = useState<ClinicResponse | null>(null);
   const [error, setError] = useState("");
+  const requestSeq = useRef(0);
 
-  const run = async () => {
-    if (!modelId) return;
+  const run = async (requestedModelId = modelId) => {
+    if (!requestedModelId) return;
+    const requestId = requestSeq.current + 1;
+    requestSeq.current = requestId;
     try {
       setError("");
-      onSelectModel(modelId);
-      setPayload(await api.clinic(modelId));
+      setPayload(null);
+      onSelectModel(requestedModelId);
+      const result = await api.clinic(requestedModelId);
+      if (requestId !== requestSeq.current) return;
+      setPayload(result);
     } catch (err) {
+      if (requestId !== requestSeq.current) return;
+      setPayload(null);
       setError(err instanceof Error ? err.message : "Portfolio Clinic failed.");
     }
   };
 
   useEffect(() => {
-    if (!modelId && models[0]) setModelId(models[0].id);
-  }, [models, modelId]);
-
-  useEffect(() => {
-    if (modelId) void run();
-  }, []);
+    if (!defaultModelId) return;
+    setModelId(defaultModelId);
+    void run(defaultModelId);
+  }, [defaultModelId]);
 
   return (
     <div className="view-stack">
@@ -69,7 +76,7 @@ export function PortfolioClinic({
               {payload.suggestions.length === 0 ? (
                 <EmptyState title="No hypothetical changes" body="The current clinic rules did not generate changes." />
               ) : payload.suggestions.map((suggestion) => (
-                <div className={`suggestion-card suggestion-${suggestion.type}`} key={`${suggestion.type}-${suggestion.ticker || "model"}`}>
+                <div className={`suggestion-card suggestion-${safeSuggestionType(suggestion.type)}`} key={`${suggestion.type}-${suggestion.ticker || "model"}`}>
                   <strong>{suggestion.type.replace("_", " ")}{suggestion.ticker ? ` · ${suggestion.ticker}` : ""}</strong>
                   <span>{suggestion.rationale}</span>
                   <small>{fmtPct(suggestion.current_weight * 100)} to {fmtPct(suggestion.suggested_weight * 100)}</small>
@@ -106,4 +113,9 @@ export function PortfolioClinic({
 
 function DriverList({ rows }: { rows: string[] }) {
   return <ul className="checklist">{rows.map((row) => <li key={row}>{row}</li>)}</ul>;
+}
+
+function safeSuggestionType(type?: string) {
+  if (type === "trim" || type === "add" || type === "reduce" || type === "increase" || type === "rebalance") return type;
+  return "rebalance";
 }

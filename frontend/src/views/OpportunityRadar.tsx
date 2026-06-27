@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { api } from "../api/client";
 import type { OpportunitiesResponse, OpportunityItem } from "../api/types";
 import { DataQualityBanner, SourcePill } from "../components/badges/DataModeBadge";
@@ -25,15 +25,22 @@ export function OpportunityRadar({
   const [sort, setSort] = useState<"opportunity_score" | "evidence_score" | "risk_score">("opportunity_score");
   const [selectedId, setSelectedId] = useState<string>("");
   const [error, setError] = useState("");
+  const tableRef = useRef<HTMLDivElement | null>(null);
+  const requestSeq = useRef(0);
 
   const load = async () => {
+    const requestId = requestSeq.current + 1;
+    requestSeq.current = requestId;
     try {
       setError("");
       const next = await api.opportunities({ kind, includeHold, minScore, limit: 50 });
+      if (requestId !== requestSeq.current) return;
       setPayload(next);
       onPayload(next);
       setSelectedId((current) => current || next.items[0]?.id || "");
     } catch (err) {
+      if (requestId !== requestSeq.current) return;
+      setPayload(null);
       setError(err instanceof Error ? err.message : "Opportunity Radar failed.");
     }
   };
@@ -47,6 +54,13 @@ export function OpportunityRadar({
     return direction * ((b[sort] || 0) - (a[sort] || 0));
   }), [payload, sort]);
   const selected = items.find((item) => item.id === selectedId) || items[0];
+  const scrollRows = (direction: -1 | 1) => {
+    const table = tableRef.current;
+    if (!table) return;
+    const step = Math.max(160, table.clientHeight - 56);
+    table.scrollTo({ top: table.scrollTop + direction * step, behavior: "smooth" });
+    table.focus({ preventScroll: true });
+  };
 
   return (
     <div className="view-stack">
@@ -75,24 +89,31 @@ export function OpportunityRadar({
               actions={["No placeholder rows are rendered", "Sample data stays demo-only"]}
             />
           ) : (
-            <div className="terminal-table">
-              <div className="terminal-table__head"><span>Rank</span><span>Name</span><span>Action</span><span>Opp</span><span>Evidence</span><span>Risk</span></div>
-              {items.map((item, index) => (
-                <button
-                  className={selected?.id === item.id ? "selected" : ""}
-                  type="button"
-                  key={item.id}
-                  onClick={() => setSelectedId(item.id)}
-                >
-                  <span>{index + 1}</span>
-                  <span><strong>{item.symbol}</strong><small>{item.name}</small><SourcePill source={item.source} /></span>
-                  <span className={`action action-${item.action.toLowerCase()}`}>{item.action}</span>
-                  <ScoreBar value={item.opportunity_score} tone="positive" />
-                  <ScoreBar value={item.evidence_score} tone="info" />
-                  <ScoreBar value={item.risk_score} tone="negative" />
-                </button>
-              ))}
-            </div>
+            <>
+              <div className="radar-scroll-controls" aria-label="Ranked candidate row controls">
+                <span>{items.length} rows</span>
+                <button type="button" onClick={() => scrollRows(-1)}>Scroll up</button>
+                <button type="button" onClick={() => scrollRows(1)}>Scroll down</button>
+              </div>
+              <div ref={tableRef} className="terminal-table" tabIndex={0} aria-label="Scrollable ranked candidates table" onKeyDown={scrollTableByKey}>
+                <div className="terminal-table__head"><span>Rank</span><span>Name</span><span>Action</span><span>Opp</span><span>Evidence</span><span>Risk</span></div>
+                {items.map((item, index) => (
+                  <button
+                    className={selected?.id === item.id ? "selected" : ""}
+                    type="button"
+                    key={item.id}
+                    onClick={() => setSelectedId(item.id)}
+                  >
+                    <span>{index + 1}</span>
+                    <span><strong>{item.symbol}</strong><small>{item.name}</small><SourcePill source={item.source} /></span>
+                    <span className={`action action-${safeActionTone(item.action)}`}>{item.action}</span>
+                    <ScoreBar value={item.opportunity_score} tone="positive" />
+                    <ScoreBar value={item.evidence_score} tone="info" />
+                    <ScoreBar value={item.risk_score} tone="negative" />
+                  </button>
+                ))}
+              </div>
+            </>
           )}
         </Panel>
         <Panel title="Selected Candidate" meta="real drivers only">
@@ -135,4 +156,35 @@ function CandidateDetail({ item, onOpen }: { item: OpportunityItem; onOpen: () =
 
 function DriverList({ title, rows }: { title: string; rows: string[] }) {
   return <div><h3>{title}</h3><ul>{rows.map((row) => <li key={row}>{row}</li>)}</ul></div>;
+}
+
+function scrollTableByKey(event: KeyboardEvent<HTMLDivElement>) {
+  const table = event.currentTarget;
+  const pageStep = Math.max(120, table.clientHeight - 48);
+  const keySteps: Record<string, number> = {
+    ArrowDown: 58,
+    ArrowUp: -58,
+    PageDown: pageStep,
+    PageUp: -pageStep,
+  };
+  if (event.key === "Home") {
+    event.preventDefault();
+    table.scrollTop = 0;
+    return;
+  }
+  if (event.key === "End") {
+    event.preventDefault();
+    table.scrollTop = table.scrollHeight;
+    return;
+  }
+  const step = keySteps[event.key];
+  if (step === undefined) return;
+  event.preventDefault();
+  table.scrollTop += step;
+}
+
+function safeActionTone(action?: string) {
+  const normalized = (action || "").toLowerCase();
+  if (normalized === "buy" || normalized === "sell" || normalized === "hold" || normalized === "review") return normalized;
+  return "review";
 }

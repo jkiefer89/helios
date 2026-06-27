@@ -1,4 +1,4 @@
-import type { FormEvent, ReactNode } from "react";
+import { useMemo, useRef, useState, type FocusEvent, type FormEvent, type ReactNode } from "react";
 import type { DataMode, MandateSummary, ModelSummary, TickerSummary } from "../../api/types";
 import { DataModeBadge, SourcePill } from "../badges/DataModeBadge";
 import { fmtMoney, fmtPct } from "../../utils/format";
@@ -36,12 +36,73 @@ const views: Array<{ id: ViewId; label: string }> = [
 ];
 
 export function AppShell(props: ShellProps) {
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [advisorOpen, setAdvisorOpen] = useState(false);
+  const searchShellRef = useRef<HTMLDivElement | null>(null);
+  const advisorShellRef = useRef<HTMLDivElement | null>(null);
+  const activeViewLabel = views.find((view) => view.id === props.activeView)?.label || "Workspace";
+  const selectedContext = props.selectedModel
+    ? props.models.find((model) => model.id === props.selectedModel)?.name || props.selectedModel
+    : props.selectedInstrument
+      ? props.tickers.find((ticker) => ticker.symbol === props.selectedInstrument)?.symbol || props.selectedInstrument
+      : "No active selection";
+  const searchResults = useMemo(() => {
+    const query = searchQuery.trim().toLowerCase();
+    const viewResults = views.map((view) => ({
+      key: `view-${view.id}`,
+      label: view.label,
+      meta: "Workspace",
+      action: () => props.onViewChange(view.id),
+    }));
+    const instrumentResults = props.tickers.map((ticker) => ({
+      key: `instrument-${ticker.symbol}`,
+      label: `${ticker.symbol} · ${ticker.name}`,
+      meta: `Instrument · ${ticker.source || "source pending"}`,
+      action: () => props.onSelectInstrument(ticker.symbol),
+    }));
+    const modelResults = props.models.map((model) => ({
+      key: `model-${model.id}`,
+      label: model.name,
+      meta: `Model · ${model.mandate_label} · ${model.n_holdings} holdings`,
+      action: () => props.onSelectModel(model.id),
+    }));
+    const all = [...viewResults, ...instrumentResults, ...modelResults];
+    if (!query) return all.slice(0, 7);
+    return all
+      .filter((item) => `${item.label} ${item.meta}`.toLowerCase().includes(query))
+      .slice(0, 8);
+  }, [props.models, props.onSelectInstrument, props.onSelectModel, props.onViewChange, props.tickers, searchQuery]);
+  const runSearchResult = (result: { action: () => void }) => {
+    result.action();
+    setSearchOpen(false);
+    setSearchQuery("");
+  };
+  const submitSearch = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const first = searchResults[0];
+    if (first) runSearchResult(first);
+  };
+  const runAdvisorAction = (view: ViewId) => {
+    props.onViewChange(view);
+    setAdvisorOpen(false);
+  };
+  const closeSearchOnBlur = (event: FocusEvent<HTMLDivElement>) => {
+    const nextTarget = event.relatedTarget;
+    if (nextTarget && searchShellRef.current?.contains(nextTarget as Node)) return;
+    setSearchOpen(false);
+  };
+  const closeAdvisorOnBlur = (event: FocusEvent<HTMLDivElement>) => {
+    const nextTarget = event.relatedTarget;
+    if (nextTarget && advisorShellRef.current?.contains(nextTarget as Node)) return;
+    setAdvisorOpen(false);
+  };
   return (
     <div className="app-shell">
       <header className="topbar">
         <button className="brand" type="button" onClick={() => props.onViewChange("command")} aria-label="Open Command Center">
           <span className="brand-mark" aria-hidden="true" />
-          <span><b>Helios Pro</b><small>Advisor research terminal</small></span>
+          <span><b>Helios Pro</b><small>Advisor-grade research terminal</small></span>
         </button>
         <nav className="primary-nav" aria-label="Primary workspace">
           {views.map((view) => (
@@ -51,16 +112,98 @@ export function AppShell(props: ShellProps) {
               type="button"
               onClick={() => props.onViewChange(view.id)}
             >
-              {view.label}
+              <ShellIcon id={view.id} />
+              <span>{view.label}</span>
             </button>
           ))}
         </nav>
-        <div className="topbar__status">
+        <div className="topbar__tools">
           <DataModeBadge mode={props.dataMode?.mode} label={props.dataMode?.label || "Data status pending"} />
-          <span>Analysis only · no advice · no order execution</span>
+          <div className="search-shell" ref={searchShellRef} onBlur={closeSearchOnBlur}>
+            <form className="terminal-search" onSubmit={submitSearch}>
+              <span aria-hidden="true">/</span>
+              <input
+                aria-label="Search instruments, models, and reports"
+                placeholder="Search instruments, models, reports..."
+                value={searchQuery}
+                onChange={(event) => {
+                  setSearchQuery(event.currentTarget.value);
+                  setSearchOpen(true);
+                }}
+                onFocus={() => setSearchOpen(true)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") {
+                    setSearchOpen(false);
+                    return;
+                  }
+                  if (event.key !== "Enter") return;
+                  event.preventDefault();
+                  const first = searchResults[0];
+                  if (first) runSearchResult(first);
+                }}
+              />
+            </form>
+            {searchOpen && (
+              <div className="search-popover">
+                {searchResults.length === 0 ? (
+                  <span className="search-empty">No matching instruments, models, or views.</span>
+                ) : searchResults.map((result) => (
+                  <button type="button" key={result.key} onClick={() => runSearchResult(result)}>
+                    <strong>{result.label}</strong>
+                    <small>{result.meta}</small>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          <button className="tool-icon" type="button" aria-label="Open reports" onClick={() => props.onViewChange("reports")}>!</button>
+          <button className="tool-icon" type="button" aria-label="Open analysis" onClick={() => props.onViewChange("analysis")}>?</button>
+          <button className="tool-icon" type="button" aria-label="Open instruments" onClick={() => props.onViewChange("instruments")}>*</button>
+          <div className="advisor-shell" ref={advisorShellRef} onBlur={closeAdvisorOnBlur}>
+            <button
+              className="advisor-identity"
+              type="button"
+              aria-label="Advisor Console"
+              aria-expanded={advisorOpen}
+              aria-haspopup="menu"
+              onClick={() => setAdvisorOpen((open) => !open)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") setAdvisorOpen(false);
+              }}
+            >
+              <span className="advisor-avatar" aria-hidden="true">AC</span>
+              <span className="advisor-label">Advisor Console<small>Local workspace</small></span>
+            </button>
+            {advisorOpen && (
+              <div
+                className="advisor-menu"
+                role="menu"
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") setAdvisorOpen(false);
+                }}
+              >
+                <header>
+                  <strong>Advisor Console</strong>
+                  <small>Local Helios workspace</small>
+                </header>
+                <dl>
+                  <div><dt>Data mode</dt><dd>{props.dataMode?.label || "Pending"}</dd></div>
+                  <div><dt>Current view</dt><dd>{activeViewLabel}</dd></div>
+                  <div><dt>Selection</dt><dd>{selectedContext}</dd></div>
+                </dl>
+                <div className="advisor-menu__actions">
+                  <button type="button" role="menuitem" onClick={() => runAdvisorAction("command")}>Command Center</button>
+                  <button type="button" role="menuitem" onClick={() => runAdvisorAction("instruments")}>Real Data Setup</button>
+                  <button type="button" role="menuitem" onClick={() => runAdvisorAction("models")}>Client Models</button>
+                  <button type="button" role="menuitem" onClick={() => runAdvisorAction("reports")}>Reports & Disclosures</button>
+                </div>
+                <p>Authentication and data permissions are controlled by the Flask backend. Real research unlocks only after provenance checks pass.</p>
+              </div>
+            )}
+          </div>
         </div>
       </header>
-      <div className="workspace">
+      <div className={`workspace ${props.activeView === "command" ? "workspace-command" : ""}`}>
         <aside className="sidebar">
           <ImportPanel {...props} />
           <section className="side-section">
@@ -106,58 +249,124 @@ export function AppShell(props: ShellProps) {
   );
 }
 
+function ShellIcon({ id }: { id: ViewId }) {
+  const common = { fill: "none", stroke: "currentColor", strokeWidth: 1.8, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
+  return (
+    <span className="nav-icon" aria-hidden="true">
+      <svg viewBox="0 0 24 24">
+        {id === "command" && (
+          <>
+            <path {...common} d="M5 6h5v5H5zM14 6h5v5h-5zM5 15h5v3H5zM14 15h5v3h-5z" />
+          </>
+        )}
+        {id === "instruments" && <path {...common} d="M7 17V7m5 10V4m5 13v-6M4 17h16" />}
+        {id === "models" && <path {...common} d="M7 8a4 4 0 0 1 8 0v1h1a3 3 0 0 1 0 6h-2m-4 0H8a3 3 0 0 1-.6-5.9" />}
+        {id === "opportunities" && <path {...common} d="M12 4v3m0 10v3M4 12h3m10 0h3m-5.5-4.5 2-2m-9 9-2 2m0-11 2 2m9 9-2-2" />}
+        {id === "strategy" && <path {...common} d="M5 18 12 5l7 13M8.2 14h7.6M10 10h4" />}
+        {id === "clinic" && <path {...common} d="M12 21s7-4.5 7-11V5l-7-3-7 3v5c0 6.5 7 11 7 11Z" />}
+        {id === "reports" && <path {...common} d="M7 3h7l4 4v14H7zM14 3v5h5M10 12h6M10 16h6" />}
+        {id === "analysis" && <path {...common} d="M5 17l4-4 3 3 7-8M5 21h14" />}
+      </svg>
+    </span>
+  );
+}
+
 function ImportPanel(props: ShellProps) {
-  const priceForm = (event: FormEvent<HTMLFormElement>) => {
+  const [formNotice, setFormNotice] = useState("");
+  const [pendingForm, setPendingForm] = useState<"" | "live" | "price" | "model">("");
+  const clearNotice = () => setFormNotice("");
+  const priceForm = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const form = event.currentTarget;
     const file = (form.elements.namedItem("priceFile") as HTMLInputElement).files?.[0];
     const symbol = (form.elements.namedItem("priceSymbol") as HTMLInputElement).value;
-    if (file) void props.onUploadPrice(file, symbol);
-    form.reset();
+    if (!file) {
+      setFormNotice("Choose a price CSV before uploading price history.");
+      return;
+    }
+    clearNotice();
+    setPendingForm("price");
+    try {
+      await props.onUploadPrice(file, symbol);
+      setFormNotice("Price history uploaded. Analysis will refresh when processing completes.");
+      form.reset();
+    } catch (error) {
+      setFormNotice(error instanceof Error ? error.message : "Price upload failed.");
+    } finally {
+      setPendingForm("");
+    }
   };
-  const modelForm = (event: FormEvent<HTMLFormElement>) => {
+  const modelForm = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const form = event.currentTarget;
     const file = (form.elements.namedItem("modelFile") as HTMLInputElement).files?.[0];
     const name = (form.elements.namedItem("modelName") as HTMLInputElement).value;
     const mandate = (form.elements.namedItem("modelMandate") as HTMLSelectElement).value;
     const context = (form.elements.namedItem("modelContext") as HTMLTextAreaElement).value;
-    if (file) void props.onUploadModel(file, name, mandate, context);
-    form.reset();
+    if (!file) {
+      setFormNotice("Choose a model CSV or spreadsheet before importing a model.");
+      return;
+    }
+    clearNotice();
+    setPendingForm("model");
+    try {
+      await props.onUploadModel(file, name, mandate, context);
+      setFormNotice("Model imported. Portfolio Clinic will refresh when processing completes.");
+      form.reset();
+    } catch (error) {
+      setFormNotice(error instanceof Error ? error.message : "Model upload failed.");
+    } finally {
+      setPendingForm("");
+    }
   };
-  const liveForm = (event: FormEvent<HTMLFormElement>) => {
+  const liveForm = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const form = event.currentTarget;
     const symbol = (form.elements.namedItem("liveSymbol") as HTMLInputElement).value.trim();
-    if (symbol) void props.onFetchLive(symbol);
-    form.reset();
+    if (!symbol) {
+      setFormNotice("Enter a ticker symbol before fetching live data.");
+      return;
+    }
+    clearNotice();
+    setPendingForm("live");
+    try {
+      await props.onFetchLive(symbol);
+      setFormNotice("Live data fetched. Analysis will refresh when processing completes.");
+      form.reset();
+    } catch (error) {
+      setFormNotice(error instanceof Error ? error.message : "Live data fetch failed.");
+    } finally {
+      setPendingForm("");
+    }
   };
   return (
     <section className="side-section onboarding">
       <h2>Real Data Onboarding</h2>
       <p>Real research unlocks only from live or uploaded price history. Sample data remains demo-only.</p>
+      {formNotice && <div className="form-feedback" role="status">{formNotice}</div>}
       <form onSubmit={liveForm}>
         <label>Fetch live ticker</label>
         <div className="inline-form">
-          <input name="liveSymbol" aria-label="Live ticker symbol" disabled={!props.liveAvailable} />
-          <button type="submit" disabled={!props.liveAvailable}>Fetch</button>
+          <input name="liveSymbol" aria-label="Live ticker symbol" disabled={!props.liveAvailable || pendingForm !== ""} />
+          <button type="submit" disabled={!props.liveAvailable || pendingForm !== ""}>{pendingForm === "live" ? "Fetching..." : "Fetch"}</button>
         </div>
+        {!props.liveAvailable && <small className="form-hint">Live fetch is unavailable in this environment. Upload a price CSV to unlock real-data analysis.</small>}
       </form>
       <form onSubmit={priceForm}>
         <label>Upload price CSV</label>
-        <input name="priceFile" type="file" accept=".csv" aria-label="Price CSV" />
-        <input name="priceSymbol" aria-label="Uploaded series symbol" />
-        <button type="submit">Upload price history</button>
+        <input name="priceFile" type="file" accept=".csv" aria-label="Price CSV" disabled={pendingForm !== ""} />
+        <input name="priceSymbol" aria-label="Uploaded series symbol" disabled={pendingForm !== ""} />
+        <button type="submit" disabled={pendingForm !== ""}>{pendingForm === "price" ? "Uploading..." : "Upload price history"}</button>
       </form>
       <form onSubmit={modelForm}>
         <label>Upload model CSV/Excel</label>
-        <input name="modelFile" type="file" accept=".xlsx,.xlsm,.csv,.tsv" aria-label="Model file" />
-        <input name="modelName" aria-label="Model name" />
-        <select name="modelMandate" aria-label="Model mandate">
+        <input name="modelFile" type="file" accept=".xlsx,.xlsm,.csv,.tsv" aria-label="Model file" disabled={pendingForm !== ""} />
+        <input name="modelName" aria-label="Model name" disabled={pendingForm !== ""} />
+        <select name="modelMandate" aria-label="Model mandate" disabled={pendingForm !== ""}>
           {props.mandates.map((mandate) => <option key={mandate.key} value={mandate.key}>{mandate.label}</option>)}
         </select>
-        <textarea name="modelContext" rows={2} aria-label="Model context" />
-        <button type="submit">Upload model</button>
+        <textarea name="modelContext" rows={2} aria-label="Model context" disabled={pendingForm !== ""} />
+        <button type="submit" disabled={pendingForm !== ""}>{pendingForm === "model" ? "Uploading..." : "Upload model"}</button>
       </form>
     </section>
   );
