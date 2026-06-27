@@ -5,7 +5,7 @@ import { DataQualityBanner } from "../components/badges/DataModeBadge";
 import { Panel, StatTile } from "../components/cards/Panel";
 import { LineChart } from "../components/charts/Charts";
 import { EmptyState } from "../components/empty-states/EmptyState";
-import { fmtNumber, fmtPct } from "../utils/format";
+import { fmtAuto, fmtNumber, fmtPct, titleCase } from "../utils/format";
 
 export function StrategyLab({
   tickers,
@@ -75,12 +75,22 @@ export function StrategyLab({
       </header>
       {error && <div className="notice danger">{error}</div>}
       {payload && <DataQualityBanner payload={payload} />}
+      {payload && !payload.eligible_for_real_research && (
+        <div className="strategy-demo-warning" role="status">
+          <strong>Demo strategy result — synthetic/sample data, not real market evidence.</strong>
+          <span>{payload.required_action || payload.reason || "Replace demo history with live or uploaded data before using strategy evidence."}</span>
+        </div>
+      )}
       {payload && !payload.strategy ? (
         <EmptyState title={payload.display_label || "Strategy evidence blocked"} body={payload.reason || payload.required_action || "Upload real history before using strategy evidence."} />
       ) : payload ? (
         <>
           <section className="dashboard-grid three">
             <Panel title="Evidence Verdict" meta={payload.beat_benchmark ? "Beat benchmark" : "Did not beat"}>
+              <div className={`verdict-chip ${payload.beat_benchmark ? "verdict-positive" : "verdict-warning"}`}>
+                <b>Beat benchmark?</b>
+                <span>{payload.beat_benchmark ? "Yes" : "No"}</span>
+              </div>
               <p className="lead">{payload.beat_benchmark ? "Signal evidence beat buy-and-hold in this window." : "Signal evidence did not clear buy-and-hold in this window."}</p>
               <div className="metric-grid">
                 <StatTile label="Strategy return" value={fmtPct(payload.strategy?.total_return_pct)} tone={(payload.strategy?.total_return_pct || 0) >= 0 ? "positive" : "negative"} />
@@ -95,8 +105,8 @@ export function StrategyLab({
             <Panel title="Evidence Quality">
               <KeyValues data={{
                 "Data mode": payload.display_label || payload.data_mode,
-                "Eligible": payload.eligible_for_real_research ? "Yes" : "No",
-                "Cost model": `${costBps} bps + ${slippageBps} bps`,
+                "Eligible": payload.eligible_for_real_research,
+                "Cost model": `${costBps} bps commission + ${slippageBps} bps slippage`,
               }} />
             </Panel>
           </section>
@@ -110,6 +120,18 @@ export function StrategyLab({
             <Panel title="Drawdown"><LineChart labels={payload.dates || []} series={[{ label: "Drawdown", values: payload.drawdown_curve || [], tone: "negative" }]} height={140} /></Panel>
             <Panel title="Rolling Sharpe"><LineChart labels={payload.dates || []} series={[{ label: "Rolling Sharpe", values: payload.rolling_sharpe_curve || [], tone: "warning" }]} height={140} /></Panel>
           </section>
+          <section className="dashboard-grid">
+            <Panel title="Assumptions, Costs, and Slippage">
+              <KeyValues data={{
+                ...(payload.assumptions || {}),
+                "Commission cost": `${costBps} bps`,
+                "Slippage": `${slippageBps} bps`,
+              }} />
+            </Panel>
+            <Panel title="Methodology and Caveats">
+              <KeyValues data={payload.methodology || { methodology: "Backend evidence model only" }} />
+            </Panel>
+          </section>
         </>
       ) : <EmptyState title="Select a target" body="Choose an instrument or model to run Strategy Lab." />}
     </div>
@@ -117,5 +139,17 @@ export function StrategyLab({
 }
 
 function KeyValues({ data }: { data: Record<string, unknown> }) {
-  return <div className="key-values">{Object.entries(data).map(([key, value]) => <span key={key}><b>{String(value ?? "—")}</b><small>{key}</small></span>)}</div>;
+  return (
+    <div className="key-values">
+      {Object.entries(data).map(([key, value]) => (
+        <span key={key}><b>{formatStrategyValue(value)}</b><small>{titleCase(key)}</small></span>
+      ))}
+    </div>
+  );
+}
+
+function formatStrategyValue(value: unknown): string {
+  if (Array.isArray(value)) return value.length ? `${value.length} items` : "None";
+  if (value && typeof value === "object") return "Details";
+  return fmtAuto(value);
 }

@@ -5,7 +5,7 @@ import { DataQualityBanner } from "../components/badges/DataModeBadge";
 import { Panel, StatTile } from "../components/cards/Panel";
 import { MiniBars } from "../components/charts/Charts";
 import { EmptyState } from "../components/empty-states/EmptyState";
-import { fmtNumber, fmtPct } from "../utils/format";
+import { fmtAuto, fmtNumber, fmtPct, titleCase } from "../utils/format";
 
 export function PortfolioClinic({
   models,
@@ -60,6 +60,12 @@ export function PortfolioClinic({
       {payload && <DataQualityBanner payload={payload} />}
       {payload && (
         <>
+          {!payload.eligible_for_real_research && (
+            <div className="strategy-demo-warning" role="status">
+              <strong>Clinic result is hypothetical — not an order.</strong>
+              <span>{payload.required_action || payload.reason || "Resolve simulated, sample, or missing holding histories before treating diagnostics as real evidence."}</span>
+            </div>
+          )}
           {(payload.warnings || []).length > 0 && (
             <div className="warning-list">{(payload.warnings || []).map((warning) => <span key={warning}>{warning}</span>)}</div>
           )}
@@ -77,7 +83,7 @@ export function PortfolioClinic({
                 <EmptyState title="No hypothetical changes" body="The current clinic rules did not generate changes." />
               ) : payload.suggestions.map((suggestion) => (
                 <div className={`suggestion-card suggestion-${safeSuggestionType(suggestion.type)}`} key={`${suggestion.type}-${suggestion.ticker || "model"}`}>
-                  <strong>{suggestion.type.replace("_", " ")}{suggestion.ticker ? ` · ${suggestion.ticker}` : ""}</strong>
+                  <strong>{titleCase(suggestion.type)}{suggestion.ticker ? ` · ${suggestion.ticker}` : ""}</strong>
                   <span>{suggestion.rationale}</span>
                   <small>{fmtPct(suggestion.current_weight * 100)} to {fmtPct(suggestion.suggested_weight * 100)}</small>
                 </div>
@@ -96,14 +102,28 @@ export function PortfolioClinic({
               <MiniBars rows={payload.risk_contributions.slice(0, 10).map((item) => ({ label: item.ticker, value: item.mrc_pct, tone: "negative" }))} />
             </Panel>
             <Panel title="Before / After Estimates">
-              <MiniBars rows={[
-                { label: "Before vol", value: payload.before.estimates.annual_vol_pct || 0, tone: "neutral" },
-                { label: "After vol", value: payload.after.estimates.annual_vol_pct || 0, tone: "positive" },
-                { label: "Before HHI", value: (payload.before.estimates.hhi || 0) * 100, tone: "neutral" },
-                { label: "After HHI", value: (payload.after.estimates.hhi || 0) * 100, tone: "positive" },
-              ]} />
+              <div className="comparison-grid">
+                <EstimateCard title="Current model" estimates={payload.before.estimates} />
+                <EstimateCard title="Hypothetical after" estimates={payload.after.estimates} />
+              </div>
             </Panel>
           </section>
+          {payload.suggestions.length > 0 && (
+            <Panel title="Suggested Changes Table" meta="hypothetical/not an order">
+              <div className="suggestion-table" tabIndex={0} aria-label="Scrollable hypothetical suggestion table">
+                <div><span>Type</span><span>Ticker</span><span>Current</span><span>Suggested</span><span>Rationale</span></div>
+                {payload.suggestions.map((suggestion) => (
+                  <div key={`${suggestion.type}-${suggestion.ticker || "model"}-${suggestion.suggested_weight}`}>
+                    <strong>{titleCase(suggestion.type)}</strong>
+                    <span>{suggestion.ticker || "Model"}</span>
+                    <span>{fmtPct(suggestion.current_weight * 100)}</span>
+                    <span>{fmtPct(suggestion.suggested_weight * 100)}</span>
+                    <span>{suggestion.rationale}</span>
+                  </div>
+                ))}
+              </div>
+            </Panel>
+          )}
           <Panel title="Explanation"><p className="lead">{payload.explanation}</p>{payload.refusals.length > 0 && <DriverList rows={payload.refusals} />}</Panel>
         </>
       )}
@@ -113,6 +133,19 @@ export function PortfolioClinic({
 
 function DriverList({ rows }: { rows: string[] }) {
   return <ul className="checklist">{rows.map((row) => <li key={row}>{row}</li>)}</ul>;
+}
+
+function EstimateCard({ title, estimates }: { title: string; estimates: Record<string, number> }) {
+  return (
+    <div className="estimate-card">
+      <strong>{title}</strong>
+      <dl>
+        {Object.entries(estimates).map(([key, value]) => (
+          <div key={key}><dt>{titleCase(key)}</dt><dd>{fmtAuto(value)}</dd></div>
+        ))}
+      </dl>
+    </div>
+  );
 }
 
 function safeSuggestionType(type?: string) {

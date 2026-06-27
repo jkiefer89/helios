@@ -5,7 +5,7 @@ import { Panel } from "../components/cards/Panel";
 import { MiniBars, ScoreBar } from "../components/charts/Charts";
 import { EmptyState } from "../components/empty-states/EmptyState";
 import type { ViewId } from "../components/layout/AppShell";
-import { fmtNumber, fmtPct } from "../utils/format";
+import { fmtNumber, fmtPct, fmtTimestamp } from "../utils/format";
 
 export function CommandCenter({
   payload,
@@ -68,11 +68,22 @@ export function CommandCenter({
       </section>
 
       {regime.warnings.length > 0 && <div className="warning-list command-warnings">{regime.warnings.map((warning) => <span key={warning}>{warning}</span>)}</div>}
+      {!payload.eligible_for_real_research && (
+        <ResearchUnlockCTA payload={payload} onOpenView={onOpenView} />
+      )}
 
       <section className="command-card-grid">
         <Panel title="Top Opportunities" meta={<PanelAction label="View All" onClick={() => onOpenView("opportunities")} />}>
           {payload.top_opportunities.length === 0 ? (
-            <GatedOpportunityRows requiredAction={payload.required_action} onOpenView={onOpenView} />
+            <LockedStatePanel
+              title="Opportunity rankings locked"
+              body={payload.required_action || "Live ticker data or uploaded real price history must pass provenance before rankings appear."}
+              actions={[
+                { label: "Fetch live data", view: "instruments" },
+                { label: "Upload price CSV", view: "instruments" },
+              ]}
+              onOpenView={onOpenView}
+            />
           ) : payload.top_opportunities.map((item, index) => (
             <button className="rank-row" type="button" key={item.id} onClick={() => onOpenInstrument(item.symbol)}>
               <b>{index + 1}</b>
@@ -84,7 +95,15 @@ export function CommandCenter({
         </Panel>
         <Panel title="Top Risks" meta={<PanelAction label="View All" onClick={() => onOpenView("opportunities")} />}>
           {payload.top_risks.length === 0 ? (
-            <GatedRiskRows onOpenView={onOpenView} />
+            <LockedStatePanel
+              title="Risk ranking locked"
+              body="Drawdown, volatility, and risk scores are hidden until eligible live or uploaded history exists."
+              actions={[
+                { label: "Open real data setup", view: "instruments" },
+                { label: "Run Strategy Lab later", view: "strategy" },
+              ]}
+              onOpenView={onOpenView}
+            />
           ) : payload.top_risks.map((item) => (
             <button className="risk-row" type="button" key={item.id} onClick={() => onOpenInstrument(item.symbol)}>
               <span><strong>{item.symbol}</strong><small>Drawdown {fmtPct(item.max_drawdown_pct)} · vol {fmtPct(item.expected_vol_pct)}</small></span>
@@ -97,7 +116,15 @@ export function CommandCenter({
         </Panel>
         <Panel title="Model Alerts" meta={<PanelAction label="View All" onClick={() => onOpenView("clinic")} />}>
           {payload.model_alerts.length === 0 ? (
-            <GatedAlertRows onOpenView={onOpenView} />
+            <LockedStatePanel
+              title="Model alerts locked"
+              body="Alerts are generated only after an imported model and every analyzed holding pass real-data provenance checks."
+              actions={[
+                { label: "Upload model", view: "models" },
+                { label: "Resolve holdings", view: "instruments" },
+              ]}
+              onOpenView={onOpenView}
+            />
           ) : payload.model_alerts.map((alert) => (
             <button className={`alert-row severity-${safeSeverity(alert.severity)}`} type="button" key={alert.id} onClick={() => onOpenModel(alert.id)}>
               <strong>{alert.name}</strong><span>{alert.message}</span><small>{alert.next_step}</small>
@@ -181,105 +208,29 @@ function PanelAction({ label, onClick }: { label: string; onClick: () => void })
   return <button className="panel-link" type="button" onClick={onClick}>{label}</button>;
 }
 
-function GatedOpportunityRows({
-  requiredAction,
+function ResearchUnlockCTA({
+  payload,
   onOpenView,
 }: {
-  requiredAction?: string;
+  payload: CommandCenterResponse;
   onOpenView: (view: ViewId) => void;
 }) {
-  const rows: GatedRow[] = [
-    {
-      title: "Real-data candidates locked",
-      detail: requiredAction || "Connect live data or upload real price/model files to generate research.",
-      meta: "Universe: gated | Model: provenance",
-      score: "LOCKED",
-      tone: "positive",
-      view: "instruments",
-    },
-    {
-      title: "Live history required",
-      detail: "Fetch an eligible live ticker series before scoring.",
-      meta: "Source: live | Evidence: missing",
-      score: "REQ",
-      tone: "positive",
-      view: "instruments",
-    },
-    {
-      title: "Uploaded history accepted",
-      detail: "CSV or spreadsheet histories can unlock analysis.",
-      meta: "Source: upload | Evidence: pending",
-      score: "REQ",
-      tone: "positive",
-      view: "instruments",
-    },
-    {
-      title: "Model coverage gate",
-      detail: "Holdings need real price coverage before ranking.",
-      meta: "Source: model | Evidence: pending",
-      score: "PEND",
-      tone: "positive",
-      view: "models",
-    },
-  ];
-  return <GatedRows tone="positive" rows={rows} onOpenView={onOpenView} />;
-}
-
-function GatedRiskRows({ onOpenView }: { onOpenView: (view: ViewId) => void }) {
-  const rows: GatedRow[] = [
-    {
-      title: "Risk rankings locked",
-      detail: "Risk scores appear only for eligible live/uploaded histories.",
-      meta: "Risk score | Drawdown | Volatility",
-      score: "LOCKED",
-      tone: "negative",
-      view: "opportunities",
-    },
-    {
-      title: "Drawdown unavailable",
-      detail: "Max drawdown is not computed from demo-only rows.",
-      meta: "Metric: max drawdown | Source: missing",
-      score: "N/A",
-      tone: "negative",
-      view: "strategy",
-    },
-    {
-      title: "Volatility unavailable",
-      detail: "Risk model waits for eligible price history.",
-      meta: "Metric: realized vol | Source: missing",
-      score: "N/A",
-      tone: "negative",
-      view: "analysis",
-    },
-    {
-      title: "Synthetic alerts blocked",
-      detail: "No fabricated risk rows are shown for presentation density.",
-      meta: "Gate: fail-closed | Research: blocked",
-      score: "HONEST",
-      tone: "negative",
-      view: "reports",
-    },
-  ];
-  return <GatedRows tone="negative" rows={rows} onOpenView={onOpenView} />;
-}
-
-function GatedAlertRows({ onOpenView }: { onOpenView: (view: ViewId) => void }) {
-  const rows = [
-    ["up", "No model alerts", "Upload a model and provide real history for every holding.", "IDLE", "models"],
-    ["warn", "Portfolio diagnostics", "Exposure and drift alerts require model holdings.", "PENDING", "clinic"],
-    ["warn", "Holding coverage", "Every holding needs eligible real price history.", "PENDING", "instruments"],
-    ["info", "Report workflow", "Advisor report remains blocked until provenance passes.", "BLOCKED", "reports"],
-  ] as const;
   return (
-    <div className="alert-terminal-list">
-      {rows.map(([icon, title, detail, status, view]) => (
-        <button className={`alert-terminal-row alert-${icon}`} type="button" key={title} onClick={() => onOpenView(view)}>
-          <SignalIcon tone={icon} />
-          <span><strong>{title}</strong><small>{detail}</small></span>
-          <em>{status}</em>
-        </button>
-      ))}
-    </div>
+    <section className="research-unlock-cta" aria-label="Real research locked">
+      <div>
+        <span>Real Research Locked</span>
+        <h2>Demo Mode cannot power real rankings.</h2>
+        <p>
+          {payload.display_label || "Demo data"} is available for workflow review only. Sample or synthetic histories cannot unlock
+          Opportunity Radar rankings, model alerts, or advisor reports until live ticker data or uploaded real files pass provenance checks.
+        </p>
+      </div>
+      <div className="unlock-actions">
+        <button type="button" onClick={() => onOpenView("instruments")}>Fetch live ticker data</button>
+        <button type="button" onClick={() => onOpenView("instruments")}>Upload real price CSV</button>
+        <button type="button" onClick={() => onOpenView("models")}>Upload model CSV/Excel</button>
+      </div>
+    </section>
   );
 }
 
@@ -290,53 +241,53 @@ function ResearchQueueRows({
   payload: CommandCenterResponse;
   onOpenView: (view: ViewId) => void;
 }) {
+  const rows = buildResearchQueue(payload);
+  if (!payload.eligible_for_real_research || rows.length === 0) {
+    return (
+      <LockedStatePanel
+        title="Research queue locked"
+        body={payload.required_action || "Real research work appears after eligible live or uploaded evidence passes provenance checks."}
+        actions={[
+          { label: "Open real data setup", view: "instruments" },
+          { label: "Review report caveats", view: "reports" },
+        ]}
+        onOpenView={onOpenView}
+      />
+    );
+  }
   return (
     <div className="research-terminal-list">
-      {buildResearchQueue(payload).map((item) => (
+      {rows.map((item) => (
         <button className={`research-terminal-row priority-${safePriority(item.priority)}`} type="button" key={`${item.priority}-${item.title}`} onClick={() => onOpenView(item.view)}>
           <SignalIcon tone="info" />
           <span><strong>{item.title}</strong><small>{item.detail}</small></span>
-          <div className="queue-progress" aria-label={`${item.progress}% complete`}>
-            <i style={{ width: `${item.progress}%` }} />
-          </div>
-          <em>{item.progress}%</em>
+          <em>{item.priority}</em>
         </button>
       ))}
     </div>
   );
 }
 
-interface GatedRow {
-  title: string;
-  detail: string;
-  meta: string;
-  score: string;
-  tone: "positive" | "negative";
-  view: ViewId;
-}
-
-function GatedRows({
-  rows,
-  tone,
+function LockedStatePanel({
+  title,
+  body,
+  actions,
   onOpenView,
 }: {
-  rows: GatedRow[];
-  tone: "positive" | "negative";
+  title: string;
+  body: string;
+  actions: Array<{ label: string; view: ViewId }>;
   onOpenView: (view: ViewId) => void;
 }) {
   return (
-    <div className={`gated-terminal-list tone-${tone}`}>
-      {rows.map((row, index) => (
-        <button className="gated-terminal-row" type="button" key={`${row.title}-${row.score}`} onClick={() => onOpenView(row.view)}>
-          <b>{index + 1}</b>
-          <span>
-            <strong>{row.title}</strong>
-            <small>{row.detail}</small>
-            <i>{row.meta}</i>
-          </span>
-          <em>{row.score}</em>
-        </button>
-      ))}
+    <div className="locked-state-panel">
+      <strong>{title}</strong>
+      <p>{body}</p>
+      <div>
+        {actions.map((action) => (
+          <button key={action.label} type="button" onClick={() => onOpenView(action.view)}>{action.label}</button>
+        ))}
+      </div>
     </div>
   );
 }
@@ -576,19 +527,10 @@ function safePriority(value?: string) {
 
 function buildResearchQueue(payload: CommandCenterResponse) {
   const defaultViews: ViewId[] = ["opportunities", "clinic", "instruments", "reports"];
-  const rows = payload.research_queue.map((row, index) => ({
+  return payload.research_queue.map((row, index) => ({
     ...row,
-    progress: index === 0 ? 18 : 8,
     view: defaultViews[index] || "reports",
-  }));
-  if (!payload.eligible_for_real_research) {
-    rows.push(
-      { priority: "medium", title: "Instrument evidence gate", detail: "Eligible opportunity rows will populate after real price history is available.", progress: 0, view: "instruments" },
-      { priority: "low", title: "Score distribution hold", detail: "Distribution and pagination remain disabled until real scores exist.", progress: 0, view: "opportunities" },
-      { priority: "low", title: "Advisor report hold", detail: "Reports use backend evidence only and remain blocked for demo-only research.", progress: 0, view: "reports" },
-    );
-  }
-  return rows.slice(0, 4);
+  })).slice(0, 4);
 }
 
 interface StatusItem {
@@ -610,13 +552,6 @@ function buildStatusItems(payload: CommandCenterResponse, sourceStatus: string, 
 }
 
 function formatTimestamp(value: string) {
-  const date = new Date(value);
-  if (!Number.isFinite(date.valueOf())) return "Data timestamp pending";
-  return `Data as of ${date.toLocaleString([], {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  })}`;
+  const formatted = fmtTimestamp(value);
+  return formatted === "—" ? "Data timestamp pending" : `Data as of ${formatted}`;
 }

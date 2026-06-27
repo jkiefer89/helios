@@ -4,7 +4,7 @@ import type { ModelSummary, ReportResponse, TickerSummary } from "../api/types";
 import { DataQualityBanner } from "../components/badges/DataModeBadge";
 import { Panel } from "../components/cards/Panel";
 import { EmptyState } from "../components/empty-states/EmptyState";
-import { titleCase } from "../utils/format";
+import { fmtAuto, fmtTimestamp, titleCase } from "../utils/format";
 
 export function Reports({
   tickers,
@@ -80,10 +80,11 @@ export function Reports({
 function ReportSheet({ payload }: { payload: ReportResponse }) {
   const previewLocked = !payload.eligible_for_real_research;
   const sections = previewLocked ? maskPreviewSections(payload.sections) : payload.sections;
+  const title = reportTitle(payload);
   return (
     <article className="report-sheet">
       <header>
-        <div><div className="section-label">Helios Analysis-Only Report Preview</div><h1>{payload.title}</h1><p>{payload.timestamp}</p></div>
+        <div><div className="section-label">Helios Analysis-Only Report Preview</div><h1>{title}</h1><p>{fmtTimestamp(payload.timestamp)}</p></div>
         <span className="badge">{payload.kind}</span>
       </header>
       <DataQualityBanner payload={payload} compact />
@@ -117,8 +118,21 @@ function ReportValue({ value }: { value: unknown }) {
       </dl>
     );
   }
-  if (typeof value === "boolean") return <span>{value ? "Yes" : "No"}</span>;
-  return <span>{String(value)}</span>;
+  if (typeof value === "string" && looksLikeTimestamp(value)) return <span>{fmtTimestamp(value)}</span>;
+  return <span>{fmtAuto(value)}</span>;
+}
+
+function reportTitle(payload: ReportResponse) {
+  const lowerTitle = payload.title.toLowerCase();
+  const mode = String(payload.data_mode || payload.data_provenance?.data_mode || "").toLowerCase();
+  const label = String(payload.display_label || payload.data_provenance?.display_label || "").toLowerCase();
+  if (mode === "invalid_for_research" || label.includes("blocked")) return "Data Quality Blocked — Upload Real History";
+  if (mode === "demo" && !lowerTitle.includes("demo report")) return `Demo Report — Not Real Market Evidence: ${payload.title}`;
+  return payload.title;
+}
+
+function looksLikeTimestamp(value: string) {
+  return /^\d{4}-\d{2}-\d{2}T/.test(value) || /^\d{4}-\d{2}-\d{2}\s+\d{2}:/.test(value);
 }
 
 function maskPreviewSections(sections: Record<string, unknown>) {

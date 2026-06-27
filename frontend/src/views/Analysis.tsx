@@ -5,7 +5,7 @@ import { DataQualityBanner, SourcePill } from "../components/badges/DataModeBadg
 import { Panel, StatTile } from "../components/cards/Panel";
 import { LineChart } from "../components/charts/Charts";
 import { EmptyState } from "../components/empty-states/EmptyState";
-import { fmtNumber, fmtPct, titleCase } from "../utils/format";
+import { fmtAuto, fmtNumber, fmtPct, titleCase } from "../utils/format";
 
 export function Analysis({
   tickers,
@@ -105,7 +105,7 @@ function AnalysisPayload({ payload }: { payload: AnalysisResponse }) {
         <Panel title={`Metrics${panelSuffix}`}>
           <div className="metric-grid">
             {Object.entries(payload.metrics).slice(0, 8).map(([key, value]) => (
-              <StatTile key={key} label={titleCase(key)} value={typeof value === "number" ? fmtNumber(value, 2) : String(value ?? "—")} />
+              <StatTile key={key} label={titleCase(key)} value={fmtAuto(value)} />
             ))}
           </div>
         </Panel>
@@ -197,9 +197,7 @@ function KeyObject({ data }: { data: Record<string, unknown> }) {
 }
 
 function displayValue(value: unknown): string {
-  if (typeof value === "number") return fmtNumber(value, 2);
-  if (typeof value === "boolean") return value ? "Yes" : "No";
   if (Array.isArray(value)) return `${value.length} items`;
   if (value && typeof value === "object") return "Details";
-  return String(value ?? "—");
+  return fmtAuto(value);
 }
