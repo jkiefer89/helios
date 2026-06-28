@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
 import type { DataStatusResponse, ModelSummary, ReportResponse, TickerSummary } from "../api/types";
+import { AICopilotPanel, reportCopilotActions } from "../components/ai/AICopilotPanel";
 import { DataQualityBanner } from "../components/badges/DataModeBadge";
 import { Panel } from "../components/cards/Panel";
 import { EmptyState } from "../components/empty-states/EmptyState";
@@ -84,6 +85,12 @@ function ReportSheet({ payload, dataStatus }: { payload: ReportResponse; dataSta
   const previewLocked = !payload.eligible_for_real_research;
   const sections = previewLocked ? maskPreviewSections(payload.sections) : payload.sections;
   const title = reportTitle(payload);
+  const copilotPayload = useMemo<Record<string, unknown>>(() => ({
+    report: payload,
+    data_status: dataStatus,
+    preview_locked: previewLocked,
+    title,
+  }), [dataStatus, payload, previewLocked, title]);
   return (
     <article className="report-sheet">
       <header>
@@ -92,6 +99,12 @@ function ReportSheet({ payload, dataStatus }: { payload: ReportResponse; dataSta
       </header>
       <DataQualityBanner payload={payload} compact />
       <PersistenceSnapshot dataStatus={dataStatus} />
+      <AICopilotPanel
+        contextLabel={title}
+        payload={copilotPayload}
+        dataMode={payload.data_mode}
+        actions={reportCopilotActions}
+      />
       {previewLocked && (
         <div className="report-watermark">{payload.display_label || "Research locked"} · preview only</div>
       )}

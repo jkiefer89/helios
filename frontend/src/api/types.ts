@@ -292,3 +292,48 @@ export interface AnalysisResponse {
   mandate?: { label: string; key: string };
   horizon?: Record<string, unknown>;
 }
+
+export interface AIStatusResponse {
+  enabled: boolean;
+  provider: "none" | "local" | "anthropic" | "openai" | "hybrid" | string;
+  mode: "disabled" | "local" | "cloud" | "composite" | string;
+  model: string;
+  available: boolean;
+  reason: string;
+  privacy_warning?: string;
+  security_warnings?: string[];
+  keys_exposed: boolean;
+  secrets_stored: boolean;
+}
+
+export interface AIResult {
+  summary: string;
+  key_points: string[];
+  risks: string[];
+  what_would_invalidate: string[];
+  advisor_language: string;
+  compliance_caveats: string[];
+  used_numbers: string[];
+  missing_information: string[];
+  data_quality_statement: string;
+  provider: string;
+  model: string;
+  generated_at: string;
+  task?: string;
+  cached?: boolean;
+  needs_review?: boolean;
+  malformed_json?: boolean;
+  unsupported_numbers?: string[];
+  blocked_phrases?: string[];
+  deterministic_action?: string;
+  data_mode?: string;
+}
+
+export interface AIResponse {
+  result: AIResult;
+  status: AIStatusResponse;
+  provider: string;
+  model: string;
+  data_quality: DataQuality;
+  disclaimer: string;
+}

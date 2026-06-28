@@ -20,7 +20,7 @@ from flask import Flask, Response, abort, jsonify, render_template, request, sen
 from werkzeug.exceptions import HTTPException
 
 from engine import (
-    backtest, data, forecast, indicators, insights, mandate, opportunity, portfolio, portfolio_clinic,
+    ai_copilot, backtest, data, forecast, indicators, insights, mandate, opportunity, portfolio, portfolio_clinic,
     persistence, provenance, regime, reporting, sentiment, signals, strategy,
 )
 
@@ -636,6 +636,142 @@ def opportunities_api():
         limit=limit,
     )
     return ok({**payload, "disclaimer": ANALYSIS_ONLY_DISCLAIMER})
+
+
+# --------------------------------------------------------------------------- #
+# Optional AI Copilot — provider calls are server-side and fail closed.
+# --------------------------------------------------------------------------- #
+@app.route("/api/ai/status")
+def ai_status():
+    provider = ai_copilot.get_provider()
+    return ok(provider.status())
+
+
+@app.route("/api/ai/opportunity/explain", methods=["POST"])
+def ai_opportunity_explain():
+    return _ai_call("explain_opportunity")
+
+
+@app.route("/api/ai/opportunity/critique", methods=["POST"])
+def ai_opportunity_critique():
+    return _ai_call("critique_opportunity")
+
+
+@app.route("/api/ai/strategy/summary", methods=["POST"])
+def ai_strategy_summary():
+    return _ai_call("summarize_strategy")
+
+
+@app.route("/api/ai/clinic/summary", methods=["POST"])
+def ai_clinic_summary():
+    return _ai_call("summarize_portfolio_clinic")
+
+
+@app.route("/api/ai/report", methods=["POST"])
+def ai_report():
+    return _ai_call("write_advisor_report")
+
+
+@app.route("/api/ai/question", methods=["POST"])
+def ai_question():
+    return _ai_call("answer_question", require_question=True)
+
+
+def _ai_call(method_name: str, require_question: bool = False):
+    parsed, parse_error = _ai_request_payload(require_question=require_question)
+    if parse_error:
+        return err(parse_error, 400)
+    payload, question, regenerate = parsed
+    provider = ai_copilot.get_provider()
+    status = provider.status()
+    data_quality = _ai_data_quality(payload)
+    if not status.get("available"):
+        return jsonify(clean({
+            "error": status.get("reason") or "AI provider unavailable.",
+            "status": status,
+            "data_quality": data_quality,
+        })), 503
+    try:
+        if method_name == "answer_question":
+            result = provider.answer_question(payload, question, regenerate=regenerate)
+        else:
+            result = getattr(provider, method_name)(payload, regenerate=regenerate)
+    except ai_copilot.AIError as exc:
+        safe_status = exc.status or provider.status()
+        return jsonify(clean({
+            "error": str(exc),
+            "status": safe_status,
+            "data_quality": data_quality,
+        })), getattr(exc, "status_code", 503)
+    except (AttributeError, TypeError, ValueError):
+        return err("Invalid AI request.", 400)
+    return ok({
+        "result": result,
+        "status": provider.status(),
+        "provider": result.get("provider"),
+        "model": result.get("model"),
+        "data_quality": data_quality,
+        "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+    })
+
+
+def _ai_request_payload(require_question: bool = False):
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return None, "Request body must be a JSON object."
+    payload = body.get("payload")
+    if payload is None:
+        payload = {k: v for k, v in body.items() if k not in {"question", "regenerate"}}
+    if not isinstance(payload, dict):
+        return None, "payload must be a JSON object."
+    question = str(body.get("question") or "").strip()
+    if require_question and not question:
+        return None, "question is required."
+    regenerate = bool(body.get("regenerate", False))
+    return (payload, question, regenerate), None
+
+
+def _ai_data_quality(payload: dict) -> dict:
+    found = _ai_find_quality(payload)
+    return {
+        "data_mode": found.get("data_mode") or found.get("mode"),
+        "display_label": found.get("display_label"),
+        "eligible_for_real_research": found.get("eligible_for_real_research"),
+        "source": found.get("source"),
+        "row_count": found.get("row_count") or found.get("history_days"),
+        "first_date": found.get("first_date"),
+        "last_date": found.get("last_date"),
+        "last_refresh": found.get("last_refresh"),
+        "reason": found.get("reason"),
+        "required_action": found.get("required_action"),
+        "warnings": found.get("warnings") or [],
+        "missing_tickers": found.get("missing_tickers") or [],
+    }
+
+
+def _ai_find_quality(value) -> dict:
+    if isinstance(value, dict):
+        provenance_payload = value.get("data_provenance") or value.get("provenance")
+        base = provenance_payload if isinstance(provenance_payload, dict) else {}
+        keys = {
+            "data_mode", "mode", "display_label", "eligible_for_real_research", "source",
+            "row_count", "history_days", "first_date", "last_date", "last_refresh",
+            "reason", "required_action", "warnings", "missing_tickers",
+        }
+        out = {key: value.get(key) for key in keys if key in value}
+        out.update({key: base.get(key) for key in keys if key not in out and key in base})
+        if out:
+            return out
+        for child in value.values():
+            found = _ai_find_quality(child)
+            if found:
+                return found
+    if isinstance(value, list):
+        for child in value:
+            found = _ai_find_quality(child)
+            if found:
+                return found
+    return {}
 
 
 @app.route("/api/upload", methods=["POST"])

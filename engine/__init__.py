@@ -17,6 +17,7 @@ Modules:
     reporting   - printable advisor report composition
     provenance  - demo/real/mixed data eligibility gates
     persistence - local SQLite store for live/uploaded data
+    ai_copilot  - optional narrative provider layer over sanitized Helios facts
 """
 
 __all__ = [
@@ -36,4 +37,5 @@ __all__ = [
     "reporting",
     "provenance",
     "persistence",
+    "ai_copilot",
 ]

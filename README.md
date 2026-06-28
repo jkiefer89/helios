@@ -136,6 +136,58 @@ coverage, missing tickers, and copyable import templates. Refresh controls only
 refresh symbols already imported as `live`; bundled samples and uploaded CSVs
 are never silently promoted into live market data.
 
+### Optional AI Copilot
+
+AI Copilot is disabled by default and is not required for any Helios workflow.
+Helios still computes returns, scores, forecasts, trade signals, strategy
+evidence, clinic suggestions, and report sections deterministically. AI can only
+explain, critique, summarize, red-team, or draft advisor-language from sanitized
+Helios facts.
+
+Enable Claude after exporting `ANTHROPIC_API_KEY` in the server shell:
+
+```bash
+HELIOS_AI_ENABLED=1 \
+HELIOS_AI_PROVIDER=anthropic \
+./run.sh
+```
+
+`ANTHROPIC_API_KEY` is read only by Flask on the server side. It is never sent to
+frontend JavaScript, never returned by `/api/ai/status`, never stored in SQLite,
+and never used by automated tests. `HELIOS_AI_MODEL_ANTHROPIC` can override the
+Claude model; if unset, Helios uses a conservative default model name and reports
+provider errors cleanly if the configured provider cannot serve the request.
+
+Provider modes:
+
+| Variable | Purpose |
+|----------|---------|
+| `HELIOS_AI_ENABLED=0/1` | master AI Copilot switch |
+| `HELIOS_AI_PROVIDER=none` | disabled mode |
+| `HELIOS_AI_PROVIDER=anthropic` | Claude Messages API using server-side `ANTHROPIC_API_KEY` |
+| `HELIOS_AI_PROVIDER=local` | local Ollama or OpenAI-compatible server status/calls |
+| `HELIOS_AI_PROVIDER=openai` | optional OpenAI cloud provider using server-side `OPENAI_API_KEY` |
+| `HELIOS_AI_PROVIDER=dual/hybrid` | reserved; reports unavailable until a future routing pass |
+
+Local AI support is opt-in. Helios does not install Ollama, download models,
+start local model servers, or pull model weights. With
+`HELIOS_LOCAL_AI_REQUIRE_LOCALHOST=1`, non-local local-provider URLs are rejected.
+OpenAI-compatible local servers can be selected with
+`HELIOS_LOCAL_AI_BACKEND=openai_compatible`.
+
+Before any provider call, Helios builds a sanitized payload: client/model names
+are redacted by default, raw uploaded files are omitted, full price histories are
+omitted, and holdings are omitted unless `HELIOS_AI_SEND_HOLDINGS=1`. Payloads
+prefer computed metrics, drivers, warnings, provenance, persistence metadata,
+source/date ranges, row counts, and analysis-only disclaimers. Demo or blocked
+payloads must remain labeled as not real market evidence.
+
+Provider output is parsed into a fixed JSON schema and checked for unsupported
+numeric claims, prohibited assurance phrases, data-mode drift, and attempts to
+upgrade deterministic `HOLD`/`REVIEW` actions into `BUY`. Failed, malformed, or
+unavailable provider responses surface as review-required or unavailable states;
+they do not change Helios calculations.
+
 To clear local real-data state, stop Helios and delete the configured database
 file or the local store directory:
 
@@ -202,6 +254,7 @@ engine/
   sentiment.py        finance-lexicon news sentiment
   signals.py          mandate-aware BUY/SELL/HOLD with numbers-backed rationale
   backtest.py         historical validation vs buy-and-hold
+  ai_copilot.py       optional sanitized AI narrative provider layer
 templates/index.html  legacy vanilla dashboard fallback (/legacy)
 static/app.js         legacy front-end logic
 static/styles.css     legacy dashboard theme
@@ -228,6 +281,13 @@ static/styles.css     legacy dashboard theme
 | `GET /api/analyze?ticker=SYM&horizon=N` | single-instrument analysis payload |
 | `POST /api/upload` | import a single-instrument price CSV (multipart `file`, optional `symbol`) |
 | `POST /api/live` | fetch live data `{ "symbol": "GOOG" }` |
+| `GET /api/ai/status` | AI Copilot provider availability without exposing secrets |
+| `POST /api/ai/opportunity/explain` | explain a sanitized Opportunity Radar payload |
+| `POST /api/ai/opportunity/critique` | red-team a sanitized Opportunity Radar payload |
+| `POST /api/ai/strategy/summary` | summarize sanitized Strategy Lab evidence |
+| `POST /api/ai/clinic/summary` | explain sanitized Portfolio Clinic diagnostics |
+| `POST /api/ai/report` | draft analysis-only advisor narrative from a report payload |
+| `POST /api/ai/question` | answer a question using only the supplied sanitized Helios payload |
 
 ---
 
@@ -244,10 +304,11 @@ npm --prefix frontend run build
 
 The test suite is offline-only: it exercises deterministic sample/upload data,
 portfolio parsing/NAV construction, indicator/sign/forecast output shapes,
-sentiment scoring, Flask JSON API smoke paths, startup env validation, and the
-SQLite persistence workflow. Tests disable the default local database and use
-temporary database paths for persistence cases. CI runs the same checks on push
-and pull request.
+sentiment scoring, Flask JSON API smoke paths, startup env validation, SQLite
+persistence workflow, and AI Copilot behavior with fake/mocked providers. Tests
+disable the default local database, use temporary database paths for persistence
+cases, and never call Claude, OpenAI, or local model servers. CI runs the same
+checks on push and pull request.
 
 ---
 
@@ -277,6 +338,9 @@ built in:
 - **Minimal disclosure** — security headers (`X-Content-Type-Options`,
   `X-Frame-Options`, `Referrer-Policy`) are set and internal errors are not
   echoed to clients.
+- **AI key isolation** — AI provider keys are read from server-side environment
+  variables only. They are not exposed through `/api/ai/status`, frontend code,
+  SQLite persistence, logs, `.env.example`, or tests.
 
 **Residual notes:** uploaded instruments and portfolio models are a shared local
 advisor workspace backed by SQLite, not a multi-tenant permission system. Keep

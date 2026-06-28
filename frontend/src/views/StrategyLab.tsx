@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
 import type { ModelSummary, StrategyResponse, TickerSummary } from "../api/types";
+import { AICopilotPanel, strategyCopilotActions } from "../components/ai/AICopilotPanel";
 import { DataQualityBanner } from "../components/badges/DataModeBadge";
 import { Panel, StatTile } from "../components/cards/Panel";
 import { LineChart } from "../components/charts/Charts";
@@ -39,6 +40,17 @@ export function StrategyLab({
     if (kind !== "instrument") return null;
     return tickers.find((ticker) => ticker.symbol === id) || null;
   }, [defaultTarget, target, tickers]);
+  const copilotPayload = useMemo<Record<string, unknown> | null>(() => {
+    if (!payload) return null;
+    return {
+      strategy: payload,
+      target,
+      cost_bps: costBps,
+      slippage_bps: slippageBps,
+      instrument_source: selectedInstrumentMeta,
+      disclaimer: payload.disclaimer,
+    };
+  }, [costBps, payload, selectedInstrumentMeta, slippageBps, target]);
 
   const run = async (requestedTarget = target || defaultTarget) => {
     const [kind, id] = requestedTarget.split(":");
@@ -146,6 +158,12 @@ export function StrategyLab({
               <KeyValues data={payload.methodology || { methodology: "Backend evidence model only" }} />
             </Panel>
           </section>
+          <AICopilotPanel
+            contextLabel={`${payload.name || "Strategy"} evidence`}
+            payload={copilotPayload}
+            dataMode={payload.data_mode}
+            actions={strategyCopilotActions}
+          />
         </>
       ) : <EmptyState title="Select a target" body="Choose an instrument or model to run Strategy Lab." />}
     </div>

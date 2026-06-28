@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { api } from "../api/client";
 import type { OpportunitiesResponse, OpportunityItem } from "../api/types";
+import { AICopilotPanel, opportunityCopilotActions } from "../components/ai/AICopilotPanel";
 import { DataQualityBanner, SourcePill } from "../components/badges/DataModeBadge";
 import { Panel } from "../components/cards/Panel";
 import { ScoreBar } from "../components/charts/Charts";
@@ -55,6 +56,33 @@ export function OpportunityRadar({
   }), [payload, sort]);
   const selected = items.find((item) => item.id === selectedId) || items[0];
   const lockedRows = buildLockedOpportunityRows(payload);
+  const copilotPayload = useMemo<Record<string, unknown> | null>(() => {
+    if (selected) {
+      return {
+        opportunity: selected,
+        data_mode: payload?.data_mode,
+        display_label: payload?.display_label,
+        eligible_for_real_research: payload?.eligible_for_real_research,
+        data_provenance: payload?.data_provenance,
+        regime: payload?.regime,
+        disclaimer: payload?.disclaimer,
+      };
+    }
+    if (!payload) return null;
+    return {
+      radar_status: {
+        reason: payload.reason,
+        required_action: payload.required_action,
+        count: payload.count,
+        total_candidates: payload.total_candidates,
+      },
+      data_mode: payload.data_mode,
+      display_label: payload.display_label,
+      eligible_for_real_research: payload.eligible_for_real_research,
+      data_provenance: payload.data_provenance,
+      disclaimer: payload.disclaimer,
+    };
+  }, [payload, selected]);
 
   return (
     <div className="view-stack">
@@ -140,6 +168,12 @@ export function OpportunityRadar({
           )}
         </Panel>
       </section>
+      <AICopilotPanel
+        contextLabel={selected ? `${selected.symbol} opportunity review` : "Opportunity Radar gate review"}
+        payload={copilotPayload}
+        dataMode={payload?.data_mode}
+        actions={opportunityCopilotActions}
+      />
     </div>
   );
 }

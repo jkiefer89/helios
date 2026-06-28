@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
 import type { ClinicResponse, ModelSummary } from "../api/types";
+import { AICopilotPanel, clinicCopilotActions } from "../components/ai/AICopilotPanel";
 import { DataQualityBanner } from "../components/badges/DataModeBadge";
 import { Panel, StatTile } from "../components/cards/Panel";
 import { MiniBars } from "../components/charts/Charts";
@@ -26,6 +27,14 @@ export function PortfolioClinic({
     ? models.map((model) => ({ value: model.id, label: `${model.name} · ${model.mandate_label}` }))
     : [{ value: "", label: "No models imported" }];
   const selectedModelSummary = models.find((model) => model.id === modelId) || null;
+  const copilotPayload = useMemo<Record<string, unknown> | null>(() => {
+    if (!payload) return null;
+    return {
+      clinic: payload,
+      model_summary: selectedModelSummary,
+      disclaimer: payload.disclaimer,
+    };
+  }, [payload, selectedModelSummary]);
 
   const run = async (requestedModelId = modelId) => {
     if (!requestedModelId) return;
@@ -137,6 +146,12 @@ export function PortfolioClinic({
             </Panel>
           )}
           <Panel title="Explanation"><p className="lead">{payload.explanation}</p>{payload.refusals.length > 0 && <DriverList rows={payload.refusals} />}</Panel>
+          <AICopilotPanel
+            contextLabel={`${payload.name} clinic review`}
+            payload={copilotPayload}
+            dataMode={payload.data_mode}
+            actions={clinicCopilotActions}
+          />
         </>
       )}
     </div>

@@ -1,4 +1,6 @@
 import type {
+  AIResponse,
+  AIStatusResponse,
   AnalysisResponse,
   ClinicResponse,
   CommandCenterResponse,
@@ -98,4 +100,25 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ symbol }),
     }),
+  aiStatus: () => request<AIStatusResponse>("/api/ai/status"),
+  aiOpportunityExplain: (payload: Record<string, unknown>, regenerate = false) =>
+    aiPost("/api/ai/opportunity/explain", payload, undefined, regenerate),
+  aiOpportunityCritique: (payload: Record<string, unknown>, regenerate = false) =>
+    aiPost("/api/ai/opportunity/critique", payload, undefined, regenerate),
+  aiStrategySummary: (payload: Record<string, unknown>, regenerate = false) =>
+    aiPost("/api/ai/strategy/summary", payload, undefined, regenerate),
+  aiClinicSummary: (payload: Record<string, unknown>, regenerate = false) =>
+    aiPost("/api/ai/clinic/summary", payload, undefined, regenerate),
+  aiReport: (payload: Record<string, unknown>, regenerate = false) =>
+    aiPost("/api/ai/report", payload, undefined, regenerate),
+  aiQuestion: (payload: Record<string, unknown>, question: string, regenerate = false) =>
+    aiPost("/api/ai/question", payload, question, regenerate),
 };
+
+function aiPost(url: string, payload: Record<string, unknown>, question?: string, regenerate = false) {
+  return request<AIResponse>(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ payload, question, regenerate }),
+  });
+}
