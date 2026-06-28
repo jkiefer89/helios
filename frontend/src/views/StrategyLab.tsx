@@ -5,6 +5,7 @@ import { DataQualityBanner } from "../components/badges/DataModeBadge";
 import { Panel, StatTile } from "../components/cards/Panel";
 import { LineChart } from "../components/charts/Charts";
 import { EmptyState } from "../components/empty-states/EmptyState";
+import { TerminalSelect } from "../components/forms/TerminalSelect";
 import { fmtAuto, fmtNumber, fmtPct, titleCase } from "../utils/format";
 
 export function StrategyLab({
@@ -67,7 +68,7 @@ export function StrategyLab({
       <header className="view-head">
         <div><div className="section-label">Strategy Lab</div><h1>No-lookahead signal evidence</h1><p>Runs the existing Helios signal against buy-and-hold after explicit costs and slippage.</p></div>
         <form className="toolbar" onSubmit={(event) => { event.preventDefault(); void run(); }}>
-          <label>Target<select value={target} onChange={(event) => setTarget(event.target.value)}>{options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+          <label>Target<TerminalSelect ariaLabel="Strategy target" value={target} onChange={setTarget} options={options} /></label>
           <label>Cost bps<input type="number" min={0} max={500} value={costBps} onChange={(event) => setCostBps(Number(event.target.value))} /></label>
           <label>Slippage<input type="number" min={0} max={500} value={slippageBps} onChange={(event) => setSlippageBps(Number(event.target.value))} /></label>
           <button type="submit">Run</button>
@@ -142,14 +143,39 @@ function KeyValues({ data }: { data: Record<string, unknown> }) {
   return (
     <div className="key-values">
       {Object.entries(data).map(([key, value]) => (
-        <span key={key}><b>{formatStrategyValue(value)}</b><small>{titleCase(key)}</small></span>
+        <span key={key}><b>{formatStrategyValue(key, value)}</b><small>{formatStrategyLabel(key)}</small></span>
       ))}
     </div>
   );
 }
 
-function formatStrategyValue(value: unknown): string {
+function formatStrategyLabel(key: string): string {
+  const labels: Record<string, string> = {
+    avg_loss_pct: "Average loss",
+    avg_win_pct: "Average win",
+    completed_trades: "Completed trades",
+    current_position: "Current position",
+    exposure_pct: "Exposure",
+    n_trades: "Trades",
+    profit_factor: "Profit factor",
+    turnover: "Turnover",
+    win_rate_pct: "Win rate",
+    entry_threshold: "Entry threshold",
+    exit_threshold: "Exit threshold",
+    round_trip_cost_bps: "Round-trip cost",
+    slippage_bps: "Slippage",
+  };
+  return labels[key] || titleCase(key);
+}
+
+function formatStrategyValue(key: string, value: unknown): string {
   if (Array.isArray(value)) return value.length ? `${value.length} items` : "None";
   if (value && typeof value === "object") return "Details";
+  if (typeof value === "number" && Number.isFinite(value)) {
+    if (key.endsWith("_pct") || key.includes("return") || key.includes("drawdown")) return fmtPct(value);
+    if (key.endsWith("_bps")) return `${fmtNumber(value, 0)} bps`;
+    if (key === "profit_factor" || key === "sharpe") return fmtNumber(value, 2);
+    return Number.isInteger(value) ? fmtNumber(value, 0) : fmtNumber(value, 2);
+  }
   return fmtAuto(value);
 }

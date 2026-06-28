@@ -36,7 +36,7 @@ export function Instruments({
                 <SourcePill source={ticker.source} />
                 <span>{fmtMoney(ticker.last_price)}</span>
                 <span className={(ticker.change_pct || 0) >= 0 ? "up" : "down"}>{fmtPct(ticker.change_pct)}</span>
-                <span>Open analysis</span>
+                <span className="table-action">Open</span>
               </button>
             ))}
           </div>

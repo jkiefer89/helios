@@ -4,7 +4,8 @@ import type { ModelSummary, ReportResponse, TickerSummary } from "../api/types";
 import { DataQualityBanner } from "../components/badges/DataModeBadge";
 import { Panel } from "../components/cards/Panel";
 import { EmptyState } from "../components/empty-states/EmptyState";
-import { fmtAuto, fmtTimestamp, titleCase } from "../utils/format";
+import { TerminalSelect } from "../components/forms/TerminalSelect";
+import { fmtAuto, fmtNumber, fmtPct, fmtTimestamp, titleCase } from "../utils/format";
 
 export function Reports({
   tickers,
@@ -62,7 +63,7 @@ export function Reports({
       <header className="view-head no-print">
         <div><div className="section-label">Analysis-Only Report</div><h1>Evidence preview pack</h1><p>Every preview opens with data quality and analysis-only caveats.</p></div>
         <form className="toolbar" onSubmit={(event) => { event.preventDefault(); void build(); }}>
-          <label>Target<select value={target} onChange={(event) => setTarget(event.target.value)}>{options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+          <label>Target<TerminalSelect ariaLabel="Report target" value={target} onChange={setTarget} options={options} /></label>
           <button type="submit">Build preview</button>
           <button type="button" onClick={() => window.print()}>{payload?.eligible_for_real_research ? "Print evidence pack" : "Print preview"}</button>
         </form>
@@ -94,8 +95,8 @@ function ReportSheet({ payload }: { payload: ReportResponse }) {
       {payload.warnings && payload.warnings.length > 0 && <div className="warning-list">{payload.warnings.map((warning) => <span key={warning}>{warning}</span>)}</div>}
       <div className="report-grid">
         {Object.entries(sections).map(([key, value]) => (
-          <Panel key={key} title={titleCase(key)}>
-            <ReportValue value={value} />
+          <Panel key={key} title={titleCase(key)} className={`report-section report-section-${cssName(key)}`}>
+            <ReportValue value={value} labelKey={key} />
           </Panel>
         ))}
       </div>
@@ -104,22 +105,22 @@ function ReportSheet({ payload }: { payload: ReportResponse }) {
   );
 }
 
-function ReportValue({ value }: { value: unknown }) {
+function ReportValue({ value, labelKey = "" }: { value: unknown; labelKey?: string }) {
   if (value == null) return <span className="muted">—</span>;
   if (Array.isArray(value)) {
-    return value.length ? <ul>{value.map((item, index) => <li key={index}><ReportValue value={item} /></li>)}</ul> : <span className="muted">None</span>;
+    return value.length ? <ul className="report-list">{value.map((item, index) => <li key={index}><ReportValue value={item} labelKey={labelKey} /></li>)}</ul> : <span className="muted">None</span>;
   }
   if (typeof value === "object") {
     return (
       <dl className="report-dl">
         {Object.entries(value as Record<string, unknown>).map(([key, nested]) => (
-          <div key={key}><dt>{titleCase(key)}</dt><dd><ReportValue value={nested} /></dd></div>
+          <div key={key}><dt>{titleCase(key)}</dt><dd><ReportValue value={nested} labelKey={key} /></dd></div>
         ))}
       </dl>
     );
   }
   if (typeof value === "string" && looksLikeTimestamp(value)) return <span>{fmtTimestamp(value)}</span>;
-  return <span>{fmtAuto(value)}</span>;
+  return <span>{formatReportPrimitive(labelKey, value)}</span>;
 }
 
 function reportTitle(payload: ReportResponse) {
@@ -133,6 +134,19 @@ function reportTitle(payload: ReportResponse) {
 
 function looksLikeTimestamp(value: string) {
   return /^\d{4}-\d{2}-\d{2}T/.test(value) || /^\d{4}-\d{2}-\d{2}\s+\d{2}:/.test(value);
+}
+
+function cssName(key: string) {
+  return key.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+}
+
+function formatReportPrimitive(key: string, value: unknown) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fmtAuto(value);
+  const normalized = key.toLowerCase();
+  if (normalized.endsWith("_pct") || normalized.includes("pct") || normalized.includes("return") || normalized.includes("drawdown")) return fmtPct(value);
+  if (normalized.endsWith("_bps") || normalized.includes("bps")) return `${fmtNumber(value, 0)} bps`;
+  if (normalized.includes("score") || normalized.includes("quality") || normalized.includes("r2") || normalized.includes("rmse")) return fmtNumber(value, 1);
+  return Number.isInteger(value) ? fmtNumber(value, 0) : fmtNumber(value, 2);
 }
 
 function maskPreviewSections(sections: Record<string, unknown>) {

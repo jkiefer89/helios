@@ -5,6 +5,7 @@ import { DataQualityBanner, SourcePill } from "../components/badges/DataModeBadg
 import { Panel, StatTile } from "../components/cards/Panel";
 import { LineChart } from "../components/charts/Charts";
 import { EmptyState } from "../components/empty-states/EmptyState";
+import { TerminalSelect } from "../components/forms/TerminalSelect";
 import { fmtAuto, fmtNumber, fmtPct, titleCase } from "../utils/format";
 
 export function Analysis({
@@ -70,7 +71,7 @@ export function Analysis({
       <header className="view-head">
         <div><div className="section-label">Analysis</div><h1>Instrument and model detail</h1><p>Legacy analytics payloads rendered in the React terminal.</p></div>
         <form className="toolbar" onSubmit={(event) => { event.preventDefault(); void load(); }}>
-          <label>Target<select value={target} onChange={(event) => setTarget(event.target.value)}>{options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+          <label>Target<TerminalSelect ariaLabel="Analysis target" value={target} onChange={setTarget} options={options} /></label>
           <label>Horizon<input value={horizon} onChange={(event) => setHorizon(event.target.value)} /></label>
           <button type="submit">Analyze</button>
         </form>

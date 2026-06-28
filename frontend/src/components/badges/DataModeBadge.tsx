@@ -8,8 +8,9 @@ export function modeTone(mode?: string) {
   return "neutral";
 }
 
-export function DataModeBadge({ mode, label }: { mode?: string; label?: string }) {
-  return <span className={`badge tone-${modeTone(mode)}`}>{label || "Data status unavailable"}</span>;
+export function DataModeBadge({ mode, label, title }: { mode?: string; label?: string; title?: string }) {
+  const text = label || "Data status unavailable";
+  return <span className={`badge tone-${modeTone(mode)}`} title={title || text}>{text}</span>;
 }
 
 export function DataQualityBanner({ payload, compact = false }: { payload: ProvenancePayload; compact?: boolean }) {

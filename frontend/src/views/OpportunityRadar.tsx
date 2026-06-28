@@ -5,6 +5,7 @@ import { DataQualityBanner, SourcePill } from "../components/badges/DataModeBadg
 import { Panel } from "../components/cards/Panel";
 import { ScoreBar } from "../components/charts/Charts";
 import { EmptyState } from "../components/empty-states/EmptyState";
+import { TerminalSelect } from "../components/forms/TerminalSelect";
 import { fmtNumber, fmtPct } from "../utils/format";
 
 export function OpportunityRadar({
@@ -25,7 +26,6 @@ export function OpportunityRadar({
   const [sort, setSort] = useState<"opportunity_score" | "evidence_score" | "risk_score">("opportunity_score");
   const [selectedId, setSelectedId] = useState<string>("");
   const [error, setError] = useState("");
-  const tableRef = useRef<HTMLDivElement | null>(null);
   const requestSeq = useRef(0);
 
   const load = async () => {
@@ -54,13 +54,7 @@ export function OpportunityRadar({
     return direction * ((b[sort] || 0) - (a[sort] || 0));
   }), [payload, sort]);
   const selected = items.find((item) => item.id === selectedId) || items[0];
-  const scrollRows = (direction: -1 | 1) => {
-    const table = tableRef.current;
-    if (!table) return;
-    const step = Math.max(160, table.clientHeight - 56);
-    table.scrollTo({ top: table.scrollTop + direction * step, behavior: "smooth" });
-    table.focus({ preventScroll: true });
-  };
+  const lockedRows = buildLockedOpportunityRows(payload);
 
   return (
     <div className="view-stack">
@@ -72,8 +66,16 @@ export function OpportunityRadar({
           <p>Scores use the backend evidence model across signal, forecast, strategy, risk, data quality, and regime compatibility.</p>
         </div>
         <form className="toolbar" onSubmit={(event) => { event.preventDefault(); void load(); }}>
-          <label>Kind<select value={kind} onChange={(event) => setKind(event.target.value)}><option value="all">All</option><option value="instrument">Instruments</option><option value="model">Models</option></select></label>
-          <label>Sort<select value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}><option value="opportunity_score">Opportunity</option><option value="evidence_score">Evidence</option><option value="risk_score">Risk</option></select></label>
+          <label>Kind<TerminalSelect ariaLabel="Opportunity kind" value={kind} onChange={setKind} options={[
+            { value: "all", label: "All" },
+            { value: "instrument", label: "Instruments" },
+            { value: "model", label: "Models" },
+          ]} /></label>
+          <label>Sort<TerminalSelect ariaLabel="Opportunity sort" value={sort} onChange={(value) => setSort(value as typeof sort)} options={[
+            { value: "opportunity_score", label: "Opportunity" },
+            { value: "evidence_score", label: "Evidence" },
+            { value: "risk_score", label: "Risk" },
+          ]} /></label>
           <label>Min<input type="number" min={0} max={100} step={5} value={minScore} onChange={(event) => setMinScore(Number(event.target.value))} /></label>
           <label className="check"><input type="checkbox" checked={includeHold} onChange={(event) => setIncludeHold(event.target.checked)} /> Hold</label>
           <button type="submit">Refresh</button>
@@ -83,19 +85,30 @@ export function OpportunityRadar({
       <section className="radar-layout">
         <Panel title="Ranked Candidates" meta={`${items.length} shown${payload?.total_candidates ? ` · ${payload.total_candidates} screened` : ""}`}>
           {items.length === 0 ? (
-            <EmptyState
-              title="No eligible real rankings"
-              body={payload?.required_action || "Upload or fetch real price history to unlock rankings."}
-              actions={["No placeholder rows are rendered", "Sample data stays demo-only"]}
-            />
+            <>
+              <div className="radar-table-meta" aria-label="Locked opportunity radar status">
+                <span>Evidence gates</span>
+                <span>0 eligible rankings</span>
+              </div>
+              <div className="radar-preview-table locked-radar-table gate-checklist-table" tabIndex={0} aria-label="Locked opportunity radar gate checklist" onKeyDown={scrollTableByKey}>
+                <div><span>Area</span><span>Status</span><span>Required evidence</span><span>Next step</span></div>
+                {lockedRows.map((row) => (
+                  <div className="locked-table-row" key={row.area}>
+                    <strong>{row.area}<small>{row.detail}</small></strong>
+                    <span>{row.status}</span>
+                    <span>{row.evidence}</span>
+                    <em>{row.nextStep}</em>
+                  </div>
+                ))}
+              </div>
+            </>
           ) : (
             <>
-              <div className="radar-scroll-controls" aria-label="Ranked candidate row controls">
+              <div className="radar-table-meta" aria-label="Ranked candidate row summary">
                 <span>{items.length} rows</span>
-                <button type="button" onClick={() => scrollRows(-1)}>Scroll up</button>
-                <button type="button" onClick={() => scrollRows(1)}>Scroll down</button>
+                <span>{payload?.total_candidates ? `${payload.total_candidates} screened` : "Real eligible set"}</span>
               </div>
-              <div ref={tableRef} className="terminal-table" tabIndex={0} aria-label="Scrollable ranked candidates table" onKeyDown={scrollTableByKey}>
+              <div className="terminal-table" tabIndex={0} aria-label="Scrollable ranked candidates table" onKeyDown={scrollTableByKey}>
                 <div className="terminal-table__head"><span>Rank</span><span>Name</span><span>Action</span><span>Opp</span><span>Evidence</span><span>Risk</span></div>
                 {items.map((item, index) => (
                   <button
@@ -123,10 +136,57 @@ export function OpportunityRadar({
               onOpen={() => selected.kind === "model" && selected.model_id ? onOpenModel(selected.model_id) : onOpenInstrument(selected.symbol)}
             />
           ) : (
-            <EmptyState title="Selection locked" body={payload?.reason || "No eligible candidate is available."} />
+            <LockedCandidateDetail payload={payload} />
           )}
         </Panel>
       </section>
+    </div>
+  );
+}
+
+function buildLockedOpportunityRows(payload: OpportunitiesResponse | null) {
+  const requiredAction = payload?.required_action || payload?.reason || "Connect live data or upload real price/model files to generate real research.";
+  return [
+    {
+      area: "Universe eligibility",
+      detail: "No placeholder candidate rows are rendered.",
+      status: "Locked",
+      evidence: "Eligible live or uploaded price history",
+      nextStep: requiredAction,
+    },
+    {
+      area: "Opportunity scoring",
+      detail: "Scores remain unavailable until provenance checks pass.",
+      status: "Locked",
+      evidence: "Signal, forecast, strategy, and risk evidence",
+      nextStep: "Fetch live data or upload eligible histories.",
+    },
+    {
+      area: "Model coverage",
+      detail: "Model rows require covered holdings before ranking.",
+      status: "Pending",
+      evidence: "Every analyzed holding has real history",
+      nextStep: "Upload a client model and resolve missing holdings.",
+    },
+    {
+      area: "Research queue",
+      detail: "Sample data remains demo-only.",
+      status: "Blocked",
+      evidence: "Passed real-data gate",
+      nextStep: "Re-run the radar after the gate opens.",
+    },
+  ];
+}
+
+function LockedCandidateDetail({ payload }: { payload: OpportunitiesResponse | null }) {
+  return (
+    <div className="locked-state-panel locked-inspection-panel">
+      <strong>Selection locked</strong>
+      <p>{payload?.reason || payload?.required_action || "No eligible real-data candidate is available."}</p>
+      <div>
+        <span className="source-pill source-demo">sample data excluded</span>
+        <span className="source-pill source-excluded">no fake rows</span>
+      </div>
     </div>
   );
 }

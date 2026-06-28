@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useMemo, useState, type KeyboardEvent } from "react";
 import type { CommandCenterResponse } from "../api/types";
 import { SourcePill } from "../components/badges/DataModeBadge";
 import { Panel } from "../components/cards/Panel";
@@ -301,7 +301,6 @@ function LockedRadarTable({
 }) {
   const [activeFilter, setActiveFilter] = useState<RadarFilterKey>("universe");
   const [filtersOpen, setFiltersOpen] = useState(false);
-  const tableRef = useRef<HTMLDivElement | null>(null);
   const filterConfig = useMemo(() => buildRadarFilterConfig(message), [message]);
   const activeConfig = filterConfig[activeFilter];
   const filters: Array<[string, RadarFilterKey]> = [
@@ -321,13 +320,6 @@ function LockedRadarTable({
   const updateFilter = (key: RadarFilterKey) => {
     setActiveFilter(key);
     setFiltersOpen(key !== activeFilter || !filtersOpen);
-  };
-  const scrollRows = (direction: -1 | 1) => {
-    const table = tableRef.current;
-    if (!table) return;
-    const step = Math.max(120, table.clientHeight - 48);
-    table.scrollTo({ top: table.scrollTop + direction * step, behavior: "smooth" });
-    table.focus({ preventScroll: true });
   };
   return (
     <div className="radar-terminal">
@@ -360,12 +352,11 @@ function LockedRadarTable({
           </div>
         </div>
       )}
-      <div className="radar-scroll-controls" aria-label="Locked opportunity radar row controls">
+      <div className="radar-table-meta" aria-label="Locked opportunity radar row summary">
         <span>Evidence gates</span>
-        <button type="button" onClick={() => scrollRows(-1)}>Scroll up</button>
-        <button type="button" onClick={() => scrollRows(1)}>Scroll down</button>
+        <span>{rows.length} checks</span>
       </div>
-      <div ref={tableRef} className="radar-preview-table locked-radar-table gate-checklist-table" tabIndex={0} aria-label="Scrollable locked opportunity radar gate checklist" onKeyDown={scrollTableByKey}>
+      <div className="radar-preview-table locked-radar-table gate-checklist-table" tabIndex={0} aria-label="Scrollable locked opportunity radar gate checklist" onKeyDown={scrollTableByKey}>
         <div><span>Area</span><span>Status</span><span>Required evidence</span><span>Next step</span></div>
         {rows.map((row) => (
           <button className="locked-table-row" type="button" key={row.area} onClick={() => onOpenView(row.view)}>
@@ -512,7 +503,7 @@ function SignalIcon({ tone }: { tone: "up" | "warn" | "info" }) {
 }
 
 function InfoMark() {
-  return <span className="info-mark" aria-hidden="true">i</span>;
+  return <span className="info-mark" aria-hidden="true" />;
 }
 
 function safeSeverity(value?: string) {

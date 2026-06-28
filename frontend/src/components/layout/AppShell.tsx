@@ -1,6 +1,7 @@
-import { useMemo, useRef, useState, type FocusEvent, type FormEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type FocusEvent, type FormEvent, type ReactNode } from "react";
 import type { DataMode, MandateSummary, ModelSummary, TickerSummary } from "../../api/types";
 import { DataModeBadge, SourcePill } from "../badges/DataModeBadge";
+import { TerminalSelect } from "../forms/TerminalSelect";
 import { fmtMoney, fmtPct } from "../../utils/format";
 
 export type ViewId = "command" | "instruments" | "models" | "opportunities" | "strategy" | "clinic" | "reports" | "analysis";
@@ -35,6 +36,14 @@ const views: Array<{ id: ViewId; label: string }> = [
   { id: "analysis", label: "Analysis" },
 ];
 
+function compactDataModeLabel(mode: DataMode | undefined, label: string) {
+  if (mode === "demo") return "Demo Mode";
+  if (mode === "real") return "Live Data";
+  if (mode === "mixed") return "Mixed Data";
+  if (mode === "invalid_for_research") return "Research Locked";
+  return label.length > 18 ? "Data Status" : label;
+}
+
 export function AppShell(props: ShellProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
@@ -47,6 +56,8 @@ export function AppShell(props: ShellProps) {
     : props.selectedInstrument
       ? props.tickers.find((ticker) => ticker.symbol === props.selectedInstrument)?.symbol || props.selectedInstrument
       : "No active selection";
+  const dataModeFullLabel = props.dataMode?.label || "Data status pending";
+  const dataModeShortLabel = compactDataModeLabel(props.dataMode?.mode, dataModeFullLabel);
   const searchResults = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
     const viewResults = views.map((view) => ({
@@ -118,7 +129,7 @@ export function AppShell(props: ShellProps) {
           ))}
         </nav>
         <div className="topbar__tools">
-          <DataModeBadge mode={props.dataMode?.mode} label={props.dataMode?.label || "Data status pending"} />
+          <DataModeBadge mode={props.dataMode?.mode} label={dataModeShortLabel} title={dataModeFullLabel} />
           <div className="search-shell" ref={searchShellRef} onBlur={closeSearchOnBlur}>
             <form className="terminal-search" onSubmit={submitSearch}>
               <span aria-hidden="true">/</span>
@@ -274,6 +285,12 @@ function ShellIcon({ id }: { id: ViewId }) {
 function ImportPanel(props: ShellProps) {
   const [formNotice, setFormNotice] = useState("");
   const [pendingForm, setPendingForm] = useState<"" | "live" | "price" | "model">("");
+  const [modelMandate, setModelMandate] = useState(props.mandates[0]?.key || "");
+  const mandateOptions = props.mandates.map((mandate) => ({ value: mandate.key, label: mandate.label }));
+  useEffect(() => {
+    if (modelMandate || !props.mandates[0]) return;
+    setModelMandate(props.mandates[0].key);
+  }, [modelMandate, props.mandates]);
   const clearNotice = () => setFormNotice("");
   const priceForm = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -301,7 +318,7 @@ function ImportPanel(props: ShellProps) {
     const form = event.currentTarget;
     const file = (form.elements.namedItem("modelFile") as HTMLInputElement).files?.[0];
     const name = (form.elements.namedItem("modelName") as HTMLInputElement).value;
-    const mandate = (form.elements.namedItem("modelMandate") as HTMLSelectElement).value;
+    const mandate = modelMandate || props.mandates[0]?.key || "";
     const context = (form.elements.namedItem("modelContext") as HTMLTextAreaElement).value;
     if (!file) {
       setFormNotice("Choose a model CSV or spreadsheet before importing a model.");
@@ -362,9 +379,15 @@ function ImportPanel(props: ShellProps) {
         <label>Upload model CSV/Excel</label>
         <input name="modelFile" type="file" accept=".xlsx,.xlsm,.csv,.tsv" aria-label="Model file" disabled={pendingForm !== ""} />
         <input name="modelName" aria-label="Model name" disabled={pendingForm !== ""} />
-        <select name="modelMandate" aria-label="Model mandate" disabled={pendingForm !== ""}>
-          {props.mandates.map((mandate) => <option key={mandate.key} value={mandate.key}>{mandate.label}</option>)}
-        </select>
+        <TerminalSelect
+          name="modelMandate"
+          ariaLabel="Model mandate"
+          value={modelMandate}
+          options={mandateOptions}
+          onChange={setModelMandate}
+          disabled={pendingForm !== ""}
+          placeholder="Select mandate"
+        />
         <textarea name="modelContext" rows={2} aria-label="Model context" disabled={pendingForm !== ""} />
         <button type="submit" disabled={pendingForm !== ""}>{pendingForm === "model" ? "Uploading..." : "Upload model"}</button>
       </form>

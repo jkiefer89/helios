@@ -5,6 +5,7 @@ import { DataQualityBanner } from "../components/badges/DataModeBadge";
 import { Panel, StatTile } from "../components/cards/Panel";
 import { MiniBars } from "../components/charts/Charts";
 import { EmptyState } from "../components/empty-states/EmptyState";
+import { TerminalSelect } from "../components/forms/TerminalSelect";
 import { fmtAuto, fmtNumber, fmtPct, titleCase } from "../utils/format";
 
 export function PortfolioClinic({
@@ -21,6 +22,9 @@ export function PortfolioClinic({
   const [payload, setPayload] = useState<ClinicResponse | null>(null);
   const [error, setError] = useState("");
   const requestSeq = useRef(0);
+  const modelOptions = models.length > 0
+    ? models.map((model) => ({ value: model.id, label: `${model.name} · ${model.mandate_label}` }))
+    : [{ value: "", label: "No models imported" }];
 
   const run = async (requestedModelId = modelId) => {
     if (!requestedModelId) return;
@@ -51,12 +55,12 @@ export function PortfolioClinic({
       <header className="view-head">
         <div><div className="section-label">Portfolio Clinic</div><h1>Model diagnostics and hypothetical improvements</h1><p>Long-only, mandate-aware diagnostics. Suggestions are research prompts, not orders.</p></div>
         <form className="toolbar" onSubmit={(event) => { event.preventDefault(); void run(); }}>
-          <label>Model<select value={modelId} onChange={(event) => setModelId(event.target.value)}>{models.map((model) => <option key={model.id} value={model.id}>{model.name} · {model.mandate_label}</option>)}</select></label>
-          <button type="submit">Diagnose</button>
+          <label>Model<TerminalSelect ariaLabel="Portfolio Clinic model" value={modelId} onChange={setModelId} options={modelOptions} disabled={models.length === 0} /></label>
+          <button type="submit" disabled={models.length === 0}>Diagnose</button>
         </form>
       </header>
       {error && <div className="notice danger">{error}</div>}
-      {models.length === 0 ? <EmptyState title="No model imported" body="Upload a model file before running Portfolio Clinic." /> : null}
+      {models.length === 0 ? <LockedClinicState /> : null}
       {payload && <DataQualityBanner payload={payload} />}
       {payload && (
         <>
@@ -133,6 +137,40 @@ export function PortfolioClinic({
 
 function DriverList({ rows }: { rows: string[] }) {
   return <ul className="checklist">{rows.map((row) => <li key={row}>{row}</li>)}</ul>;
+}
+
+function LockedClinicState() {
+  return (
+    <section className="dashboard-grid">
+      <Panel title="Portfolio Clinic Gate" meta="model required">
+        <div className="locked-state-panel">
+          <strong>No model imported</strong>
+          <p>Upload a client model file before running Portfolio Clinic diagnostics.</p>
+          <div>
+            <span className="source-pill source-excluded">no hypothetical output</span>
+            <span className="source-pill source-model">model file required</span>
+          </div>
+        </div>
+      </Panel>
+      <Panel title="Required Evidence" meta="real-data gate">
+        <div className="radar-preview-table gate-checklist-table clinic-gate-table">
+          <div><span>Area</span><span>Status</span><span>Required evidence</span><span>Next step</span></div>
+          <div className="locked-table-row">
+            <strong>Holdings coverage<small>Every analyzed holding needs eligible price history.</small></strong>
+            <span>Pending</span>
+            <span>Imported model plus live/uploaded histories</span>
+            <em>Upload a model, then fetch or upload missing histories.</em>
+          </div>
+          <div className="locked-table-row">
+            <strong>Clinic suggestions<small>Suggestions remain disabled until the model exists.</small></strong>
+            <span>Blocked</span>
+            <span>Mandate-aware model diagnostics</span>
+            <em>Run diagnostics after model coverage is available.</em>
+          </div>
+        </div>
+      </Panel>
+    </section>
+  );
 }
 
 function EstimateCard({ title, estimates }: { title: string; estimates: Record<string, number> }) {
