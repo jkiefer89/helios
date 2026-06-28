@@ -65,7 +65,7 @@ BLOCKED_KEYS = {
     "rolling_sharpe_curve",
 }
 NAME_KEYS = {"name", "display_name", "client_name", "model_name", "title"}
-DEFAULT_ANTHROPIC_MODEL = "claude-3-5-sonnet-latest"
+DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6"
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_LOCAL_MODEL = ""
 MAX_LIST_ITEMS = 16
@@ -249,7 +249,7 @@ class AnthropicProvider(AIProvider):
             raise AIUnavailableError("ANTHROPIC_API_KEY is missing.", self.status())
         body = {
             "model": self.model,
-            "max_tokens": 900,
+            "max_tokens": 1800,
             "temperature": 0.1,
             "system": prompt["system"],
             "messages": [{"role": "user", "content": prompt["user"]}],
@@ -502,6 +502,14 @@ def sanitize_payload(payload: dict[str, Any], config: AIConfig | None = None) ->
 
 
 def build_prompt(task: str, sanitized_payload: dict[str, Any], question: str = "") -> dict[str, str]:
+    list_schema_keys = {
+        "key_points",
+        "risks",
+        "what_would_invalidate",
+        "compliance_caveats",
+        "used_numbers",
+        "missing_information",
+    }
     system = (
         "You are an advisor analytics explainer, not a trader. Helios computes; AI explains. "
         "Use only facts provided in the payload. Do not invent prices, returns, yields, ratings, news, "
@@ -513,7 +521,10 @@ def build_prompt(task: str, sanitized_payload: dict[str, Any], question: str = "
     request = {
         "task": task,
         "question": question,
-        "schema": {key: "string or string[]" for key in SCHEMA_KEYS},
+        "schema": {
+            key: "array of concise strings" if key in list_schema_keys else "concise string"
+            for key in SCHEMA_KEYS
+        },
         "payload": sanitized_payload,
         "rules": {
             "analysis_only": True,
