@@ -25,6 +25,7 @@ export function PortfolioClinic({
   const modelOptions = models.length > 0
     ? models.map((model) => ({ value: model.id, label: `${model.name} · ${model.mandate_label}` }))
     : [{ value: "", label: "No models imported" }];
+  const selectedModelSummary = models.find((model) => model.id === modelId) || null;
 
   const run = async (requestedModelId = modelId) => {
     if (!requestedModelId) return;
@@ -60,6 +61,13 @@ export function PortfolioClinic({
         </form>
       </header>
       {error && <div className="notice danger">{error}</div>}
+      {selectedModelSummary && (
+        <div className="source-context-strip">
+          <span><b>Coverage</b>{selectedModelSummary.real_coverage_count || 0}/{selectedModelSummary.n_holdings} holdings</span>
+          <span><b>State</b>{selectedModelSummary.coverage_state || "pending"}</span>
+          <span><b>Missing</b>{selectedModelSummary.missing_tickers?.join(", ") || "None"}</span>
+        </div>
+      )}
       {models.length === 0 ? <LockedClinicState /> : null}
       {payload && <DataQualityBanner payload={payload} />}
       {payload && (

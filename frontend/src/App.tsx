@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api } from "./api/client";
 import type {
   CommandCenterResponse,
+  DataStatusResponse,
   MandateSummary,
   ModelSummary,
   OpportunitiesResponse,
@@ -26,19 +27,22 @@ export default function App() {
   const [selectedInstrument, setSelectedInstrument] = useState<string>("");
   const [selectedModel, setSelectedModel] = useState<string>("");
   const [command, setCommand] = useState<CommandCenterResponse | null>(null);
+  const [dataStatus, setDataStatus] = useState<DataStatusResponse | null>(null);
   const [opportunities, setOpportunities] = useState<OpportunitiesResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState<string>("");
 
   const refreshLists = async () => {
-    const [tickerPayload, modelPayload, mandatePayload] = await Promise.all([
+    const [tickerPayload, modelPayload, mandatePayload, statusPayload] = await Promise.all([
       api.tickers(),
       api.models(),
       api.mandates(),
+      api.dataStatus(),
     ]);
     setTickers(tickerPayload.tickers);
     setModels(modelPayload.models);
     setMandates(mandatePayload.mandates);
+    setDataStatus(statusPayload);
     setLiveAvailable(tickerPayload.live_available);
     setSelectedInstrument((current) => current || tickerPayload.tickers[0]?.symbol || "");
     setSelectedModel((current) => current || (tickerPayload.tickers.length ? "" : modelPayload.models[0]?.id || ""));
@@ -117,6 +121,19 @@ export default function App() {
     }
   };
 
+  const onRefreshData = async (symbol?: string, all = false) => {
+    try {
+      const result = await api.refreshData({ symbol, all });
+      setDataStatus(result.data_status);
+      const target = all ? "live symbols" : result.requested;
+      setNotice(`Refresh checked ${target}: ${result.refreshed} refreshed, ${result.failed} failed, ${result.skipped} skipped.`);
+      await Promise.all([refreshLists(), refreshCommand()]);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Data refresh failed.");
+      throw error;
+    }
+  };
+
   const openInstrument = (symbol: string) => {
     selectInstrumentOnly(symbol);
     setActiveView("analysis");
@@ -130,10 +147,18 @@ export default function App() {
   const content = (() => {
     if (loading) return <div className="loading">Loading Helios Pro APIs...</div>;
     if (activeView === "command") {
-      return <CommandCenter payload={command} onOpenInstrument={openInstrument} onOpenModel={openModel} onOpenView={setActiveView} />;
+      return <CommandCenter payload={command} dataStatus={dataStatus} onOpenInstrument={openInstrument} onOpenModel={openModel} onOpenView={setActiveView} />;
     }
     if (activeView === "instruments") {
-      return <Instruments tickers={tickers} onOpenInstrument={openInstrument} />;
+      return (
+        <Instruments
+          tickers={tickers}
+          models={models}
+          dataStatus={dataStatus}
+          onOpenInstrument={openInstrument}
+          onRefreshData={onRefreshData}
+        />
+      );
     }
     if (activeView === "models") {
       return <Models models={models} onOpenModel={openModel} onOpenClinic={(id) => { selectModelOnly(id); setActiveView("clinic"); }} />;
@@ -172,6 +197,7 @@ export default function App() {
           selectedModel={selectedModel}
           onSelectInstrument={selectInstrumentOnly}
           onSelectModel={selectModelOnly}
+          dataStatus={dataStatus}
         />
       );
     }
@@ -204,6 +230,8 @@ export default function App() {
       onFetchLive={onFetchLive}
       liveAvailable={liveAvailable}
       notice={notice}
+      dataStatus={dataStatus}
+      onRefreshData={onRefreshData}
     >
       {content}
     </AppShell>

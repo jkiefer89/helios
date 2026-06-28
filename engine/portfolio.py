@@ -208,7 +208,49 @@ def parse_model_file(raw: bytes, filename: str, name: str,
         holdings=holdings,
     )
     register(model)
+    _persist_model(model, source_filename=filename)
     return model
+
+
+def load_persisted_models() -> None:
+    """Load persisted client models into the in-memory model store."""
+    try:
+        from . import persistence
+
+        for item in persistence.get_store().load_models():
+            holdings = [
+                Holding(h["ticker"], float(h["weight"]), str(h.get("source_state") or "pending"))
+                for h in item.holdings
+            ]
+            register(Model(
+                id=item.id,
+                name=item.name,
+                mandate_key=item.mandate_key,
+                mandate_context=item.mandate_context,
+                holdings=holdings,
+            ))
+    except Exception:
+        return
+
+
+def _persist_model(model: Model, source_filename: str = "") -> dict:
+    try:
+        from . import persistence
+
+        return persistence.get_store().persist_model(
+            model_id=model.id,
+            name=model.name,
+            mandate_key=model.mandate_key,
+            mandate_context=model.mandate_context,
+            source_filename=source_filename,
+            holdings=[
+                {"ticker": h.ticker, "weight": h.weight, "source_state": h.source or "pending"}
+                for h in model.holdings
+            ],
+            metadata={"imported_via": "model_upload"},
+        )
+    except Exception as exc:
+        return {"persisted": False, "warning": str(exc)}
 
 
 # --------------------------------------------------------------------------- #

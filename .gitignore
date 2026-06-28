@@ -17,3 +17,7 @@ frontend/*.tsbuildinfo
 
 # Client data (kept local, never published)
 *.numbers
+.helios/
+*.sqlite
+*.sqlite3
+*.db

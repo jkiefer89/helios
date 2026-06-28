@@ -1,5 +1,5 @@
 import { useMemo, useState, type KeyboardEvent } from "react";
-import type { CommandCenterResponse } from "../api/types";
+import type { CommandCenterResponse, DataStatusResponse } from "../api/types";
 import { SourcePill } from "../components/badges/DataModeBadge";
 import { Panel } from "../components/cards/Panel";
 import { MiniBars, ScoreBar } from "../components/charts/Charts";
@@ -9,11 +9,13 @@ import { fmtNumber, fmtPct, fmtTimestamp } from "../utils/format";
 
 export function CommandCenter({
   payload,
+  dataStatus,
   onOpenInstrument,
   onOpenModel,
   onOpenView,
 }: {
   payload: CommandCenterResponse | null;
+  dataStatus: DataStatusResponse | null;
   onOpenInstrument: (symbol: string) => void;
   onOpenModel: (id: string) => void;
   onOpenView: (view: ViewId) => void;
@@ -69,7 +71,7 @@ export function CommandCenter({
 
       {regime.warnings.length > 0 && <div className="warning-list command-warnings">{regime.warnings.map((warning) => <span key={warning}>{warning}</span>)}</div>}
       {!payload.eligible_for_real_research && (
-        <ResearchUnlockCTA payload={payload} onOpenView={onOpenView} />
+        <ResearchUnlockCTA payload={payload} dataStatus={dataStatus} onOpenView={onOpenView} />
       )}
 
       <section className="command-card-grid">
@@ -210,11 +212,14 @@ function PanelAction({ label, onClick }: { label: string; onClick: () => void })
 
 function ResearchUnlockCTA({
   payload,
+  dataStatus,
   onOpenView,
 }: {
   payload: CommandCenterResponse;
+  dataStatus: DataStatusResponse | null;
   onOpenView: (view: ViewId) => void;
 }) {
+  const missing = dataStatus?.missing_data.missing_tickers || [];
   return (
     <section className="research-unlock-cta" aria-label="Real research locked">
       <div>
@@ -224,6 +229,13 @@ function ResearchUnlockCTA({
           {payload.display_label || "Demo data"} is available for workflow review only. Sample or synthetic histories cannot unlock
           Opportunity Radar rankings, model alerts, or advisor reports until live ticker data or uploaded real files pass provenance checks.
         </p>
+        <div className="unlock-evidence-strip">
+          <span><b>{dataStatus?.real_instrument_count ?? 0}</b> eligible histories</span>
+          <span><b>{dataStatus?.loaded_model_count ?? 0}</b> imported models</span>
+          <span><b>{missing.length}</b> missing tickers</span>
+          <span><b>{dataStatus?.database.available ? "ready" : "warning"}</b> SQLite</span>
+        </div>
+        {missing.length > 0 && <small className="muted">Missing: {missing.slice(0, 8).join(", ")}{missing.length > 8 ? "..." : ""}</small>}
       </div>
       <div className="unlock-actions">
         <button type="button" onClick={() => onOpenView("instruments")}>Fetch live ticker data</button>

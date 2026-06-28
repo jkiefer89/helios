@@ -16,6 +16,7 @@ Modules:
     portfolio_clinic - model diagnostics and hypothetical rebalance suggestions
     reporting   - printable advisor report composition
     provenance  - demo/real/mixed data eligibility gates
+    persistence - local SQLite store for live/uploaded data
 """
 
 __all__ = [
@@ -34,4 +35,5 @@ __all__ = [
     "portfolio_clinic",
     "reporting",
     "provenance",
+    "persistence",
 ]

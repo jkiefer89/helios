@@ -191,7 +191,12 @@ _LOW_ALIASES = {"low"}
 _VOL_ALIASES = {"volume", "vol", "qty"}
 
 
-def parse_csv(raw: bytes, symbol: str, name: str | None = None) -> Instrument:
+def parse_csv(
+    raw: bytes,
+    symbol: str,
+    name: str | None = None,
+    source_filename: str | None = None,
+) -> Instrument:
     """Parse an uploaded CSV into an Instrument.
 
     Accepts flexible column names. Requires a date-like column and a
@@ -237,13 +242,18 @@ def parse_csv(raw: bytes, symbol: str, name: str | None = None) -> Instrument:
 
     inst = Instrument(symbol, name, out, "upload", [])
     register(inst)
+    _persist_instrument(
+        inst,
+        adjusted=None,
+        metadata={"source_filename": source_filename or "", "imported_via": "price_csv"},
+    )
     return inst
 
 
 # --------------------------------------------------------------------------- #
 # Live fetch (optional)
 # --------------------------------------------------------------------------- #
-def fetch_live(symbol: str, period: str = "2y") -> Instrument:
+def fetch_live(symbol: str, period: str = "2y", persist: bool = True) -> Instrument:
     """Pull live history (and free news headlines) via yfinance."""
     if not HAS_YF:
         raise RuntimeError("yfinance is not installed; live data unavailable.")
@@ -276,7 +286,94 @@ def fetch_live(symbol: str, period: str = "2y") -> Instrument:
 
     inst = Instrument(symbol.upper(), name, df, "live", headlines)
     register(inst)
+    if persist:
+        _persist_instrument(inst, adjusted=True, metadata={"period": period, "imported_via": "live_fetch"})
     return inst
+
+
+def load_persisted_instruments() -> None:
+    """Load persisted live/uploaded instruments into the process store."""
+    try:
+        from . import persistence
+
+        store = persistence.get_store()
+        for item in store.load_instruments():
+            register(Instrument(item.symbol, item.name, item.df, item.source, []))
+    except Exception:
+        # Persistence is optional; callers can inspect /api/data/status for the warning.
+        return
+
+
+def refresh_live_symbol(symbol: str, fetcher=None) -> dict:
+    """Refresh an existing live instrument and record a local refresh log."""
+    sym = clean_symbol(symbol, fallback="")
+    if not sym:
+        return {"symbol": "", "status": "error", "rows_added": 0, "message": "Invalid ticker symbol."}
+    current = get(sym)
+    if current is None or current.source != "live":
+        message = "Refresh skipped: only existing live instruments can be refreshed."
+        _record_refresh(sym, "skipped", 0, message)
+        return {"symbol": sym, "status": "skipped", "rows_added": 0, "message": message}
+    before_dates = set(pd.to_datetime(current.df.index).normalize())
+    try:
+        if fetcher is None:
+            if not HAS_YF:
+                raise RuntimeError("yfinance is not installed; live refresh unavailable.")
+            inst = fetch_live(sym, persist=False)
+        else:
+            inst = fetcher(sym)
+            if not isinstance(inst, Instrument):
+                raise RuntimeError("Live refresh provider returned an invalid payload.")
+            inst.symbol = sym
+            inst.source = "live"
+            register(inst)
+        after_dates = set(pd.to_datetime(inst.df.index).normalize())
+        rows_added = max(0, len(after_dates - before_dates))
+        _persist_instrument(inst, adjusted=True, metadata={"imported_via": "live_refresh"})
+        message = f"Refreshed {len(inst.df)} live rows."
+        _record_refresh(sym, "ok", rows_added, message)
+        return {"symbol": sym, "status": "ok", "rows_added": rows_added, "rows": len(inst.df), "message": message}
+    except Exception as exc:
+        message = str(exc) or "Live refresh failed."
+        _record_refresh(sym, "error", 0, message)
+        return {"symbol": sym, "status": "error", "rows_added": 0, "message": message}
+
+
+def _persist_instrument(
+    inst: Instrument,
+    adjusted: bool | None = None,
+    metadata: dict | None = None,
+) -> dict:
+    if inst.source not in {"live", "upload"}:
+        return {"persisted": False, "reason": "Only live/uploaded instruments are persisted."}
+    try:
+        from . import persistence
+
+        return persistence.get_store().persist_instrument(
+            symbol=inst.symbol,
+            name=inst.name,
+            source=inst.source,
+            frame=inst.df,
+            adjusted=adjusted,
+            metadata=metadata or {},
+        )
+    except Exception as exc:
+        return {"persisted": False, "warning": str(exc)}
+
+
+def _record_refresh(symbol: str, status: str, rows_added: int, message: str) -> None:
+    try:
+        from . import persistence
+
+        persistence.get_store().record_refresh(
+            symbol=symbol,
+            status=status,
+            rows_added=rows_added,
+            message=message,
+            source="live",
+        )
+    except Exception:
+        return
 
 
 # --------------------------------------------------------------------------- #

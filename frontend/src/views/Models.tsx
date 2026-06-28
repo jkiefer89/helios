@@ -27,14 +27,14 @@ export function Models({
         ) : (
           <div className="terminal-table models-table" tabIndex={0} aria-label="Scrollable imported models table" onKeyDown={scrollTableByKey}>
             <div className="terminal-table__head">
-              <span>Name</span><span>Mandate</span><span>Holdings</span><span>Top Holding</span><span>Actions</span>
+              <span>Name</span><span>Mandate</span><span>Coverage</span><span>Missing</span><span>Actions</span>
             </div>
             {models.map((model) => (
               <div className="table-row" key={model.id}>
                 <span><strong>{model.name}</strong><small>{model.id}</small></span>
                 <span>{model.mandate_label}</span>
-                <span>{model.n_holdings}</span>
-                <span>{model.top || "—"}</span>
+                <span>{model.real_coverage_count || 0}/{model.n_holdings}</span>
+                <span>{model.missing_tickers?.slice(0, 3).join(", ") || "None"}</span>
                 <span className="row-actions">
                   <button type="button" onClick={() => onOpenModel(model.id)}>Analysis</button>
                   <button type="button" onClick={() => onOpenClinic(model.id)}>Clinic</button>

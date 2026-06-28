@@ -28,6 +28,11 @@ def test_instrument_report_contains_required_sections_and_disclaimer():
     assert body["eligible_for_real_research"] is False
     assert body["data_mode"] == "demo"
     assert body["title"].startswith("Demo Report")
+    assert body["sections"]["provenance"]["source"] == "sample"
+    assert body["sections"]["provenance"]["row_count"] > 0
+    assert body["sections"]["provenance"]["first_date"]
+    assert body["sections"]["provenance"]["last_date"]
+    assert body["sections"]["provenance"]["eligible_for_real_research"] is False
     assert "analysis only" in body["disclaimer"].lower()
     assert body["timestamp"]
 

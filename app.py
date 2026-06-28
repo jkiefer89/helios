@@ -21,7 +21,7 @@ from werkzeug.exceptions import HTTPException
 
 from engine import (
     backtest, data, forecast, indicators, insights, mandate, opportunity, portfolio, portfolio_clinic,
-    provenance, regime, reporting, sentiment, signals, strategy,
+    persistence, provenance, regime, reporting, sentiment, signals, strategy,
 )
 
 app = Flask(__name__)
@@ -29,6 +29,8 @@ app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024
 FRONTEND_DIST = Path(__file__).resolve().parent / "frontend" / "dist"
 data.load_samples()
+data.load_persisted_instruments()
+portfolio.load_persisted_models()
 
 
 # --------------------------------------------------------------------------- #
@@ -465,19 +467,68 @@ def command_center():
     return ok(_command_center_payload())
 
 
+@app.route("/api/data/status")
+def data_status():
+    return ok(_data_status_payload())
+
+
+@app.route("/api/data/refresh", methods=["POST"])
+def data_refresh():
+    payload = request.get_json(silent=True) or {}
+    raw_symbol = str(payload.get("symbol") or "").strip()
+    refresh_all = bool(payload.get("all")) or raw_symbol.lower() in {"", "all", "*"}
+    if refresh_all:
+        symbols = [inst.symbol for inst in data.all_instruments() if inst.source == "live"]
+    else:
+        symbol = data.clean_symbol(raw_symbol, fallback="")
+        if not symbol:
+            return err("Provide a valid live ticker symbol.", 400)
+        symbols = [symbol]
+    if not _LIVE_SEMAPHORE.acquire(blocking=False):
+        return err("Too many live-data requests in flight — try again in a moment.", 429)
+    try:
+        results = [data.refresh_live_symbol(symbol) for symbol in symbols]
+    finally:
+        _LIVE_SEMAPHORE.release()
+    refreshed = sum(1 for item in results if item["status"] == "ok")
+    failed = sum(1 for item in results if item["status"] == "error")
+    skipped = sum(1 for item in results if item["status"] == "skipped")
+    warnings = []
+    if refresh_all and not symbols:
+        warnings.append("No persisted live instruments are available to refresh.")
+    if failed:
+        warnings.append("One or more live refreshes failed; existing stored history was left unchanged.")
+    return ok({
+        "requested": "all" if refresh_all else symbols[0],
+        "refreshed": refreshed,
+        "failed": failed,
+        "skipped": skipped,
+        "results": results,
+        "warnings": warnings,
+        "data_status": _data_status_payload(),
+    })
+
+
 @app.route("/api/tickers")
 def tickers():
     out = []
+    refresh_by_symbol = _refresh_by_symbol()
     for inst in data.all_instruments():
         close = inst.df["close"]
         last = float(close.iloc[-1])
         prev = float(close.iloc[-2]) if len(close) > 1 else last
+        dates = pd.to_datetime(close.dropna().index)
         out.append({
             "symbol": inst.symbol,
             "name": inst.name,
             "source": inst.source,
             "last_price": last,
             "change_pct": (last / prev - 1) * 100 if prev else 0.0,
+            "row_count": int(close.dropna().shape[0]),
+            "first_date": str(dates.min().date()) if len(dates) else None,
+            "last_date": str(dates.max().date()) if len(dates) else None,
+            "last_refresh": refresh_by_symbol.get(inst.symbol),
+            "eligible_for_real_research": provenance.is_real_source(inst.source) and len(close.dropna()) >= 60,
         })
     out.sort(key=lambda d: d["symbol"])
     return ok({"tickers": out, "live_available": data.HAS_YF})
@@ -596,14 +647,21 @@ def upload():
     symbol = data.clean_symbol(raw_symbol)
     name = data.clean_name(request.form.get("name"), fallback=symbol)
     try:
-        inst = data.parse_csv(f.read(), symbol, name)
+        inst = data.parse_csv(f.read(), symbol, name, source_filename=f.filename or "")
     except ValueError as e:
         # parse_csv raises ValueError only with intentionally user-facing messages.
         return err(str(e), 400)
     except Exception:
         app.logger.exception("upload parse failed")
         return err("Could not read that file. Expected a CSV with date and price columns.", 400)
-    return ok({"symbol": inst.symbol, "name": inst.name, "rows": len(inst.df)})
+    p = provenance.instrument(inst.source, len(inst.df["close"].dropna()))
+    return ok({
+        "symbol": inst.symbol,
+        "name": inst.name,
+        "rows": len(inst.df),
+        "source": inst.source,
+        "data_provenance": p,
+    })
 
 
 @app.route("/api/live", methods=["POST"])
@@ -625,8 +683,15 @@ def live():
         return err(f"Could not fetch live data for '{symbol}'.", 502)
     finally:
         _LIVE_SEMAPHORE.release()
-    return ok({"symbol": inst.symbol, "name": inst.name, "rows": len(inst.df),
-               "headlines": len(inst.headlines)})
+    p = provenance.instrument(inst.source, len(inst.df["close"].dropna()))
+    return ok({
+        "symbol": inst.symbol,
+        "name": inst.name,
+        "rows": len(inst.df),
+        "headlines": len(inst.headlines),
+        "source": inst.source,
+        "data_provenance": p,
+    })
 
 
 # --------------------------------------------------------------------------- #
@@ -641,11 +706,15 @@ def mandates():
 def models():
     out = []
     for mdl in portfolio.all_models():
+        coverage = _model_coverage(mdl)
         out.append({
             "id": mdl.id, "name": mdl.name, "mandate": mdl.mandate_key,
             "mandate_label": mandate.get(mdl.mandate_key)["label"],
             "n_holdings": len(mdl.holdings),
             "top": mdl.holdings[0].ticker if mdl.holdings else None,
+            "real_coverage_count": coverage["real_coverage_count"],
+            "missing_tickers": coverage["missing_tickers"],
+            "coverage_state": coverage["coverage_state"],
         })
     out.sort(key=lambda d: d["name"])
     return ok({"models": out})
@@ -670,8 +739,15 @@ def model_upload():
         return err("Could not read that file. Expected columns for Ticker and (optionally) Weight.", 400)
     finally:
         _UPLOAD_SEMAPHORE.release()
-    return ok({"id": mdl.id, "name": mdl.name, "mandate": mdl.mandate_key,
-               "n_holdings": len(mdl.holdings)})
+    coverage = _model_coverage(mdl)
+    return ok({
+        "id": mdl.id,
+        "name": mdl.name,
+        "mandate": mdl.mandate_key,
+        "n_holdings": len(mdl.holdings),
+        "missing_tickers": coverage["missing_tickers"],
+        "coverage_state": coverage["coverage_state"],
+    })
 
 
 def _resolve_horizon(raw: str):
@@ -882,6 +958,97 @@ def react_spa(path: str):
     if requested.is_file():
         return send_from_directory(FRONTEND_DIST, path)
     return _serve_react_index()
+
+
+def _refresh_by_symbol() -> dict:
+    logs = persistence.get_store().refresh_log(limit=250)
+    out = {}
+    for row in logs:
+        out.setdefault(row["symbol"], row)
+    return out
+
+
+def _model_coverage(mdl: portfolio.Model) -> dict:
+    missing = []
+    real_count = 0
+    sources: dict[str, int] = {}
+    for holding in mdl.holdings:
+        inst = data.get(holding.ticker)
+        source = inst.source if inst is not None else "missing"
+        sources[source] = sources.get(source, 0) + 1
+        history_days = len(inst.df["close"].dropna()) if inst is not None else 0
+        if provenance.is_real_source(source) and history_days >= 60:
+            real_count += 1
+            continue
+        missing.append(holding.ticker)
+    if not mdl.holdings:
+        state = "empty"
+    elif real_count == len(mdl.holdings):
+        state = "real"
+    elif real_count:
+        state = "mixed"
+    else:
+        state = "blocked"
+    return {
+        "real_coverage_count": real_count,
+        "missing_tickers": missing,
+        "source_counts": sources,
+        "coverage_state": state,
+    }
+
+
+def _data_status_payload() -> dict:
+    instruments = data.all_instruments()
+    models = portfolio.all_models()
+    universe = provenance.universe(instruments)
+    store_status = persistence.get_store().status()
+    refresh_logs = persistence.get_store().refresh_log(limit=10)
+    real_instruments = [
+        inst for inst in instruments
+        if provenance.is_real_source(inst.source) and len(inst.df["close"].dropna()) >= 60
+    ]
+    model_rows = []
+    all_missing: set[str] = set()
+    for mdl in models:
+        coverage = _model_coverage(mdl)
+        all_missing.update(coverage["missing_tickers"])
+        model_rows.append({
+            "id": mdl.id,
+            "name": mdl.name,
+            "n_holdings": len(mdl.holdings),
+            **coverage,
+        })
+    warnings = []
+    if store_status.get("warning"):
+        warnings.append(store_status["warning"])
+    if not real_instruments:
+        warnings.append("No eligible live or uploaded price histories are available for real research.")
+    if all_missing:
+        warnings.append("Missing real price history for model holdings: " + ", ".join(sorted(all_missing)))
+    return {
+        "database": store_status,
+        "real_instrument_count": len(real_instruments),
+        "persisted_model_count": int(store_status.get("persisted_model_count") or 0),
+        "loaded_model_count": len(models),
+        "last_refresh": store_status.get("last_refresh"),
+        "data_mode_summary": universe,
+        "source_counts": universe["source_counts"],
+        "warnings": _dedupe_strings(warnings),
+        "missing_data": {
+            "models": model_rows,
+            "missing_tickers": sorted(all_missing),
+            "blocked_model_count": sum(1 for row in model_rows if row["coverage_state"] != "real"),
+        },
+        "refresh_log": refresh_logs,
+    }
+
+
+def _dedupe_strings(items: list[str]) -> list[str]:
+    out = []
+    for item in items:
+        if item and item not in out:
+            out.append(item)
+    return out
 
 
 def _holdings_with_signals(ps: portfolio.PortfolioSeries, mdl: portfolio.Model) -> list:

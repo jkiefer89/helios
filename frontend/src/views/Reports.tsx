@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
-import type { ModelSummary, ReportResponse, TickerSummary } from "../api/types";
+import type { DataStatusResponse, ModelSummary, ReportResponse, TickerSummary } from "../api/types";
 import { DataQualityBanner } from "../components/badges/DataModeBadge";
 import { Panel } from "../components/cards/Panel";
 import { EmptyState } from "../components/empty-states/EmptyState";
@@ -14,6 +14,7 @@ export function Reports({
   selectedModel,
   onSelectInstrument,
   onSelectModel,
+  dataStatus,
 }: {
   tickers: TickerSummary[];
   models: ModelSummary[];
@@ -21,6 +22,7 @@ export function Reports({
   selectedModel?: string;
   onSelectInstrument: (symbol: string) => void;
   onSelectModel: (id: string) => void;
+  dataStatus: DataStatusResponse | null;
 }) {
   const defaultTarget = selectedModel ? `model:${selectedModel}` : selectedInstrument ? `instrument:${selectedInstrument}` : tickers[0] ? `instrument:${tickers[0].symbol}` : "";
   const [target, setTarget] = useState(defaultTarget);
@@ -72,13 +74,13 @@ export function Reports({
       {!payload ? (
         <EmptyState title="Select a report target" body="Choose an instrument or model to build an analysis-only report." />
       ) : (
-        <ReportSheet payload={payload} />
+        <ReportSheet payload={payload} dataStatus={dataStatus} />
       )}
     </div>
   );
 }
 
-function ReportSheet({ payload }: { payload: ReportResponse }) {
+function ReportSheet({ payload, dataStatus }: { payload: ReportResponse; dataStatus: DataStatusResponse | null }) {
   const previewLocked = !payload.eligible_for_real_research;
   const sections = previewLocked ? maskPreviewSections(payload.sections) : payload.sections;
   const title = reportTitle(payload);
@@ -89,6 +91,7 @@ function ReportSheet({ payload }: { payload: ReportResponse }) {
         <span className="badge">{payload.kind}</span>
       </header>
       <DataQualityBanner payload={payload} compact />
+      <PersistenceSnapshot dataStatus={dataStatus} />
       {previewLocked && (
         <div className="report-watermark">{payload.display_label || "Research locked"} · preview only</div>
       )}
@@ -102,6 +105,22 @@ function ReportSheet({ payload }: { payload: ReportResponse }) {
       </div>
       <p className="report-disclaimer">{payload.disclaimer}</p>
     </article>
+  );
+}
+
+function PersistenceSnapshot({ dataStatus }: { dataStatus: DataStatusResponse | null }) {
+  if (!dataStatus) return null;
+  return (
+    <Panel title="Data Quality / Persistence" className="report-persistence-panel" meta={dataStatus.database.available ? "SQLite ready" : "persistence warning"}>
+      <dl className="report-dl">
+        <div><dt>Database Available</dt><dd>{dataStatus.database.available ? "Yes" : "No"}</dd></div>
+        <div><dt>Eligible Price Histories</dt><dd>{dataStatus.real_instrument_count}</dd></div>
+        <div><dt>Persisted Models</dt><dd>{dataStatus.persisted_model_count}</dd></div>
+        <div><dt>Last Refresh</dt><dd>{fmtTimestamp(dataStatus.last_refresh?.attempted_at)}</dd></div>
+        <div><dt>Missing Holdings</dt><dd>{dataStatus.missing_data.missing_tickers.join(", ") || "None"}</dd></div>
+      </dl>
+      {dataStatus.warnings.length > 0 && <div className="warning-list compact-list">{dataStatus.warnings.map((warning) => <span key={warning}>{warning}</span>)}</div>}
+    </Panel>
   );
 }
 

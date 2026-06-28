@@ -31,6 +31,11 @@ export interface TickerSummary {
   source: string;
   last_price: number | null;
   change_pct: number | null;
+  row_count?: number;
+  first_date?: string | null;
+  last_date?: string | null;
+  last_refresh?: RefreshLogEntry | null;
+  eligible_for_real_research?: boolean;
 }
 
 export interface TickersResponse {
@@ -52,6 +57,70 @@ export interface ModelSummary {
   mandate_label: string;
   n_holdings: number;
   top?: string | null;
+  real_coverage_count?: number;
+  missing_tickers?: string[];
+  coverage_state?: "real" | "mixed" | "blocked" | "empty" | string;
+}
+
+export interface RefreshLogEntry {
+  symbol: string;
+  attempted_at: string;
+  status: string;
+  rows_added: number;
+  message: string;
+  source: string;
+}
+
+export interface ModelCoverageStatus {
+  id: string;
+  name: string;
+  n_holdings: number;
+  real_coverage_count: number;
+  missing_tickers: string[];
+  source_counts: Record<string, number>;
+  coverage_state: string;
+}
+
+export interface DataStatusResponse {
+  database: {
+    configured: boolean;
+    available: boolean;
+    path: string;
+    warning?: string;
+    schema_version?: number | null;
+    real_instrument_count: number;
+    persisted_model_count: number;
+    last_refresh?: RefreshLogEntry | null;
+  };
+  real_instrument_count: number;
+  persisted_model_count: number;
+  loaded_model_count: number;
+  last_refresh?: RefreshLogEntry | null;
+  data_mode_summary: DataQuality;
+  source_counts: Record<string, number>;
+  warnings: string[];
+  missing_data: {
+    models: ModelCoverageStatus[];
+    missing_tickers: string[];
+    blocked_model_count: number;
+  };
+  refresh_log: RefreshLogEntry[];
+}
+
+export interface DataRefreshResponse {
+  requested: string;
+  refreshed: number;
+  failed: number;
+  skipped: number;
+  results: Array<{
+    symbol: string;
+    status: "ok" | "error" | "skipped" | string;
+    rows_added: number;
+    rows?: number;
+    message: string;
+  }>;
+  warnings: string[];
+  data_status: DataStatusResponse;
 }
 
 export interface RegimeDriver {

@@ -6,7 +6,7 @@ import { Panel, StatTile } from "../components/cards/Panel";
 import { LineChart } from "../components/charts/Charts";
 import { EmptyState } from "../components/empty-states/EmptyState";
 import { TerminalSelect } from "../components/forms/TerminalSelect";
-import { fmtAuto, fmtNumber, fmtPct, titleCase } from "../utils/format";
+import { fmtAuto, fmtNumber, fmtPct, fmtTimestamp, titleCase } from "../utils/format";
 
 export function StrategyLab({
   tickers,
@@ -34,6 +34,11 @@ export function StrategyLab({
     ...tickers.map((ticker) => ({ value: `instrument:${ticker.symbol}`, label: `${ticker.symbol} · ${ticker.name}` })),
     ...models.map((model) => ({ value: `model:${model.id}`, label: `${model.name} · model` })),
   ], [tickers, models]);
+  const selectedInstrumentMeta = useMemo(() => {
+    const [kind, id] = (target || defaultTarget).split(":");
+    if (kind !== "instrument") return null;
+    return tickers.find((ticker) => ticker.symbol === id) || null;
+  }, [defaultTarget, target, tickers]);
 
   const run = async (requestedTarget = target || defaultTarget) => {
     const [kind, id] = requestedTarget.split(":");
@@ -75,6 +80,14 @@ export function StrategyLab({
         </form>
       </header>
       {error && <div className="notice danger">{error}</div>}
+      {selectedInstrumentMeta && (
+        <div className="source-context-strip">
+          <span><b>Source</b>{selectedInstrumentMeta.source}</span>
+          <span><b>Rows</b>{selectedInstrumentMeta.row_count ?? "—"}</span>
+          <span><b>Date range</b>{selectedInstrumentMeta.first_date || "?"} to {selectedInstrumentMeta.last_date || "?"}</span>
+          <span><b>Last refresh</b>{fmtTimestamp(selectedInstrumentMeta.last_refresh?.attempted_at)}</span>
+        </div>
+      )}
       {payload && <DataQualityBanner payload={payload} />}
       {payload && !payload.eligible_for_real_research && (
         <div className="strategy-demo-warning" role="status">

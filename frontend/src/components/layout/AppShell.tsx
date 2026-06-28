@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type FocusEvent, type FormEvent, type ReactNode } from "react";
-import type { DataMode, MandateSummary, ModelSummary, TickerSummary } from "../../api/types";
+import type { DataMode, DataStatusResponse, MandateSummary, ModelSummary, TickerSummary } from "../../api/types";
 import { DataModeBadge, SourcePill } from "../badges/DataModeBadge";
 import { TerminalSelect } from "../forms/TerminalSelect";
 import { fmtMoney, fmtPct } from "../../utils/format";
@@ -20,8 +20,10 @@ interface ShellProps {
   onUploadPrice: (file: File, symbol: string) => Promise<void>;
   onUploadModel: (file: File, name: string, mandate: string, context: string) => Promise<void>;
   onFetchLive: (symbol: string) => Promise<void>;
+  onRefreshData: (symbol?: string, all?: boolean) => Promise<void>;
   liveAvailable: boolean;
   notice?: string;
+  dataStatus: DataStatusResponse | null;
   children: ReactNode;
 }
 
@@ -199,6 +201,8 @@ export function AppShell(props: ShellProps) {
                 </header>
                 <dl>
                   <div><dt>Data mode</dt><dd>{props.dataMode?.label || "Pending"}</dd></div>
+                  <div><dt>SQLite</dt><dd>{props.dataStatus?.database.available ? "Ready" : "Warning"}</dd></div>
+                  <div><dt>Real histories</dt><dd>{props.dataStatus?.real_instrument_count ?? 0}</dd></div>
                   <div><dt>Current view</dt><dd>{activeViewLabel}</dd></div>
                   <div><dt>Selection</dt><dd>{selectedContext}</dd></div>
                 </dl>
@@ -284,7 +288,7 @@ function ShellIcon({ id }: { id: ViewId }) {
 
 function ImportPanel(props: ShellProps) {
   const [formNotice, setFormNotice] = useState("");
-  const [pendingForm, setPendingForm] = useState<"" | "live" | "price" | "model">("");
+  const [pendingForm, setPendingForm] = useState<"" | "live" | "price" | "model" | "refresh">("");
   const [modelMandate, setModelMandate] = useState(props.mandates[0]?.key || "");
   const mandateOptions = props.mandates.map((mandate) => ({ value: mandate.key, label: mandate.label }));
   useEffect(() => {
@@ -356,6 +360,19 @@ function ImportPanel(props: ShellProps) {
       setPendingForm("");
     }
   };
+  const refreshLiveData = async () => {
+    clearNotice();
+    setPendingForm("refresh");
+    try {
+      await props.onRefreshData(undefined, true);
+      setFormNotice("Live refresh completed. Check Real Data Center for row counts and warnings.");
+    } catch (error) {
+      setFormNotice(error instanceof Error ? error.message : "Live refresh failed.");
+    } finally {
+      setPendingForm("");
+    }
+  };
+  const liveCount = props.tickers.filter((ticker) => ticker.source === "live").length;
   return (
     <section className="side-section onboarding">
       <h2>Real Data Onboarding</h2>
@@ -369,6 +386,14 @@ function ImportPanel(props: ShellProps) {
         </div>
         {!props.liveAvailable && <small className="form-hint">Live fetch is unavailable in this environment. Upload a price CSV to unlock real-data analysis.</small>}
       </form>
+      <button
+        className="side-secondary-action"
+        type="button"
+        onClick={refreshLiveData}
+        disabled={!liveCount || pendingForm !== ""}
+      >
+        {pendingForm === "refresh" ? "Refreshing live data..." : `Refresh live data (${liveCount})`}
+      </button>
       <form onSubmit={priceForm}>
         <label>Upload price CSV</label>
         <input name="priceFile" type="file" accept=".csv" aria-label="Price CSV" disabled={pendingForm !== ""} />

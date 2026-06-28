@@ -2,6 +2,8 @@ import type {
   AnalysisResponse,
   ClinicResponse,
   CommandCenterResponse,
+  DataRefreshResponse,
+  DataStatusResponse,
   MandateSummary,
   ModelSummary,
   OpportunitiesResponse,
@@ -30,6 +32,13 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
 
 export const api = {
   commandCenter: () => request<CommandCenterResponse>("/api/command-center"),
+  dataStatus: () => request<DataStatusResponse>("/api/data/status"),
+  refreshData: (params: { symbol?: string; all?: boolean } = {}) =>
+    request<DataRefreshResponse>("/api/data/refresh", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params.all ? { all: true } : { symbol: params.symbol || "all" }),
+    }),
   tickers: () => request<TickersResponse>("/api/tickers"),
   mandates: () => request<{ mandates: MandateSummary[] }>("/api/mandates"),
   models: () => request<{ models: ModelSummary[] }>("/api/models"),

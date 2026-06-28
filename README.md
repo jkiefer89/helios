@@ -32,12 +32,15 @@ Open the **LAN URL** on any device on the same Wi-Fi/office network and log in.
 The first run creates the virtualenv and installs dependencies, including
 `openpyxl` for Excel model uploads. `yfinance` is installed for optional live
 data, but the app remains fully usable offline with bundled sample data.
+Live/imported price histories and uploaded model metadata are stored in a local
+SQLite database at `.helios/helios.db` by default, so real-data work survives an
+app restart without publishing client files to git.
 
 Helios now uses a React + Vite + TypeScript frontend. For normal local use,
 build the frontend once and then start Flask:
 
 ```bash
-npm --prefix frontend install
+npm --prefix frontend ci
 npm --prefix frontend run build
 ./run.sh
 ```
@@ -56,6 +59,7 @@ at `/`; the legacy page is also available at `/legacy`.
 | `HELIOS_TLS` | `0` | `1` serves self-signed **HTTPS** (encrypts the login) |
 | `HELIOS_AUTH` | `1` | `0` disables the password gate (localhost dev only) |
 | `HELIOS_RF` | `0.02` | Risk-free / CD benchmark rate used by mandates and projections |
+| `HELIOS_DB_PATH` | `.helios/helios.db` | Local SQLite store for parsed live/uploaded data (`off` disables persistence) |
 
 ```bash
 HELIOS_USER=jkiefer HELIOS_PASSWORD='choose-a-strong-one' ./run.sh
@@ -113,6 +117,35 @@ Helios separates interface demos from advisor-grade research:
 | `mixed` | Some evidence is real but some holdings or sources require verification. The UI displays a warning and required action. |
 | `invalid_for_research` | Research is blocked because required live/uploaded history is missing or unsuitable. |
 
+### Local real-data persistence
+
+Helios creates a small SQLite database on first use. It stores parsed
+live/uploaded price history, instrument provenance, uploaded model metadata,
+holdings, and live-refresh logs. It does **not** store raw uploaded files, API
+keys, secrets, browser artifacts, generated builds, screenshots, or sample data
+as real research evidence. The database path is controlled by `HELIOS_DB_PATH`;
+set `HELIOS_DB_PATH=off` for an ephemeral session.
+
+The SQLite file stays on your machine and is not encrypted by Helios. Keep it on
+a trusted local disk and protect it the same way you would protect other client
+research files.
+
+The React **Real Data Center** shows database availability, persisted
+instrument/model counts, date ranges, row counts, live-refresh status, model
+coverage, missing tickers, and copyable import templates. Refresh controls only
+refresh symbols already imported as `live`; bundled samples and uploaded CSVs
+are never silently promoted into live market data.
+
+To clear local real-data state, stop Helios and delete the configured database
+file or the local store directory:
+
+```bash
+rm -rf .helios/
+```
+
+If `HELIOS_DB_PATH` points somewhere else, delete that file instead. The next
+start recreates an empty schema and reloads only bundled demo samples.
+
 ### Importing a client model (portfolio)
 
 Upload an **Excel (`.xlsx` / `.xlsm`) or CSV/TSV** with a **Ticker** column and
@@ -160,6 +193,7 @@ frontend/            React + Vite + TypeScript research terminal
   src/views/         Command Center, Opportunity Radar, Strategy Lab, Clinic, Reports
 engine/
   data.py             data store, samples, CSV import, live fetch, holding resolution
+  persistence.py      local SQLite schema, reload, refresh logs, provenance metadata
   indicators.py       SMA/EMA/RSI/MACD/Bollinger + performance metrics
   forecast.py         Ridge cone (short) + long-horizon strategic projection
   mandate.py          mandate presets + intentional risk/return/weight parameters
@@ -178,6 +212,8 @@ static/styles.css     legacy dashboard theme
 | Endpoint | Purpose |
 |----------|---------|
 | `GET /api/command-center` | Pro dashboard payload with regime, real-data opportunities, risks, model alerts and research queue |
+| `GET /api/data/status` | SQLite/database health, real-data counts, model coverage, missing tickers and refresh log |
+| `POST /api/data/refresh` | refresh existing live instruments (`{ "symbol": "AAPL" }` or `{ "all": true }`) |
 | `GET /api/opportunities` | Opportunity Radar rankings; returns no placeholder rows when real data is unavailable |
 | `GET /api/strategy/analyze` | Strategy Lab for a single instrument with no-lookahead evidence |
 | `GET /api/model/strategy/analyze` | Strategy Lab for a client model; blocks when model provenance is invalid |
@@ -199,7 +235,7 @@ static/styles.css     legacy dashboard theme
 
 ```bash
 ./.venv/bin/python -m pip install -r requirements-dev.txt
-npm --prefix frontend install
+npm --prefix frontend ci
 npm --prefix frontend run typecheck
 npm --prefix frontend run build
 ./.venv/bin/python -m pytest
@@ -208,8 +244,10 @@ npm --prefix frontend run build
 
 The test suite is offline-only: it exercises deterministic sample/upload data,
 portfolio parsing/NAV construction, indicator/sign/forecast output shapes,
-sentiment scoring, Flask JSON API smoke paths, and startup env validation. CI
-runs the same checks on push and pull request.
+sentiment scoring, Flask JSON API smoke paths, startup env validation, and the
+SQLite persistence workflow. Tests disable the default local database and use
+temporary database paths for persistence cases. CI runs the same checks on push
+and pull request.
 
 ---
 
@@ -240,12 +278,12 @@ built in:
   `X-Frame-Options`, `Referrer-Policy`) are set and internal errors are not
   echoed to clients.
 
-**Residual notes:** uploaded instruments and portfolio models are process-local:
-they are shared within the running app process and disappear on restart. This is
-a shared advisor view, not a multi-tenant system. The self-signed TLS cert
-triggers a one-time browser warning; delete `certs/` to regenerate it (e.g.
-after your LAN IP changes). On an untrusted network, prefer `HELIOS_TLS=1` or
-bind to `127.0.0.1` and reach it over an SSH tunnel.
+**Residual notes:** uploaded instruments and portfolio models are a shared local
+advisor workspace backed by SQLite, not a multi-tenant permission system. Keep
+the database local and do not place `.helios/` in source control. The
+self-signed TLS cert triggers a one-time browser warning; delete `certs/` to
+regenerate it (e.g. after your LAN IP changes). On an untrusted network, prefer
+`HELIOS_TLS=1` or bind to `127.0.0.1` and reach it over an SSH tunnel.
 
 ---
 

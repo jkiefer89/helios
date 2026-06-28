@@ -3,7 +3,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from . import forecast, indicators, opportunity, portfolio, portfolio_clinic, provenance, sentiment, signals, strategy
+from . import (
+    forecast, indicators, opportunity, persistence, portfolio, portfolio_clinic,
+    provenance, sentiment, signals, strategy,
+)
 
 DISCLAIMER = (
     "Analysis only — Helios provides research evidence and does not provide investment advice, "
@@ -74,7 +77,7 @@ def instrument_report(inst) -> dict:
                 "quality": fc.get("quality", {}),
             },
             "strategy": _strategy_summary(st),
-            "provenance": {"source": inst.source, "history_days": len(close)},
+            "provenance": _instrument_provenance(inst, close, p),
             "data_quality": p,
             "assumptions": _assumptions(),
         },
@@ -195,6 +198,29 @@ def _base_report(kind: str, identity: dict, sections: dict, warnings: list[str],
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "disclaimer": DISCLAIMER,
     }
+
+
+def _instrument_provenance(inst, close, data_quality: dict) -> dict:
+    dates = close.index
+    return {
+        "source": inst.source,
+        "history_days": len(close),
+        "row_count": len(close),
+        "first_date": str(dates.min().date()) if len(dates) else None,
+        "last_date": str(dates.max().date()) if len(dates) else None,
+        "last_refresh": _last_refresh(inst.symbol),
+        "eligible_for_real_research": data_quality.get("eligible_for_real_research", False),
+    }
+
+
+def _last_refresh(symbol: str) -> dict | None:
+    try:
+        for row in persistence.get_store().refresh_log(limit=250):
+            if row.get("symbol") == symbol:
+                return row
+    except Exception:
+        return None
+    return None
 
 
 def _title(kind: str, identity: dict, data_quality: dict) -> str:

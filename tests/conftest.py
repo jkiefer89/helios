@@ -2,18 +2,19 @@ import os
 import sys
 from pathlib import Path
 
+os.environ.setdefault("HELIOS_AUTH", "0")
+os.environ.setdefault("HELIOS_RF", "0.02")
+os.environ.setdefault("HELIOS_DB_PATH", "off")
+
 import numpy as np
 import pandas as pd
 import pytest
 
-from engine import data, portfolio
+from engine import data, persistence, portfolio
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-
-os.environ.setdefault("HELIOS_AUTH", "0")
-os.environ.setdefault("HELIOS_RF", "0.02")
 
 
 @pytest.fixture(autouse=True)
@@ -25,11 +26,13 @@ def reset_process_local_stores():
     data._STORE.update(samples)
     data._PRICE_CACHE.clear()
     portfolio._MODELS.clear()
+    persistence.reset_store_for_tests()
     yield
     data._STORE.clear()
     data._STORE.update(samples)
     data._PRICE_CACHE.clear()
     portfolio._MODELS.clear()
+    persistence.reset_store_for_tests()
 
 
 def price_series(days: int = 260, start: float = 100.0, daily: float = 0.001) -> pd.Series:
