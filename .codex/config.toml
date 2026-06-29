@@ -1,0 +1,22 @@
+model = "gpt-5.5"
+review_model = "gpt-5.5"
+model_reasoning_effort = "xhigh"
+plan_mode_reasoning_effort = "xhigh"
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+
+[agents]
+max_threads = 6
+max_depth = 1
+
+[agents.repo_explorer]
+description = "Read-only repository explorer for mapping files, source-of-truth config, generated assets, safety constraints, and likely change points before implementation."
+config_file = "agents/repo-explorer.toml"
+
+[agents.reviewer]
+description = "Read-only reviewer focused on correctness, security, repo-policy compliance, generated assets, runtime/data safety, and missing verification."
+config_file = "agents/reviewer.toml"
+
+[agents.tester]
+description = "Read-only verification planner for safe, non-destructive local checks; avoids mutating builds, release/deploy helpers, live services, staging/production checks, and networked endpoint checks."
+config_file = "agents/tester.toml"
