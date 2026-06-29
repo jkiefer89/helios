@@ -121,7 +121,13 @@ def model_report(model: portfolio.Model) -> dict:
         )
 
     ps = portfolio.build_series(model, allow_sample=False, allow_simulated=False)
-    p = provenance.portfolio(ps.provenance)
+    model_source = _model_source(ps)
+    p = _series_data_quality(
+        ps.close,
+        provenance.portfolio(ps.provenance),
+        source=model_source,
+        source_counts=ps.sources,
+    )
     fc = forecast.forecast(ps.close, horizon=21, n_paths=700)
     sig = signals.evaluate(
         ps.close,
@@ -140,7 +146,7 @@ def model_report(model: portfolio.Model) -> dict:
         )
     return _base_report(
         kind="model",
-        identity={"id": model.id, "name": model.name, "mandate": model.mandate_key},
+        identity={"id": model.id, "name": model.name, "mandate": model.mandate_key, "source": model_source},
         sections={
             "executive_summary": {
                 "headline": f"{model.name}: {sig['action']} model review",
@@ -174,7 +180,7 @@ def model_report(model: portfolio.Model) -> dict:
                 "suggestions": clinic["suggestions"],
                 "refusals": clinic["refusals"],
             },
-            "provenance": ps.provenance,
+            "provenance": _model_provenance(ps, p),
             "data_quality": p,
             "assumptions": _assumptions(),
         },
@@ -201,16 +207,53 @@ def _base_report(kind: str, identity: dict, sections: dict, warnings: list[str],
 
 
 def _instrument_provenance(inst, close, data_quality: dict) -> dict:
-    dates = close.index
     return {
         "source": inst.source,
-        "history_days": len(close),
-        "row_count": len(close),
-        "first_date": str(dates.min().date()) if len(dates) else None,
-        "last_date": str(dates.max().date()) if len(dates) else None,
         "last_refresh": _last_refresh(inst.symbol),
         "eligible_for_real_research": data_quality.get("eligible_for_real_research", False),
+        **_series_window(close),
     }
+
+
+def _model_provenance(ps: portfolio.PortfolioSeries, data_quality: dict) -> dict:
+    return {
+        **ps.provenance,
+        "source": data_quality.get("source"),
+        "source_counts": data_quality.get("source_counts", {}),
+        "history_days": data_quality.get("history_days"),
+        "row_count": data_quality.get("row_count"),
+        "first_date": data_quality.get("first_date"),
+        "last_date": data_quality.get("last_date"),
+        "last_refresh": None,
+        "eligible_for_real_research": data_quality.get("eligible_for_real_research", False),
+        "binding_ticker": ps.binding_ticker,
+    }
+
+
+def _series_data_quality(close, data_quality: dict, source: str, source_counts: dict) -> dict:
+    return {
+        **data_quality,
+        "source": source,
+        "source_counts": dict(source_counts or {}),
+        "last_refresh": None,
+        **_series_window(close),
+    }
+
+
+def _series_window(close) -> dict:
+    clean = close.dropna()
+    dates = clean.index
+    return {
+        "history_days": len(clean),
+        "row_count": len(clean),
+        "first_date": str(dates.min().date()) if len(dates) else None,
+        "last_date": str(dates.max().date()) if len(dates) else None,
+    }
+
+
+def _model_source(ps: portfolio.PortfolioSeries) -> str:
+    sources = [source for source, count in sorted((ps.sources or {}).items()) if count]
+    return sources[0] if len(sources) == 1 else "mixed" if sources else "unknown"
 
 
 def _last_refresh(symbol: str) -> dict | None:
