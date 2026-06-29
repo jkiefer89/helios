@@ -12,6 +12,15 @@ momentum, the return forecast, and news sentiment.
 
 ## Quick start
 
+Source-of-truth tooling is intentionally simple: Python dependencies live in
+`requirements.txt` / `requirements-dev.txt`, frontend dependencies are npm-based
+and locked by `frontend/package-lock.json`, and CI is defined in
+`.github/workflows/ci.yml`. There is no Makefile, Dockerfile, or
+`pyproject.toml` in this repo.
+
+Local development needs Python 3 with `venv`/`pip`; React frontend work also
+needs Node/npm on `PATH`.
+
 ```bash
 ./run.sh
 ```
@@ -29,15 +38,15 @@ bound to all interfaces) behind a password gate. It prints something like:
 ```
 
 Open the **LAN URL** on any device on the same Wi-Fi/office network and log in.
-The first run creates the virtualenv and installs dependencies, including
-`openpyxl` for Excel model uploads. `yfinance` is installed for optional live
-data, but the app remains fully usable offline with bundled sample data.
-Live/imported price histories and uploaded model metadata are stored in a local
-SQLite database at `.helios/helios.db` by default, so real-data work survives an
-app restart without publishing client files to git.
+The first run creates `.venv/` and installs runtime Python dependencies,
+including `openpyxl` for Excel model uploads. `yfinance` is installed for
+optional live data, but the app remains fully usable offline with bundled sample
+data. Live/imported price histories and uploaded model metadata are stored in a
+local SQLite database at `.helios/helios.db` by default, so real-data work
+survives an app restart without publishing client files to git.
 
-Helios now uses a React + Vite + TypeScript frontend. For normal local use,
-build the frontend once and then start Flask:
+Helios uses a React + Vite + TypeScript frontend. Build it with npm before
+starting Flask when you want the React app at `/`:
 
 ```bash
 npm --prefix frontend ci
@@ -49,6 +58,10 @@ If `frontend/dist/` is absent, Flask falls back to the legacy vanilla dashboard
 at `/`; the legacy page is also available at `/legacy`.
 
 ### Going live on your network
+
+Use placeholders only in committed docs/config. For local overrides, copy
+`.env.example` to an untracked `.env` or export variables in the shell that
+starts Helios.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
@@ -77,10 +90,11 @@ SPY, BTC-USD) so it works **fully offline** out of the box.
 
 ### Frontend development
 
-Run Flask on port 5000 and Vite on port 5173:
+Run Flask on port 5000 and Vite on port 5173 in separate terminals. The Vite
+command expects `npm --prefix frontend ci` to have been run at least once:
 
 ```bash
-HELIOS_AUTH=0 ./.venv/bin/python app.py
+HELIOS_AUTH=0 ./run.sh --dev
 npm --prefix frontend run dev
 ```
 
@@ -174,6 +188,9 @@ start local model servers, or pull model weights. With
 `HELIOS_LOCAL_AI_REQUIRE_LOCALHOST=1`, non-local local-provider URLs are rejected.
 OpenAI-compatible local servers can be selected with
 `HELIOS_LOCAL_AI_BACKEND=openai_compatible`.
+The complete optional AI configuration surface is documented with placeholders in
+`.env.example`, including local base URL/model/timeout, cloud model overrides,
+payload privacy flags, and cache TTL.
 
 Before any provider call, Helios builds a sanitized payload: client/model names
 are redacted by default, raw uploaded files are omitted, full price histories are
@@ -293,13 +310,35 @@ static/styles.css     legacy dashboard theme
 
 ## Developer verification
 
+Common local commands:
+
+| Task | Command |
+|------|---------|
+| Create virtualenv if needed | `python3 -m venv .venv` |
+| Install runtime + dev Python deps | `./.venv/bin/python -m pip install -r requirements-dev.txt` |
+| Install frontend deps | `npm --prefix frontend ci` |
+| Local/LAN server | `./run.sh` |
+| Localhost Flask dev server | `./run.sh --dev` |
+| Vite dev server | `npm --prefix frontend run dev` |
+| Frontend typecheck | `npm --prefix frontend run typecheck` |
+| Frontend production build | `npm --prefix frontend run build` |
+| Python tests | `./.venv/bin/python -m pytest` |
+| Python syntax compile | `./.venv/bin/python -m compileall app.py serve.py engine tests` |
+| Design spec JSON validation | `./.venv/bin/python -m json.tool .design_spec.json >/dev/null` |
+| Legacy frontend syntax check | `node --check static/app.js` |
+
+There is no configured lint or formatter command in this repository today. The
+CI-equivalent local ladder is:
+
 ```bash
 ./.venv/bin/python -m pip install -r requirements-dev.txt
 npm --prefix frontend ci
 npm --prefix frontend run typecheck
 npm --prefix frontend run build
-./.venv/bin/python -m pytest
 ./.venv/bin/python -m compileall app.py serve.py engine tests
+./.venv/bin/python -m json.tool .design_spec.json >/dev/null
+node --check static/app.js
+./.venv/bin/python -m pytest
 ```
 
 The test suite is offline-only: it exercises deterministic sample/upload data,
@@ -307,8 +346,12 @@ portfolio parsing/NAV construction, indicator/sign/forecast output shapes,
 sentiment scoring, Flask JSON API smoke paths, startup env validation, SQLite
 persistence workflow, and AI Copilot behavior with fake/mocked providers. Tests
 disable the default local database, use temporary database paths for persistence
-cases, and never call Claude, OpenAI, or local model servers. CI runs the same
-checks on push and pull request.
+cases, and never call Claude, OpenAI, or local model servers. CI runs the ladder
+above on push and pull request using Python 3.13 and Node 22.
+
+No cloud deployment config is present in this repo. The verifiable production
+entrypoint is `serve.py` via `./run.sh`, which serves a local/LAN WSGI app with
+waitress unless `HELIOS_TLS=1` selects the self-signed HTTPS path.
 
 ---
 
