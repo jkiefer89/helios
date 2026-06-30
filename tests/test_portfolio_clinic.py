@@ -74,6 +74,37 @@ def test_clinic_de_risks_cd_alternative_when_volatility_exceeds_budget():
     assert any(s["type"] == "de_risk" for s in result["suggestions"])
 
 
+def test_clinic_generates_hypotheses_for_clean_real_model():
+    from engine.portfolio_clinic import analyze_clinic
+
+    for symbol, daily in (
+        ("AAPL", 0.0015),
+        ("MSFT", 0.0010),
+        ("NVDA", 0.0006),
+        ("SPY", 0.0002),
+    ):
+        _register_upload(symbol, price_series(days=320, daily=daily))
+    mdl = _model(
+        model_id="CLEAN-GROWTH",
+        mandate_key="pure_growth",
+        holdings=[
+            portfolio.Holding("AAPL", 0.25),
+            portfolio.Holding("MSFT", 0.25),
+            portfolio.Holding("NVDA", 0.25),
+            portfolio.Holding("SPY", 0.25),
+        ],
+    )
+
+    result = analyze_clinic(mdl)
+
+    assert result["eligible_for_real_research"] is True
+    assert result["suggestions"]
+    assert any(s["type"].startswith("test_") for s in result["suggestions"])
+    assert all(0 <= s["current_weight"] <= 1 for s in result["suggestions"])
+    assert all(0 <= s["suggested_weight"] <= 1 for s in result["suggestions"])
+    assert all("test" in s["rationale"].lower() for s in result["suggestions"])
+
+
 def test_clinic_simulated_heavy_model_warns_and_refuses_precision(monkeypatch):
     from engine.portfolio_clinic import analyze_clinic
 

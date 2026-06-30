@@ -183,7 +183,77 @@ def _suggestions(model, ps, metrics, m, before, after) -> list[dict]:
             "rationale": "Replace simulated prices with client/live history before treating estimates as decision-grade.",
         })
 
-    return suggestions
+    return suggestions or _research_hypotheses(ps, metrics, m, before)
+
+
+def _research_hypotheses(ps, metrics, m, before) -> list[dict]:
+    holdings = [h for h in ps.holdings if not h.get("excluded")]
+    if len(holdings) < 2:
+        return []
+    cap = float(m["single_name_cap"])
+    step = min(0.03, max(0.01, 1.0 / len(holdings) * 0.10))
+    out: list[dict] = []
+
+    top_return = max(holdings, key=lambda h: h.get("window_return_pct") or 0.0)
+    top_return_weight = float(before.get(top_return["ticker"], 0.0))
+    if top_return_weight < cap - 1e-9:
+        out.append({
+            "type": "test_tilt",
+            "ticker": top_return["ticker"],
+            "current_weight": top_return_weight,
+            "suggested_weight": round(min(cap, top_return_weight + step), 6),
+            "rationale": (
+                f"Test a modest tilt toward {top_return['ticker']} because it has the strongest trailing "
+                f"holding return in this real-data model ({top_return['window_return_pct']:.1f}%). "
+                "Hypothetical research prompt only; confirm in Strategy Lab and Advisor Report before use."
+            ),
+        })
+
+    top_risk = max(holdings, key=lambda h: h.get("mrc_pct") or 0.0)
+    top_risk_weight = float(before.get(top_risk["ticker"], 0.0))
+    if top_risk.get("mrc_pct", 0.0) > top_risk_weight * 100 + 5:
+        out.append({
+            "type": "test_risk_trim",
+            "ticker": top_risk["ticker"],
+            "current_weight": top_risk_weight,
+            "suggested_weight": round(max(0.0, top_risk_weight - step), 6),
+            "rationale": (
+                f"Test trimming {top_risk['ticker']} because its marginal risk contribution "
+                f"({top_risk['mrc_pct']:.1f}%) is above its portfolio weight. Hypothetical only; "
+                "review tax, mandate, and client suitability outside Helios."
+            ),
+        })
+
+    if not out and ps.n_eff < max(4.0, len(holdings) * 0.6):
+        largest = max(holdings, key=lambda h: h.get("weight") or 0.0)
+        largest_weight = float(before.get(largest["ticker"], 0.0))
+        out.append({
+            "type": "test_diversification",
+            "ticker": largest["ticker"],
+            "current_weight": largest_weight,
+            "suggested_weight": round(max(0.0, largest_weight - step), 6),
+            "rationale": (
+                f"Test reducing {largest['ticker']} and adding lower-correlated real-data coverage because "
+                f"effective holdings are {ps.n_eff:.1f}. Hypothetical research prompt only; do not treat "
+                "this as an order."
+            ),
+        })
+
+    if not out:
+        top = sorted(holdings, key=lambda h: h.get("mrc_pct") or 0.0, reverse=True)[:3]
+        out.append({
+            "type": "test_stress_review",
+            "ticker": ", ".join(h["ticker"] for h in top),
+            "current_weight": sum(float(before.get(h["ticker"], 0.0)) for h in top),
+            "suggested_weight": sum(float(before.get(h["ticker"], 0.0)) for h in top),
+            "rationale": (
+                f"Test stress scenarios for the top risk contributors before changing this {m['label']} "
+                f"model; current volatility is {metrics['annual_vol_pct']:.1f}% and max drawdown is "
+                f"{metrics['max_drawdown_pct']:.1f}%. Hypothetical research prompt only."
+            ),
+        })
+
+    return out[:3]
 
 
 def _cap_weights(weights: dict[str, float], cap: float) -> tuple[dict[str, float], str | None]:
