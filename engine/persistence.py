@@ -10,6 +10,7 @@ import json
 import os
 import re
 import sqlite3
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +29,8 @@ REAL_SOURCES = {"live", "upload"}
 DISABLED_VALUES = {"", "0", "false", "off", "disabled", "none"}
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[1] / ".helios" / "helios.db"
 ENCRYPTED_PREFIX = "enc:v1:"
+ENCRYPTED_DB_MAGIC = b"HELIOSDB1\n"
+SQLITE_HEADER = b"SQLite format 3\x00"
 
 _STORE: "SQLiteStore | None" = None
 _CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
@@ -75,7 +78,7 @@ def safe_filename(filename: str | None) -> str:
 
 
 class _FieldCipher:
-    """Encrypt individual persisted fields without requiring SQLCipher."""
+    """Encrypt/decrypt the local SQLite snapshot and legacy encrypted fields."""
 
     def __init__(self, key: str, *, key_source: str, required: bool, mode: str):
         if Fernet is None:
@@ -87,7 +90,8 @@ class _FieldCipher:
             "mode": mode,
             "key_source": key_source,
             "algorithm": "fernet",
-            "plaintext_lookup_keys": ["instrument symbol", "model id", "journal target id", "price date"],
+            "at_rest_format": "fernet-sqlite-snapshot",
+            "plaintext_lookup_keys": [],
         }
 
     def encrypt(self, value: Any) -> Any:
@@ -108,6 +112,15 @@ class _FieldCipher:
         except InvalidToken as exc:
             raise RuntimeError("encrypted database value could not be decrypted with the configured key") from exc
 
+    def encrypt_bytes(self, value: bytes) -> bytes:
+        return self._fernet.encrypt(value)
+
+    def decrypt_bytes(self, value: bytes) -> bytes:
+        try:
+            return self._fernet.decrypt(value)
+        except InvalidToken as exc:
+            raise RuntimeError("encrypted SQLite persistence file could not be decrypted with the configured key") from exc
+
 
 def _disabled_encryption_status(mode: str = "off", required: bool = False, warning: str = "") -> dict[str, Any]:
     return {
@@ -116,9 +129,34 @@ def _disabled_encryption_status(mode: str = "off", required: bool = False, warni
         "mode": mode,
         "key_source": "",
         "algorithm": "",
+        "at_rest_format": "sqlite",
         "plaintext_lookup_keys": [],
         "warning": warning,
     }
+
+
+class _EncryptedConnectionLease:
+    def __init__(self, store: "SQLiteStore"):
+        self.store = store
+
+    def __enter__(self) -> sqlite3.Connection:
+        self.store._conn_lock.acquire()
+        if self.store._memory_conn is None:
+            self.store._conn_lock.release()
+            raise RuntimeError("encrypted SQLite persistence is not initialized")
+        return self.store._memory_conn
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        try:
+            if self.store._memory_conn is not None:
+                if exc_type is None:
+                    self.store._memory_conn.commit()
+                    self.store._persist_encrypted_snapshot()
+                else:
+                    self.store._memory_conn.rollback()
+        finally:
+            self.store._conn_lock.release()
+        return False
 
 
 def _normalise_encryption_mode() -> tuple[str, bool, bool]:
@@ -197,6 +235,8 @@ class SQLiteStore:
         self.available = False
         self.warning = ""
         self._cipher, self.encryption, encryption_warning = _configured_cipher(path)
+        self._conn_lock = threading.RLock()
+        self._memory_conn: sqlite3.Connection | None = None
         if disabled:
             self.warning = "SQLite persistence is disabled by HELIOS_DB_PATH."
             return
@@ -218,18 +258,71 @@ class SQLiteStore:
             return
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            with self._connect() as conn:
-                _create_schema(conn)
-                self._encrypt_existing_rows(conn)
+            if self._cipher:
+                self._ensure_encrypted_snapshot()
+            else:
+                if self.path.is_file() and self.path.read_bytes()[:len(ENCRYPTED_DB_MAGIC)] == ENCRYPTED_DB_MAGIC:
+                    raise RuntimeError("encrypted SQLite persistence requires encryption to be enabled with the configured key")
+                with self._connect() as conn:
+                    _create_schema(conn)
             self.available = True
             self.warning = ""
         except Exception as exc:
             self.available = False
             self.warning = f"SQLite persistence unavailable: {exc}"
 
-    def _connect(self) -> sqlite3.Connection:
+    def _ensure_encrypted_snapshot(self) -> None:
+        if self.path is None or self._cipher is None:
+            raise RuntimeError("encrypted SQLite persistence is not configured")
+        conn = sqlite3.connect(":memory:", timeout=5, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        raw = self.path.read_bytes() if self.path.is_file() else b""
+        if raw:
+            if raw.startswith(ENCRYPTED_DB_MAGIC):
+                conn.deserialize(self._cipher.decrypt_bytes(raw[len(ENCRYPTED_DB_MAGIC):]))
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA foreign_keys = ON")
+            elif raw.startswith(SQLITE_HEADER):
+                source = sqlite3.connect(str(self.path), timeout=5)
+                try:
+                    source.backup(conn)
+                finally:
+                    source.close()
+            else:
+                raise RuntimeError("encrypted SQLite persistence file has an unknown format")
+        self._memory_conn = conn
+        with self._connect() as active:
+            _create_schema(active)
+            self._normalise_existing_rows(active)
+
+    def _persist_encrypted_snapshot(self) -> None:
+        if self.path is None or self._cipher is None or self._memory_conn is None:
+            return
+        data = self._memory_conn.serialize()
+        tmp = self.path.with_name(f"{self.path.name}.tmp")
+        tmp.write_bytes(ENCRYPTED_DB_MAGIC + self._cipher.encrypt_bytes(data))
+        try:
+            tmp.chmod(0o600)
+        except Exception:
+            pass
+        tmp.replace(self.path)
+        self._remove_plaintext_sidecars()
+
+    def _remove_plaintext_sidecars(self) -> None:
+        if self.path is None:
+            return
+        for suffix in ("-wal", "-shm"):
+            try:
+                self.path.with_name(f"{self.path.name}{suffix}").unlink()
+            except FileNotFoundError:
+                pass
+
+    def _connect(self):
         if self.path is None:
             raise RuntimeError("SQLite persistence is disabled.")
+        if self._memory_conn is not None:
+            return _EncryptedConnectionLease(self)
         conn = sqlite3.connect(str(self.path), timeout=5)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
@@ -238,9 +331,9 @@ class SQLiteStore:
 
     def _store_text(self, value: Any) -> Any:
         if self._cipher and isinstance(value, str) and value.startswith(ENCRYPTED_PREFIX):
-            return value
+            value = self._cipher.decrypt(value)
         text = redact_secrets(str(value or ""))
-        return self._cipher.encrypt(text) if self._cipher else text
+        return text
 
     def _load_text(self, value: Any) -> str:
         if self._cipher is None and isinstance(value, str) and value.startswith(ENCRYPTED_PREFIX):
@@ -250,11 +343,9 @@ class SQLiteStore:
 
     def _store_number(self, value: Any) -> Any:
         if self._cipher and isinstance(value, str) and value.startswith(ENCRYPTED_PREFIX):
-            return value
+            value = self._cipher.decrypt(value)
         number = _optional_float(value)
-        if number is None:
-            return None
-        return self._cipher.encrypt(number) if self._cipher else number
+        return None if number is None else number
 
     def _load_number(self, value: Any) -> float | None:
         if self._cipher is None and isinstance(value, str) and value.startswith(ENCRYPTED_PREFIX):
@@ -264,9 +355,10 @@ class SQLiteStore:
 
     def _store_json(self, value: dict[str, Any]) -> Any:
         if self._cipher and isinstance(value, str) and value.startswith(ENCRYPTED_PREFIX):
-            return value
+            value = self._cipher.decrypt(value)
+            return _json_dumps(_json_loads(str(value or "")))
         encoded = _json_dumps(value)
-        return self._cipher.encrypt(encoded) if self._cipher else encoded
+        return encoded
 
     def _load_json(self, value: Any) -> dict[str, Any]:
         if self._cipher is None and isinstance(value, str) and value.startswith(ENCRYPTED_PREFIX):
@@ -287,7 +379,7 @@ class SQLiteStore:
     def _signal_row(self, row: sqlite3.Row) -> dict[str, Any]:
         return _signal_row(row, self)
 
-    def _encrypt_existing_rows(self, conn: sqlite3.Connection) -> None:
+    def _normalise_existing_rows(self, conn: sqlite3.Connection) -> None:
         if not self._cipher:
             return
         for row in conn.execute("SELECT symbol, display_name, metadata_json FROM instruments").fetchall():

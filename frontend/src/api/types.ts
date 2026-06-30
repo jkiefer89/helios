@@ -137,6 +137,7 @@ export interface DataStatusResponse {
       mode: string;
       key_source: string;
       algorithm: string;
+      at_rest_format: string;
       plaintext_lookup_keys: string[];
       warning?: string;
     };

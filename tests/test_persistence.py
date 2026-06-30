@@ -4,10 +4,13 @@ import time
 from io import BytesIO
 
 import pandas as pd
+import pytest
 
 import app as helios
 from engine import data, persistence, portfolio
 from tests.conftest import price_csv, price_series
+
+SQLITE_HEADER = b"SQLite format 3\x00"
 
 
 def _use_db(monkeypatch, tmp_path):
@@ -24,6 +27,7 @@ def _client():
 
 
 def test_sqlite_schema_is_created_with_version(monkeypatch, tmp_path):
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION", "off")
     store = _use_db(monkeypatch, tmp_path)
 
     with sqlite3.connect(store.path) as conn:
@@ -287,12 +291,7 @@ def test_raw_upload_content_and_secret_tokens_are_not_stored(monkeypatch, tmp_pa
         "api_key=SECRET_TOKEN_SHOULD_NOT_STORE",
     )
 
-    with sqlite3.connect(store.path) as conn:
-        text = "\n".join(
-            str(row)
-            for table in ("instruments", "models", "holdings", "price_history")
-            for row in conn.execute(f"SELECT * FROM {table}").fetchall()
-        )
+    text = store.path.read_bytes().decode("utf-8", errors="ignore")
 
     assert raw.decode("utf-8") not in text
     assert "SECRET_TOKEN_SHOULD_NOT_STORE" not in text
@@ -313,11 +312,18 @@ def test_local_persistence_encrypts_sensitive_payloads_when_key_configured(monke
     )
 
     raw_db = store.path.read_bytes()
+    assert not raw_db.startswith(SQLITE_HEADER)
+    assert b"schema_version" not in raw_db
+    with pytest.raises(sqlite3.DatabaseError):
+        with sqlite3.connect(store.path) as conn:
+            conn.execute("SELECT name FROM sqlite_master").fetchall()
     assert b"Sensitive Alpha Sleeve" not in raw_db
     assert b"Private Growth Mandate" not in raw_db
     assert b"client context should be sealed" not in raw_db
     assert store.status()["encryption"]["enabled"] is True
     assert store.status()["encryption"]["required"] is True
+    assert store.status()["encryption"]["at_rest_format"] == "fernet-sqlite-snapshot"
+    assert store.status()["encryption"]["plaintext_lookup_keys"] == []
 
     data._STORE.pop("ENC1")
     portfolio._MODELS.clear()
@@ -327,6 +333,26 @@ def test_local_persistence_encrypts_sensitive_payloads_when_key_configured(monke
     assert data.get("ENC1").name == "Sensitive Alpha Sleeve"
     assert portfolio.all_models()[0].name == "Private Growth Mandate"
     assert portfolio.all_models()[0].mandate_context == "client context should be sealed"
+
+
+def test_encryption_migrates_existing_plaintext_sqlite_file(monkeypatch, tmp_path):
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION", "off")
+    store = _use_db(monkeypatch, tmp_path)
+    data.parse_csv(price_csv(days=90), "MIGRATE", "Migration Test", source_filename="migrate.csv")
+    assert store.path.read_bytes().startswith(SQLITE_HEADER)
+
+    data._STORE.pop("MIGRATE")
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION", "required")
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION_KEY", "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=")
+    persistence.reset_store_for_tests()
+    encrypted_store = persistence.get_store()
+    data.load_persisted_instruments()
+
+    raw_db = encrypted_store.path.read_bytes()
+    assert encrypted_store.available is True
+    assert data.get("MIGRATE").name == "Migration Test"
+    assert not raw_db.startswith(SQLITE_HEADER)
+    assert b"Migration Test" not in raw_db
 
 
 def test_required_encryption_without_key_fails_closed(monkeypatch, tmp_path):

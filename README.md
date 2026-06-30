@@ -146,15 +146,16 @@ set `HELIOS_DB_PATH=off` for an ephemeral session.
 
 Local persistence encryption is enabled by default. When
 `HELIOS_DB_ENCRYPTION=auto`, Helios creates a local `.helios/helios.key` file if
-no `HELIOS_DB_ENCRYPTION_KEY` is provided, encrypts persisted payload fields,
-and rewrites older plaintext rows at startup. Use
+no `HELIOS_DB_ENCRYPTION_KEY` is provided, keeps the active SQLite database in
+process memory, and writes only a Fernet-encrypted database snapshot to disk.
+Older plaintext SQLite files are migrated into the encrypted snapshot at startup.
+Use
 `HELIOS_DB_ENCRYPTION=required` for fail-closed operation when a configured key
-must be present. The SQLite container, schema, and lookup keys such as ticker,
-model id, target id, and price date remain visible so the database can operate;
-client-facing payloads, model names/context/holdings, price values, refresh
-messages, journal scores/actions/results, metadata, and report facts are stored
-encrypted at rest. Keep the local key outside Git and protect/back it up like
-other client research secrets.
+must be present. In encrypted mode the on-disk `.db` file is not a readable
+SQLite database and does not expose schema, lookup keys, model holdings, price
+values, refresh logs, journal results, or metadata at rest. Keep the local key
+outside Git and protect/back it up like other client research secrets; without
+that key, the encrypted local research store cannot be opened.
 
 The React **Real Data Center** shows database availability, persisted
 instrument/model counts, date ranges, row counts, live-refresh status, model

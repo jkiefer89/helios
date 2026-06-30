@@ -68,7 +68,7 @@ export function RealDataCenter({
             <StatTile label="Live refresh set" value={fmtNumber(liveCount, 0)} />
             <StatTile label="At-rest storage" value={encryption?.enabled ? "Encrypted" : "Plaintext"} tone={encryption?.enabled ? "positive" : "warning"} />
           </div>
-          {encryption?.enabled && <p className="muted">Local persisted payloads are encrypted; lookup keys remain visible for database operation.</p>}
+          {encryption?.enabled && <p className="muted">Local research is stored as an encrypted snapshot; SQLite data is opened in memory only while Helios runs.</p>}
           {dataStatus?.warnings?.length ? (
             <div className="warning-list compact-list">{dataStatus.warnings.map((warning) => <span key={warning}>{warning}</span>)}</div>
           ) : (
