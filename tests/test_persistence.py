@@ -159,6 +159,13 @@ def test_auto_live_bootstrap_keeps_sample_when_fetch_fails(monkeypatch, tmp_path
     assert store.status()["real_instrument_count"] == 0
 
 
+def test_starter_models_live_preset_covers_theme_holdings():
+    symbols = set(data.expand_live_symbols("starter_models"))
+
+    assert {"AVGO", "VST", "CIBR", "XLV", "QUAL"} <= symbols
+    assert len(symbols) > len(data.expand_live_symbols("core"))
+
+
 def test_sample_and_simulated_sources_are_not_persisted_as_real(monkeypatch, tmp_path):
     store = _use_db(monkeypatch, tmp_path)
     sample = data.get("AAPL")
@@ -180,6 +187,18 @@ def test_sample_and_simulated_sources_are_not_persisted_as_real(monkeypatch, tmp
     assert simulated_result["persisted"] is False
     assert store.status()["real_instrument_count"] == 0
     assert store.load_instruments() == []
+
+
+def test_in_memory_store_keeps_institutional_sized_live_universe():
+    for idx in range(80):
+        symbol = f"LV{idx:03d}"
+        data.register(data.Instrument(symbol, symbol, _ohlcv(days=90), "live", []))
+
+    loaded = {inst.symbol for inst in data.all_instruments() if inst.source == "live"}
+
+    assert "LV000" in loaded
+    assert "LV079" in loaded
+    assert len([symbol for symbol in loaded if symbol.startswith("LV")]) == 80
 
 
 def test_app_works_with_default_db_path(monkeypatch, tmp_path):

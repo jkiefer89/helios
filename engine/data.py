@@ -21,8 +21,9 @@ import numpy as np
 import pandas as pd
 
 # Cap user-added instruments so repeated uploads/fetches can't grow memory
-# without bound; the oldest user instrument is evicted past this limit.
-MAX_USER_INSTRUMENTS = 50
+# without bound. Keep it high enough for a serious multi-theme research
+# universe plus model holdings; samples are never counted against this limit.
+MAX_USER_INSTRUMENTS = 250
 # Tickers only ever contain these characters (e.g. BRK-B, BTC-USD, ^GSPC, EURUSD=X).
 # Sanitizing at the boundary neutralizes XSS-in-symbol and yfinance URL injection.
 _SYMBOL_RE = re.compile(r"[^A-Z0-9.\-=^]")
@@ -32,9 +33,21 @@ DEFAULT_LIVE_UNIVERSE = (
     "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA",
     "JPM", "XOM", "UNH", "BND", "TLT", "GLD", "BTC-USD",
 )
+STARTER_MODEL_LIVE_UNIVERSE = (
+    "SPY", "QQQ", "IWM", "DIA",
+    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA",
+    "JPM", "XOM", "UNH", "BND", "TLT", "GLD", "BTC-USD",
+    "AVGO", "AMD", "TSM", "SMH", "VRT",
+    "VST", "CEG", "NEE", "XLU", "ETN", "GE", "PAVE", "GRID",
+    "ITA", "XAR", "LMT", "RTX", "NOC", "GD", "CIBR", "PANW", "CRWD", "FTNT",
+    "XLV", "VHT", "IHI", "IBB", "LLY", "ISRG", "SYK", "TMO", "ABBV",
+    "XLE", "TIP", "SGOV", "QUAL", "USMV", "VIG",
+)
 LIVE_UNIVERSES = {
     "core": DEFAULT_LIVE_UNIVERSE,
     "advisor": DEFAULT_LIVE_UNIVERSE,
+    "starter": STARTER_MODEL_LIVE_UNIVERSE,
+    "starter_models": STARTER_MODEL_LIVE_UNIVERSE,
 }
 
 

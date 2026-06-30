@@ -160,10 +160,11 @@ HELIOS_AUTO_LIVE_REFRESH_SECONDS=300 \
 
 `HELIOS_AUTO_LIVE_SYMBOLS=core` fetches a built-in liquid advisor universe from
 yfinance, persists those histories locally, and refreshes them every five
-minutes. You can also provide a comma-separated ticker list. This is a polling
-workflow using the latest available provider data, not a streaming quote feed;
-failed provider calls leave existing/sample data untouched and logged as failed
-refresh attempts.
+minutes. Use `HELIOS_AUTO_LIVE_SYMBOLS=starter_models` to cover every holding in
+the example model templates under `examples/models/`. You can also provide a
+comma-separated ticker list. This is a polling workflow using the latest
+available provider data, not a streaming quote feed; failed provider calls leave
+existing/sample data untouched and logged as failed refresh attempts.
 
 ### Optional AI Copilot
 
