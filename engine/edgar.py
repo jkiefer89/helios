@@ -27,9 +27,17 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
+import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
+
+# SEC tolerates ~10 req/s but briefly 503/429s under bursts; retry transient
+# failures with a short backoff so a single hiccup doesn't fail a look-through.
+_RETRY_STATUS = {429, 500, 502, 503, 504}
+_MAX_RETRIES = 3
+_RETRY_BACKOFF_S = 0.6
 
 # --------------------------------------------------------------------------- #
 # Endpoints (exposed so tests can build identical cache/fetch keys)
@@ -145,14 +153,32 @@ def browse_series_url(series_id: str, form: str = "NPORT-P", count: int = 10) ->
 
 
 def _urllib_get(url: str, headers: dict, timeout: float) -> str:
-    req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 (https only, fixed hosts)
-        # Bounded read: request one byte past the cap so an oversized or slowly
-        # streamed body never fully buffers into memory.
-        data = resp.read(_MAX_RESPONSE_BYTES + 1)
-    if len(data) > _MAX_RESPONSE_BYTES:
-        raise EdgarError(f"EDGAR response exceeds {_MAX_RESPONSE_BYTES} bytes; refusing to buffer.")
-    return data.decode("utf-8", errors="replace")
+    last_exc: Exception | None = None
+    for attempt in range(_MAX_RETRIES):
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 (https only, fixed hosts)
+                # Bounded read: request one byte past the cap so an oversized or
+                # slowly streamed body never fully buffers into memory.
+                data = resp.read(_MAX_RESPONSE_BYTES + 1)
+            if len(data) > _MAX_RESPONSE_BYTES:
+                raise EdgarError(f"EDGAR response exceeds {_MAX_RESPONSE_BYTES} bytes; refusing to buffer.")
+            return data.decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as exc:
+            last_exc = exc
+            if exc.code in _RETRY_STATUS and attempt < _MAX_RETRIES - 1:
+                time.sleep(_RETRY_BACKOFF_S * (attempt + 1))
+                continue
+            raise
+        except urllib.error.URLError as exc:  # transient DNS/connection blips
+            last_exc = exc
+            if attempt < _MAX_RETRIES - 1:
+                time.sleep(_RETRY_BACKOFF_S * (attempt + 1))
+                continue
+            raise
+    if last_exc:
+        raise last_exc
+    raise EdgarError(f"EDGAR fetch failed for {url}.")
 
 
 # --------------------------------------------------------------------------- #
