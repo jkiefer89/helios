@@ -27,6 +27,7 @@ export function OpportunityRadar({
   const [sort, setSort] = useState<"opportunity_score" | "evidence_score" | "risk_score">("opportunity_score");
   const [selectedId, setSelectedId] = useState<string>("");
   const [error, setError] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
   const requestSeq = useRef(0);
 
   const load = async () => {
@@ -34,6 +35,7 @@ export function OpportunityRadar({
     requestSeq.current = requestId;
     try {
       setError("");
+      setIsLoading(true);
       const next = await api.opportunities({ kind, includeHold, minScore, limit: 50 });
       if (requestId !== requestSeq.current) return;
       setPayload(next);
@@ -43,6 +45,8 @@ export function OpportunityRadar({
       if (requestId !== requestSeq.current) return;
       setPayload(null);
       setError(err instanceof Error ? err.message : "Opportunity Radar failed.");
+    } finally {
+      if (requestId === requestSeq.current) setIsLoading(false);
     }
   };
 
@@ -131,7 +135,9 @@ export function OpportunityRadar({
       )}
       <section className="radar-layout">
         <Panel title="Ranked Candidates" meta={`${items.length} shown${payload?.total_candidates ? ` · ${payload.total_candidates} screened` : ""}`}>
-          {items.length === 0 ? (
+          {items.length === 0 && isLoading ? (
+            <div className="loading">Loading real-data rankings from live and persisted histories...</div>
+          ) : items.length === 0 ? (
             <>
               <div className="radar-table-meta" aria-label="Locked opportunity radar status">
                 <span>Evidence gates</span>
@@ -182,6 +188,8 @@ export function OpportunityRadar({
               item={selected}
               onOpen={() => selected.kind === "model" && selected.model_id ? onOpenModel(selected.model_id) : onOpenInstrument(selected.symbol)}
             />
+          ) : isLoading ? (
+            <div className="loading">Loading selected candidate from the ranked real-data queue...</div>
           ) : (
             <LockedCandidateDetail payload={payload} />
           )}

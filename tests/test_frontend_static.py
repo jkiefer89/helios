@@ -35,6 +35,20 @@ def test_react_terminal_exposes_richer_chart_components():
     assert "ChartSummary" in strategy_source
 
 
+def test_react_terminal_uses_live_aware_data_honesty_copy():
+    command_source = (ROOT / "frontend" / "src" / "views" / "CommandCenter.tsx").read_text()
+    opportunity_source = (ROOT / "frontend" / "src" / "views" / "OpportunityRadar.tsx").read_text()
+
+    assert "<strong>Demo / gated data</strong>" not in command_source
+    assert "<strong>Real data required</strong>" not in command_source
+    assert "buildDisclosureCards(payload, sourceStatus)" in command_source
+    assert "formatSourceStatus" in command_source
+    assert "Real data active" in command_source
+    assert "Research unlocked" in command_source
+    assert "Loading real-data rankings" in opportunity_source
+    assert "setIsLoading(true)" in opportunity_source
+
+
 def test_flask_serves_react_build_when_present(tmp_path, monkeypatch):
     dist = tmp_path / "dist"
     assets = dist / "assets"

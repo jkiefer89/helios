@@ -7,6 +7,8 @@ import { EmptyState } from "../components/empty-states/EmptyState";
 import type { ViewId } from "../components/layout/AppShell";
 import { fmtNumber, fmtPct, fmtTimestamp } from "../utils/format";
 
+type DisclosureTone = "neutral" | "info" | "positive" | "warning";
+
 export function CommandCenter({
   payload,
   dataStatus,
@@ -24,11 +26,10 @@ export function CommandCenter({
   const regime = payload.regime;
   const topDrivers = regime.drivers.slice(0, 5);
   const sourceCounts = payload.data_provenance?.source_counts || {};
-  const sourceStatus = Object.entries(sourceCounts)
-    .map(([source, count]) => `${source} ${count}`)
-    .join(" · ") || "source status pending";
+  const sourceStatus = formatSourceStatus(sourceCounts);
   const generatedLabel = formatTimestamp(payload.generated_at);
   const statusItems = buildStatusItems(payload, sourceStatus, generatedLabel);
+  const disclosureCards = buildDisclosureCards(payload, sourceStatus);
   return (
     <div className="view-stack command-terminal">
       <section className="regime-terminal">
@@ -165,26 +166,13 @@ export function CommandCenter({
       </section>
 
       <section className="command-disclosure">
-        <div>
-          <DisclosureIcon tone="neutral" />
-          <strong>Analysis-only: not investment advice</strong>
-          <p>{payload.disclaimer}</p>
-        </div>
-        <div>
-          <DisclosureIcon tone="info" />
-          <strong>Demo / gated data</strong>
-          <p>{sourceStatus}. {payload.reason || payload.required_action || "Verify source quality before use."}</p>
-        </div>
-        <div>
-          <DisclosureIcon tone="positive" />
-          <strong>Real data required</strong>
-          <p>Research rankings, alerts, and score distributions unlock only when eligible live or uploaded histories pass provenance checks.</p>
-        </div>
-        <div>
-          <DisclosureIcon tone="warning" />
-          <strong>No guarantees</strong>
-          <p>Helios reports evidence and caveats only. Portfolio outcomes and market prices remain uncertain.</p>
-        </div>
+        {disclosureCards.map((card) => (
+          <div key={card.title}>
+            <DisclosureIcon tone={card.tone} />
+            <strong>{card.title}</strong>
+            <p>{card.body}</p>
+          </div>
+        ))}
       </section>
       <footer className="command-status">
         <div className="command-status__left">
@@ -208,6 +196,58 @@ export function CommandCenter({
 
 function PanelAction({ label, onClick }: { label: string; onClick: () => void }) {
   return <button className="panel-link" type="button" onClick={onClick}>{label}</button>;
+}
+
+function buildDisclosureCards(payload: CommandCenterResponse, sourceStatus: string): Array<{ title: string; body: string; tone: DisclosureTone }> {
+  const realDataReady = payload.eligible_for_real_research === true;
+  return [
+    {
+      title: "Analysis-only: not investment advice",
+      body: payload.disclaimer || "Helios provides analysis only and does not provide investment advice, brokerage services, order execution, or return guarantees.",
+      tone: "neutral",
+    },
+    realDataReady
+      ? {
+          title: "Real data active",
+          body: `${sourceStatus}. Research panels are using eligible live or uploaded histories; verify source quality before use.`,
+          tone: "positive",
+        }
+      : {
+          title: "Demo / gated data",
+          body: `${sourceStatus}. ${payload.reason || payload.required_action || "Verify source quality before use."}`,
+          tone: "info",
+        },
+    realDataReady
+      ? {
+          title: "Research unlocked",
+          body: "Research rankings, alerts, and score distributions are available from eligible live or uploaded histories that passed provenance checks.",
+          tone: "positive",
+        }
+      : {
+          title: "Real data required",
+          body: "Research rankings, alerts, and score distributions unlock only when eligible live or uploaded histories pass provenance checks.",
+          tone: "positive",
+        },
+    {
+      title: "No guarantees",
+      body: "Helios reports evidence and caveats only. Portfolio outcomes and market prices remain uncertain.",
+      tone: "warning",
+    },
+  ];
+}
+
+function formatSourceStatus(sourceCounts: Record<string, number>) {
+  const labels: Record<string, string> = {
+    live: "Live histories",
+    upload: "Uploaded histories",
+    sample: "Demo samples",
+    simulated: "Simulated histories",
+    missing: "Missing histories",
+  };
+  const parts = Object.entries(sourceCounts)
+    .filter(([, count]) => Number(count) > 0)
+    .map(([source, count]) => `${labels[source] || `${source} histories`}: ${count}`);
+  return parts.join(" · ") || "Source status pending";
 }
 
 function ResearchUnlockCTA({
