@@ -57,13 +57,23 @@ export function AICopilotPanel({
     return "";
   }, [computedDataMode]);
 
+  const unavailableReason = useMemo(() => {
+    if (!payload) return "No Helios payload is available for AI review.";
+    if (!status) return "Checking AI Copilot status...";
+    if (status.available) return "";
+    if (!status.enabled) {
+      return status.reason || "AI Copilot is off. Helios analytics still work normally.";
+    }
+    return status.reason || "AI provider unavailable. Check the server-side provider configuration.";
+  }, [payload, status]);
+
   const runAction = async (action: CopilotAction, regenerate = false) => {
     if (!payload) {
       setError("No Helios payload is available for AI review.");
       return;
     }
-    if (status && !status.available) {
-      setError(status.reason || "AI provider unavailable.");
+    if (unavailableReason) {
+      setError(unavailableReason);
       return;
     }
     setLoading(true);
@@ -92,7 +102,6 @@ export function AICopilotPanel({
     }, true);
   };
 
-  const unavailable = !payload || !status?.available;
   const statusTone = status?.available ? "ready" : status?.enabled ? "warning" : "disabled";
 
   return (
@@ -114,7 +123,7 @@ export function AICopilotPanel({
 
       <div className="ai-state-message">
         <strong>{statusMessage(status)}</strong>
-        {status?.reason && <span>{status.reason}</span>}
+        {unavailableReason && <span>{unavailableReason}</span>}
         {status?.privacy_warning && <span>{status.privacy_warning}</span>}
         {(status?.security_warnings || []).map((warning) => <span key={warning}>{warning}</span>)}
         {modeWarning && <span>{modeWarning}</span>}
@@ -125,7 +134,8 @@ export function AICopilotPanel({
           <button
             type="button"
             key={action.id}
-            disabled={unavailable || loading}
+            disabled={Boolean(unavailableReason) || loading}
+            title={unavailableReason || undefined}
             onClick={() => void runAction(action)}
           >
             {loading && activeAction === action.id ? "Generating..." : action.label}
@@ -138,9 +148,9 @@ export function AICopilotPanel({
           value={question}
           onChange={(event) => setQuestion(event.target.value)}
           placeholder="Ask a question about this Helios analysis..."
-          disabled={unavailable || loading}
+          disabled={Boolean(unavailableReason) || loading}
         />
-        <button type="submit" disabled={unavailable || loading || !question.trim()}>
+        <button type="submit" disabled={Boolean(unavailableReason) || loading || !question.trim()}>
           {loading && activeAction === "question" ? "Asking..." : "Ask"}
         </button>
       </form>
@@ -221,7 +231,7 @@ function providerLabel(status: AIStatusResponse | null) {
 
 function statusMessage(status: AIStatusResponse | null) {
   if (!status) return "Checking AI Copilot status...";
-  if (!status.enabled) return "AI Copilot is off. Helios analytics still work normally.";
+  if (!status.enabled) return "AI Copilot unavailable";
   if (status.provider === "anthropic" && status.available) return "Claude provider configured.";
   if (status.provider === "anthropic") return "Claude provider unavailable.";
   if (status.provider === "local") return status.available ? "Local AI provider configured." : "Local AI is not configured or not running.";

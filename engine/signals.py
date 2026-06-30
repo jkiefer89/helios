@@ -155,15 +155,22 @@ def _component_clauses(f, i, raw, eff_w, contrib, fc, sent) -> dict:
     q = fc.get("quality", {}) or {}
     da = q.get("directional_accuracy")
     da_txt = f"; OOS directional accuracy {da*100:.0f}% on {q.get('n_test', 0)}d" if da is not None else ""
+    if da is not None and da <= 0.50:
+        forecast_clause = (f"Forecast transparency check: estimate {er:+.1f}% over "
+                           f"{fc.get('horizon_days', 0)}d is not measured edge "
+                           f"(p(up)={fc.get('prob_up', 0)*100:.0f}%, raw {raw['forecast']:+.2f}, "
+                           f"eff. wt {eff_w['forecast']:.0%}, contrib {contrib['forecast']:+.2f}{da_txt}).")
+    else:
+        forecast_clause = (f"Model projects {er:+.1f}% over {fc.get('horizon_days', 0)}d "
+                           f"(p(up)={fc.get('prob_up', 0)*100:.0f}%, raw {raw['forecast']:+.2f}, "
+                           f"eff. wt {eff_w['forecast']:.0%}, contrib {contrib['forecast']:+.2f}{da_txt}).")
     return {
         "trend": (f"Trend {'up' if raw['trend']>0 else 'down' if raw['trend']<0 else 'flat'} "
                   f"(raw {raw['trend']:+.2f}, eff. wt {eff_w['trend']:.0%}, contrib {contrib['trend']:+.2f}): "
                   f"{cross}, {px}, {macd}."),
         "momentum": (f"Momentum {mom_state} (RSI {rsi:.0f} vs 30/70 bands, raw {raw['momentum']:+.2f}, "
                      f"eff. wt {eff_w['momentum']:.0%}, contrib {contrib['momentum']:+.2f})."),
-        "forecast": (f"Model projects {er:+.1f}% over {fc.get('horizon_days', 0)}d "
-                     f"(p(up)={fc.get('prob_up', 0)*100:.0f}%, raw {raw['forecast']:+.2f}, "
-                     f"eff. wt {eff_w['forecast']:.0%}, contrib {contrib['forecast']:+.2f}{da_txt})."),
+        "forecast": forecast_clause,
         "sentiment": (f"News {sent.get('aggregate_label', 'neutral')} (aggregate "
                       f"{sent.get('aggregate_score', 0):+.2f} across {sent.get('count', 0)} headlines, "
                       f"raw {raw['sentiment']:+.2f}, eff. wt {eff_w['sentiment']:.0%}, "
@@ -188,7 +195,7 @@ def _caveats(fc, history_days, data_honesty) -> list:
 
 def _headline(action, conviction_pct, band, ordered, vol, vol_penalty, mandate_fit,
               mandate_key, mlabel, pmeta, caveats) -> str:
-    verb = {"BUY": "Constructive", "SELL": "Cautious", "HOLD": "Balanced"}[action]
+    verb = {"BUY": "Constructive", "SELL": "Cautious", "HOLD": "Neutral evidence"}[action]
     parts = []
     if pmeta:
         parts.append(f"This model ({pmeta.get('n_holdings', 0)} holdings, top weight "

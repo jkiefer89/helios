@@ -95,6 +95,27 @@ def test_signal_short_history_caveat_uses_analyzed_not_aligned_history():
     assert "aligned trading days" not in caveats
 
 
+def test_hold_signal_copy_does_not_confuse_action_with_mandate_label():
+    close = price_series(260, daily=0.0)
+    fc = {
+        "expected_return_pct": 3.6,
+        "horizon_days": 21,
+        "prob_up": 0.67,
+        "quality": {"directional_accuracy": 0.38, "n_test": 69},
+    }
+    sent = {"aggregate_score": 0.0, "aggregate_label": "neutral", "count": 0}
+
+    sig = signals.evaluate(close, fc, sent, mandate_key="growth")
+    headline = sig["headline_rationale"]
+
+    assert sig["action"] == "HOLD"
+    assert "Balanced —" not in headline
+    assert "Neutral evidence —" in headline
+    assert "Forecast transparency check" in headline
+    assert "Model projects" not in headline
+    assert "no measured edge" in " ".join(sig["caveats"])
+
+
 def test_short_forecast_returns_expected_shape():
     close = price_series(260)
 

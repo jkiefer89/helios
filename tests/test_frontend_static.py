@@ -49,6 +49,16 @@ def test_react_terminal_uses_live_aware_data_honesty_copy():
     assert "setIsLoading(true)" in opportunity_source
 
 
+def test_ai_copilot_disabled_state_is_non_actionable_and_not_repetitive():
+    source = (ROOT / "frontend" / "src" / "components" / "ai" / "AICopilotPanel.tsx").read_text()
+
+    assert "const unavailableReason" in source
+    assert "{unavailableReason && <span>{unavailableReason}</span>}" in source
+    assert "disabled={Boolean(unavailableReason) || loading}" in source
+    assert "AI Copilot unavailable" in source
+    assert source.count("AI Copilot is off. Helios analytics still work normally.") == 1
+
+
 def test_flask_serves_react_build_when_present(tmp_path, monkeypatch):
     dist = tmp_path / "dist"
     assets = dist / "assets"
