@@ -63,7 +63,7 @@ _LOCAL_ENV_STATUS = _load_local_env_file()
 
 from engine import (
     ai_copilot, backtest, data, forecast, indicators, insights, mandate, model_library, opportunity, portfolio,
-    portfolio_clinic, persistence, provenance, regime, reporting, sentiment, signals, strategy,
+    portfolio_clinic, persistence, provenance, regime, reporting, sentiment, signal_journal, signals, strategy,
 )
 
 app = Flask(__name__)
@@ -619,6 +619,24 @@ def data_status():
     return ok(_data_status_payload())
 
 
+@app.route("/api/signal-journal")
+def signal_journal_endpoint():
+    limit, error = _safe_int_arg("limit", 100, 1, 500)
+    if error:
+        return err(error, 400)
+    entries = signal_journal.list_entries(limit=limit)
+    return ok({
+        "entries": entries,
+        "count": len(entries),
+        "methodology": {
+            "analysis_only": True,
+            "paper_tracking_only": True,
+            "raw_price_history_stored": False,
+        },
+        "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+    })
+
+
 @app.route("/api/data/refresh", methods=["POST"])
 def data_refresh():
     payload = request.get_json(silent=True) or {}
@@ -700,6 +718,7 @@ def analyze():
     sig = signals.evaluate(close, fc, sent)
     bt = backtest.run(close)
     metrics = indicators.metrics_summary(close)
+    journal_entry = _record_instrument_signal(inst, close, sig, horizon)
 
     return ok({
         "symbol": inst.symbol,
@@ -710,6 +729,7 @@ def analyze():
         "forecast": fc,
         "sentiment": sent,
         "signal": sig,
+        "signal_journal_entry": journal_entry,
         "backtest": bt,
     })
 
@@ -1126,6 +1146,7 @@ def model_analyze():
     sig = signals.evaluate(close, fc_short, sent, mandate_key=mdl.mandate_key,
                            portfolio_meta=pmeta, history_days=ps.n_days, data_honesty=ps.provenance)
     bt = backtest.run(close)
+    journal_entry = _record_model_signal(mdl, ps, close, sig, signal_horizon)
 
     # 1Y projection always computed for the drawdown-breach insight; reuse if displayed.
     fc_long_1y = forecast.forecast_long(close, 252, mdl.mandate_key) if ps.n_days >= 126 else None
@@ -1152,6 +1173,7 @@ def model_analyze():
         "forecast": forecast_panel,
         "forecast_short": fc_short,
         "signal": sig,
+        "signal_journal_entry": journal_entry,
         "backtest": bt,
         "insights": ins,
         "warnings": ps.warnings,
@@ -1364,6 +1386,48 @@ def _dedupe_strings(items: list[str]) -> list[str]:
         if item and item not in out:
             out.append(item)
     return out
+
+
+def _record_instrument_signal(inst: data.Instrument, close: pd.Series, sig: dict, horizon_days: int) -> dict | None:
+    try:
+        p = provenance.instrument(inst.source, len(close.dropna()))
+        return signal_journal.record_signal(
+            target_kind="instrument",
+            target_id=inst.symbol,
+            target_name=inst.name,
+            close=close,
+            input_close=close,
+            signal=sig,
+            horizon_days=horizon_days,
+            benchmark="SPY",
+            source_counts={inst.source: 1},
+            eligible_for_real_research=p["eligible_for_real_research"],
+            data_mode=p["data_mode"],
+            metadata={"endpoint": "/api/analyze"},
+        )
+    except Exception:
+        return None
+
+
+def _record_model_signal(mdl: portfolio.Model, ps: portfolio.PortfolioSeries, close: pd.Series, sig: dict, horizon_days: int) -> dict | None:
+    try:
+        p = provenance.portfolio(ps.provenance)
+        return signal_journal.record_signal(
+            target_kind="model",
+            target_id=mdl.id,
+            target_name=mdl.name,
+            close=close,
+            input_close=close,
+            signal=sig,
+            horizon_days=horizon_days,
+            benchmark=signal_journal.benchmark_for_model(mdl),
+            source_counts={str(k): int(v) for k, v in ps.sources.items()},
+            eligible_for_real_research=p["eligible_for_real_research"],
+            data_mode=p["data_mode"],
+            metadata={"endpoint": "/api/model/analyze", "mandate": mdl.mandate_key},
+        )
+    except Exception:
+        return None
 
 
 def _holdings_with_signals(ps: portfolio.PortfolioSeries, mdl: portfolio.Model) -> list:

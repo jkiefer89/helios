@@ -19,6 +19,7 @@ Modules:
     persistence - local SQLite store for live/uploaded data
     ai_copilot  - optional narrative provider layer over sanitized Helios facts
     model_library - governed starter model templates/workspaces
+    signal_journal - local signal audit log and paper-performance tracking
 """
 
 __all__ = [
@@ -40,4 +41,5 @@ __all__ = [
     "persistence",
     "ai_copilot",
     "model_library",
+    "signal_journal",
 ]

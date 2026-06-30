@@ -17,7 +17,7 @@ from typing import Any
 
 import pandas as pd
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 REAL_SOURCES = {"live", "upload"}
 DISABLED_VALUES = {"", "0", "false", "off", "disabled", "none"}
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[1] / ".helios" / "helios.db"
@@ -416,6 +416,125 @@ class SQLiteStore:
         except Exception:
             return []
 
+    def record_signal_event(self, event: dict[str, Any]) -> dict[str, Any]:
+        if not self.available:
+            return {"recorded": False, "warning": self.warning}
+        try:
+            now = utc_now()
+            source_counts = event.get("source_counts") or {}
+            metadata = event.get("metadata") or {}
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO signal_journal
+                      (dedupe_key, created_at, target_kind, target_id, target_name, benchmark,
+                       input_start_date, input_end_date, input_rows, horizon_days,
+                       score, action_label, data_mode, eligible_for_real_research,
+                       source_counts_json, forward_status, forward_start_date,
+                       forward_end_date, forward_result_pct, benchmark_result_pct,
+                       alpha_pct, evaluated_at, metadata_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(dedupe_key) DO UPDATE SET
+                      target_name = excluded.target_name,
+                      benchmark = excluded.benchmark,
+                      score = excluded.score,
+                      action_label = excluded.action_label,
+                      data_mode = excluded.data_mode,
+                      eligible_for_real_research = excluded.eligible_for_real_research,
+                      source_counts_json = excluded.source_counts_json,
+                      forward_status = excluded.forward_status,
+                      forward_start_date = excluded.forward_start_date,
+                      forward_end_date = excluded.forward_end_date,
+                      forward_result_pct = excluded.forward_result_pct,
+                      benchmark_result_pct = excluded.benchmark_result_pct,
+                      alpha_pct = excluded.alpha_pct,
+                      evaluated_at = excluded.evaluated_at,
+                      metadata_json = excluded.metadata_json
+                    """,
+                    (
+                        redact_secrets(str(event["dedupe_key"]))[:96],
+                        now,
+                        redact_secrets(str(event["target_kind"]))[:24],
+                        redact_secrets(str(event["target_id"]))[:64],
+                        redact_secrets(str(event["target_name"]))[:120],
+                        redact_secrets(str(event.get("benchmark") or ""))[:32],
+                        str(event["input_start_date"]),
+                        str(event["input_end_date"]),
+                        int(event["input_rows"]),
+                        int(event["horizon_days"]),
+                        float(event["score"]),
+                        redact_secrets(str(event["action_label"]))[:16],
+                        redact_secrets(str(event.get("data_mode") or ""))[:32],
+                        int(bool(event.get("eligible_for_real_research"))),
+                        _json_dumps(source_counts),
+                        redact_secrets(str(event.get("forward_status") or "pending"))[:16],
+                        str(event.get("forward_start_date") or ""),
+                        str(event.get("forward_end_date") or ""),
+                        _optional_float(event.get("forward_result_pct")),
+                        _optional_float(event.get("benchmark_result_pct")),
+                        _optional_float(event.get("alpha_pct")),
+                        str(event.get("evaluated_at") or ""),
+                        _json_dumps(metadata),
+                    ),
+                )
+                row = conn.execute(
+                    "SELECT * FROM signal_journal WHERE dedupe_key = ?",
+                    (redact_secrets(str(event["dedupe_key"]))[:96],),
+                ).fetchone()
+                return {"recorded": True, "entry": _signal_row(row) if row else None}
+        except Exception as exc:
+            self.warning = f"Could not record signal journal entry: {exc}"
+            return {"recorded": False, "warning": self.warning}
+
+    def update_signal_forward_result(self, dedupe_key: str, result: dict[str, Any]) -> None:
+        if not self.available:
+            return
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    UPDATE signal_journal
+                    SET forward_status = ?,
+                        forward_start_date = ?,
+                        forward_end_date = ?,
+                        forward_result_pct = ?,
+                        benchmark_result_pct = ?,
+                        alpha_pct = ?,
+                        evaluated_at = ?
+                    WHERE dedupe_key = ?
+                    """,
+                    (
+                        redact_secrets(str(result.get("forward_status") or "pending"))[:16],
+                        str(result.get("forward_start_date") or ""),
+                        str(result.get("forward_end_date") or ""),
+                        _optional_float(result.get("forward_result_pct")),
+                        _optional_float(result.get("benchmark_result_pct")),
+                        _optional_float(result.get("alpha_pct")),
+                        str(result.get("evaluated_at") or ""),
+                        redact_secrets(str(dedupe_key))[:96],
+                    ),
+                )
+        except Exception as exc:
+            self.warning = f"Could not update signal journal result: {exc}"
+
+    def signal_journal(self, limit: int = 100) -> list[dict[str, Any]]:
+        if not self.available:
+            return []
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM signal_journal
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (max(1, min(int(limit), 500)),),
+                ).fetchall()
+                return [_signal_row(row) for row in rows]
+        except Exception:
+            return []
+
 
 def _create_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
@@ -499,11 +618,42 @@ def _create_schema(conn: sqlite3.Connection) -> None:
         """
     )
     conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS signal_journal (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          dedupe_key TEXT NOT NULL UNIQUE,
+          created_at TEXT NOT NULL,
+          target_kind TEXT NOT NULL,
+          target_id TEXT NOT NULL,
+          target_name TEXT NOT NULL,
+          benchmark TEXT NOT NULL DEFAULT '',
+          input_start_date TEXT NOT NULL,
+          input_end_date TEXT NOT NULL,
+          input_rows INTEGER NOT NULL,
+          horizon_days INTEGER NOT NULL,
+          score REAL NOT NULL,
+          action_label TEXT NOT NULL,
+          data_mode TEXT NOT NULL DEFAULT '',
+          eligible_for_real_research INTEGER NOT NULL DEFAULT 0,
+          source_counts_json TEXT NOT NULL DEFAULT '{}',
+          forward_status TEXT NOT NULL DEFAULT 'pending',
+          forward_start_date TEXT NOT NULL DEFAULT '',
+          forward_end_date TEXT NOT NULL DEFAULT '',
+          forward_result_pct REAL,
+          benchmark_result_pct REAL,
+          alpha_pct REAL,
+          evaluated_at TEXT NOT NULL DEFAULT '',
+          metadata_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    conn.execute(
         "INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES (?, ?)",
         (SCHEMA_VERSION, utc_now()),
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_price_history_symbol_date ON price_history(symbol, date)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_refresh_log_symbol_time ON refresh_log(symbol, attempted_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_signal_journal_target ON signal_journal(target_kind, target_id, input_end_date)")
 
 
 def _normalise_price_frame(frame: pd.DataFrame) -> pd.DataFrame:
@@ -549,6 +699,35 @@ def _json_loads(value: str | None) -> dict[str, Any]:
         return decoded if isinstance(decoded, dict) else {}
     except Exception:
         return {}
+
+
+def _signal_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": int(row["id"]),
+        "dedupe_key": row["dedupe_key"],
+        "created_at": row["created_at"],
+        "target_kind": row["target_kind"],
+        "target_id": row["target_id"],
+        "target_name": row["target_name"],
+        "benchmark": row["benchmark"],
+        "input_start_date": row["input_start_date"],
+        "input_end_date": row["input_end_date"],
+        "input_rows": int(row["input_rows"]),
+        "horizon_days": int(row["horizon_days"]),
+        "score": float(row["score"]),
+        "action_label": row["action_label"],
+        "data_mode": row["data_mode"],
+        "eligible_for_real_research": bool(row["eligible_for_real_research"]),
+        "source_counts": _json_loads(row["source_counts_json"]),
+        "forward_status": row["forward_status"],
+        "forward_start_date": row["forward_start_date"] or None,
+        "forward_end_date": row["forward_end_date"] or None,
+        "forward_result_pct": _optional_float(row["forward_result_pct"]),
+        "benchmark_result_pct": _optional_float(row["benchmark_result_pct"]),
+        "alpha_pct": _optional_float(row["alpha_pct"]),
+        "evaluated_at": row["evaluated_at"] or None,
+        "metadata": _json_loads(row["metadata_json"]),
+    }
 
 
 def _scrub_json(value: Any) -> Any:

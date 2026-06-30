@@ -332,6 +332,38 @@ export interface ReportResponse extends ProvenancePayload {
   sections: Record<string, unknown>;
 }
 
+export interface SignalJournalEntry {
+  id: number;
+  created_at: string;
+  target_kind: string;
+  target_id: string;
+  target_name: string;
+  benchmark: string;
+  input_start_date: string;
+  input_end_date: string;
+  input_rows: number;
+  horizon_days: number;
+  score: number;
+  action_label: string;
+  data_mode: string;
+  eligible_for_real_research: boolean;
+  source_counts: Record<string, number>;
+  forward_status: string;
+  forward_start_date?: string | null;
+  forward_end_date?: string | null;
+  forward_result_pct?: number | null;
+  benchmark_result_pct?: number | null;
+  alpha_pct?: number | null;
+  evaluated_at?: string | null;
+}
+
+export interface SignalJournalResponse {
+  entries: SignalJournalEntry[];
+  count: number;
+  methodology: Record<string, unknown>;
+  disclaimer: string;
+}
+
 export interface AnalysisResponse {
   symbol?: string;
   id?: string;

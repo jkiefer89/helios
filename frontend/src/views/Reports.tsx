@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
-import type { DataStatusResponse, ModelSummary, ReportResponse, TickerSummary } from "../api/types";
+import type { DataStatusResponse, ModelSummary, ReportResponse, SignalJournalEntry, TickerSummary } from "../api/types";
 import { AICopilotPanel, reportCopilotActions } from "../components/ai/AICopilotPanel";
 import { DataQualityBanner } from "../components/badges/DataModeBadge";
 import { Panel } from "../components/cards/Panel";
@@ -28,6 +28,7 @@ export function Reports({
   const defaultTarget = selectedModel ? `model:${selectedModel}` : selectedInstrument ? `instrument:${selectedInstrument}` : tickers[0] ? `instrument:${tickers[0].symbol}` : "";
   const [target, setTarget] = useState(defaultTarget);
   const [payload, setPayload] = useState<ReportResponse | null>(null);
+  const [journalEntries, setJournalEntries] = useState<SignalJournalEntry[]>([]);
   const [error, setError] = useState("");
   const requestSeq = useRef(0);
   const options = useMemo(() => [
@@ -61,6 +62,20 @@ export function Reports({
     void build(defaultTarget);
   }, [defaultTarget]);
 
+  useEffect(() => {
+    let cancelled = false;
+    api.signalJournal()
+      .then((journal) => {
+        if (!cancelled) setJournalEntries(journal.entries);
+      })
+      .catch(() => {
+        if (!cancelled) setJournalEntries([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [payload]);
+
   return (
     <div className="view-stack report-view">
       <header className="view-head no-print">
@@ -72,12 +87,40 @@ export function Reports({
         </form>
       </header>
       {error && <div className="notice danger">{error}</div>}
+      <SignalJournalPanel entries={journalEntries} />
       {!payload ? (
         <EmptyState title="Select a report target" body="Choose an instrument or model to build an analysis-only report." />
       ) : (
         <ReportSheet payload={payload} dataStatus={dataStatus} />
       )}
     </div>
+  );
+}
+
+function SignalJournalPanel({ entries }: { entries: SignalJournalEntry[] }) {
+  return (
+    <Panel title="Signal Journal" meta="Paper tracking only" className="no-print signal-journal-panel">
+      {entries.length === 0 ? (
+        <EmptyState title="No signals logged yet" body="Run an instrument or model analysis to start tracking forward paper results." />
+      ) : (
+        <div className="terminal-table signal-journal-table" tabIndex={0} aria-label="Signal Journal paper performance table">
+          <div className="terminal-table__head">
+            <span>Date</span><span>Target</span><span>Action</span><span>Score</span><span>Input Range</span><span>Benchmark</span><span>Forward Result</span>
+          </div>
+          {entries.slice(0, 12).map((entry) => (
+            <div className="table-row" key={entry.id}>
+              <span>{fmtTimestamp(entry.created_at)}</span>
+              <span><strong>{entry.target_name}</strong><small>{entry.target_kind} · {entry.target_id}</small></span>
+              <span>{entry.action_label}</span>
+              <span>{fmtNumber(entry.score, 2)}</span>
+              <span>{entry.input_start_date} → {entry.input_end_date}<small>{entry.input_rows} rows · {entry.horizon_days}d</small></span>
+              <span>{entry.benchmark || "—"}</span>
+              <span>{entry.forward_status === "measured" ? fmtPct(entry.forward_result_pct) : "Pending"}<small>{entry.alpha_pct == null ? "" : `Alpha ${fmtPct(entry.alpha_pct)}`}</small></span>
+            </div>
+          ))}
+        </div>
+      )}
+    </Panel>
   );
 }
 

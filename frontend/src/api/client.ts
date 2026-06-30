@@ -12,6 +12,7 @@ import type {
   ModelTemplateImportResponse,
   OpportunitiesResponse,
   ReportResponse,
+  SignalJournalResponse,
   StrategyResponse,
   TickersResponse,
 } from "./types";
@@ -82,6 +83,7 @@ export const api = {
   reportInstrument: (symbol: string) =>
     request<ReportResponse>(`/api/report/instrument?ticker=${encodeURIComponent(symbol)}`),
   reportModel: (id: string) => request<ReportResponse>(`/api/report/model?id=${encodeURIComponent(id)}`),
+  signalJournal: () => request<SignalJournalResponse>("/api/signal-journal"),
   analyzeInstrument: (symbol: string, horizon: number) =>
     request<AnalysisResponse>(`/api/analyze?ticker=${encodeURIComponent(symbol)}&horizon=${horizon}`),
   analyzeModel: (id: string, horizon: string | number) =>

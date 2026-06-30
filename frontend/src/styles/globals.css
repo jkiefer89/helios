@@ -2940,6 +2940,11 @@ p {
   grid-template-columns: minmax(180px, 1.4fr) minmax(120px, 1fr) 90px minmax(130px, 1fr) minmax(160px, auto);
 }
 
+.signal-journal-table .terminal-table__head,
+.signal-journal-table .table-row {
+  grid-template-columns: minmax(120px, 0.8fr) minmax(190px, 1.25fr) 72px 70px minmax(190px, 1.15fr) 90px minmax(120px, 0.9fr);
+}
+
 .real-data-table .terminal-table__head,
 .real-data-table .table-row {
   grid-template-columns: minmax(130px, 1fr) 90px 80px minmax(180px, 1.2fr) minmax(150px, 1fr) minmax(150px, auto);

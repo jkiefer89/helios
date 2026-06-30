@@ -77,6 +77,15 @@ def test_models_view_exposes_governed_model_library():
     assert "Import template" in source
 
 
+def test_reports_view_exposes_signal_journal():
+    source = (ROOT / "frontend" / "src" / "views" / "Reports.tsx").read_text()
+
+    assert "Signal Journal" in source
+    assert "api.signalJournal" in source
+    assert "Forward Result" in source
+    assert "Paper tracking only" in source
+
+
 def test_flask_serves_react_build_when_present(tmp_path, monkeypatch):
     dist = tmp_path / "dist"
     assets = dist / "assets"

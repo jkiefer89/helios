@@ -30,7 +30,7 @@ def test_sqlite_schema_is_created_with_version(monkeypatch, tmp_path):
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
 
-    assert {"instruments", "price_history", "models", "holdings", "refresh_log"} <= tables
+    assert {"instruments", "price_history", "models", "holdings", "refresh_log", "signal_journal"} <= tables
     assert version == persistence.SCHEMA_VERSION
 
 

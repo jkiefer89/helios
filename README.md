@@ -118,6 +118,7 @@ the backend's demo, mixed, or blocked provenance state.
 | **Mandates** | Tag each model with its purpose (pure growth, income, CD alternative, balanced, capital preservation); the mandate **intentionally** tilts the signal weights, risk budgets and forecast anchor |
 | **Long-horizon projection** | 5–90 day tactical signal **plus** 6-month / 1-year / 3-year / 5-year strategic value cones (terminal value, CAGR bands, probability of meeting the mandate, drawdown-breach odds) |
 | **Conviction rationale** | Every signal explains itself: per-component clauses with the actual numbers, the mandate tilt, the vol penalty, and honesty caveats |
+| **Signal Journal** | Instrument/model analysis signals are logged locally with input date range, score, action, benchmark, provenance and paper forward result status |
 | **Insights** | 12 rule-based suggestions per model — concentration, mandate fit, drawdown, correlation, forecast skill, data honesty — each with a concrete action |
 
 ### Data quality modes
@@ -311,6 +312,7 @@ static/styles.css     legacy dashboard theme
 |----------|---------|
 | `GET /api/command-center` | Pro dashboard payload with regime, real-data opportunities, risks, model alerts and research queue |
 | `GET /api/data/status` | SQLite/database health, real-data counts, model coverage, missing tickers and refresh log |
+| `GET /api/signal-journal` | local paper-performance journal of recorded analysis signals and measured/pending forward results |
 | `POST /api/data/refresh` | refresh existing live instruments (`{ "symbol": "AAPL" }` or `{ "all": true }`) |
 | `GET /api/opportunities` | Opportunity Radar rankings; returns no placeholder rows when real data is unavailable |
 | `GET /api/strategy/analyze` | Strategy Lab for a single instrument with no-lookahead evidence |
