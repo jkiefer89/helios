@@ -73,6 +73,9 @@ starts Helios.
 | `HELIOS_AUTH` | `1` | `0` disables the password gate (localhost dev only) |
 | `HELIOS_RF` | `0.02` | Risk-free / CD benchmark rate used by mandates and projections |
 | `HELIOS_DB_PATH` | `.helios/helios.db` | Local SQLite store for parsed live/uploaded data (`off` disables persistence) |
+| `HELIOS_DB_ENCRYPTION` | `auto` | Encrypt sensitive local persistence payloads; use `required` to fail closed without a key |
+| `HELIOS_DB_ENCRYPTION_KEY` | empty | Optional Fernet key for persistence encryption; keep it local and never commit it |
+| `HELIOS_DB_ENCRYPTION_KEY_PATH` | `.helios/helios.key` | Optional local key-file path when `HELIOS_DB_ENCRYPTION=auto` |
 
 ```bash
 HELIOS_USER=jkiefer HELIOS_PASSWORD='choose-a-strong-one' ./run.sh
@@ -141,9 +144,17 @@ keys, secrets, browser artifacts, generated builds, screenshots, or sample data
 as real research evidence. The database path is controlled by `HELIOS_DB_PATH`;
 set `HELIOS_DB_PATH=off` for an ephemeral session.
 
-The SQLite file stays on your machine and is not encrypted by Helios. Keep it on
-a trusted local disk and protect it the same way you would protect other client
-research files.
+Local persistence encryption is enabled by default. When
+`HELIOS_DB_ENCRYPTION=auto`, Helios creates a local `.helios/helios.key` file if
+no `HELIOS_DB_ENCRYPTION_KEY` is provided, encrypts persisted payload fields,
+and rewrites older plaintext rows at startup. Use
+`HELIOS_DB_ENCRYPTION=required` for fail-closed operation when a configured key
+must be present. The SQLite container, schema, and lookup keys such as ticker,
+model id, target id, and price date remain visible so the database can operate;
+client-facing payloads, model names/context/holdings, price values, refresh
+messages, journal scores/actions/results, metadata, and report facts are stored
+encrypted at rest. Keep the local key outside Git and protect/back it up like
+other client research secrets.
 
 The React **Real Data Center** shows database availability, persisted
 instrument/model counts, date ranges, row counts, live-refresh status, model
@@ -169,7 +180,9 @@ network workers (`HELIOS_AUTO_LIVE_MAX_WORKERS`, default `6`, max `16`) and then
 persists the validated provider histories sequentially. This is a polling
 workflow using the latest available provider data, not a streaming quote feed;
 failed provider calls leave existing/sample data untouched and logged as failed
-refresh attempts.
+refresh attempts. Successful live refreshes also re-check pending Signal Journal
+entries, so paper forward results are measured automatically once refreshed
+history covers the original signal horizon.
 
 ### Optional AI Copilot
 

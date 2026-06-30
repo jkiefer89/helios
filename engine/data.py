@@ -355,6 +355,7 @@ def refresh_live_symbol(symbol: str, fetcher=None) -> dict:
         after_dates = set(pd.to_datetime(inst.df.index).normalize())
         rows_added = max(0, len(after_dates - before_dates))
         _persist_instrument(inst, adjusted=True, metadata={"imported_via": "live_refresh"})
+        _refresh_signal_journal_forward_results()
         message = f"Refreshed {len(inst.df)} live rows."
         _record_refresh(sym, "ok", rows_added, message)
         return {"symbol": sym, "status": "ok", "rows_added": rows_added, "rows": len(inst.df), "message": message}
@@ -454,6 +455,8 @@ def ensure_live_symbols(
             message = item["message"]
             _record_refresh(symbol, "error", 0, message)
             results.append({"symbol": symbol, "status": "error", "rows_added": 0, "message": message})
+    if any(item["status"] == "ok" for item in results):
+        _refresh_signal_journal_forward_results()
     return {
         "requested": requested,
         "refreshed": sum(1 for item in results if item["status"] == "ok"),
@@ -496,6 +499,15 @@ def _record_refresh(symbol: str, status: str, rows_added: int, message: str) -> 
             message=message,
             source="live",
         )
+    except Exception:
+        return
+
+
+def _refresh_signal_journal_forward_results() -> None:
+    try:
+        from . import signal_journal
+
+        signal_journal.refresh_forward_results()
     except Exception:
         return
 

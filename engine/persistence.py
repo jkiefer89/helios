@@ -17,10 +17,17 @@ from typing import Any
 
 import pandas as pd
 
+try:
+    from cryptography.fernet import Fernet, InvalidToken
+except Exception:  # pragma: no cover - exercised when dependency install is broken.
+    Fernet = None
+    InvalidToken = Exception
+
 SCHEMA_VERSION = 2
 REAL_SOURCES = {"live", "upload"}
 DISABLED_VALUES = {"", "0", "false", "off", "disabled", "none"}
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[1] / ".helios" / "helios.db"
+ENCRYPTED_PREFIX = "enc:v1:"
 
 _STORE: "SQLiteStore | None" = None
 _CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
@@ -67,6 +74,109 @@ def safe_filename(filename: str | None) -> str:
     return redact_secrets(Path(filename).name)[:120]
 
 
+class _FieldCipher:
+    """Encrypt individual persisted fields without requiring SQLCipher."""
+
+    def __init__(self, key: str, *, key_source: str, required: bool, mode: str):
+        if Fernet is None:
+            raise RuntimeError("database encryption requires the cryptography package")
+        self._fernet = Fernet(key.encode("utf-8"))
+        self.status = {
+            "enabled": True,
+            "required": bool(required),
+            "mode": mode,
+            "key_source": key_source,
+            "algorithm": "fernet",
+            "plaintext_lookup_keys": ["instrument symbol", "model id", "journal target id", "price date"],
+        }
+
+    def encrypt(self, value: Any) -> Any:
+        if value is None:
+            return None
+        text = str(value)
+        if text.startswith(ENCRYPTED_PREFIX):
+            return text
+        token = self._fernet.encrypt(text.encode("utf-8")).decode("ascii")
+        return ENCRYPTED_PREFIX + token
+
+    def decrypt(self, value: Any) -> Any:
+        if not isinstance(value, str) or not value.startswith(ENCRYPTED_PREFIX):
+            return value
+        token = value[len(ENCRYPTED_PREFIX):].encode("ascii")
+        try:
+            return self._fernet.decrypt(token).decode("utf-8")
+        except InvalidToken as exc:
+            raise RuntimeError("encrypted database value could not be decrypted with the configured key") from exc
+
+
+def _disabled_encryption_status(mode: str = "off", required: bool = False, warning: str = "") -> dict[str, Any]:
+    return {
+        "enabled": False,
+        "required": bool(required),
+        "mode": mode,
+        "key_source": "",
+        "algorithm": "",
+        "plaintext_lookup_keys": [],
+        "warning": warning,
+    }
+
+
+def _normalise_encryption_mode() -> tuple[str, bool, bool]:
+    raw = (os.environ.get("HELIOS_DB_ENCRYPTION") or "auto").strip().lower()
+    if raw in DISABLED_VALUES or raw in {"plain", "plaintext", "disabled"}:
+        return "off", False, False
+    if raw in {"required", "require", "fail-closed", "fail_closed"}:
+        return "required", True, True
+    return "auto", False, True
+
+
+def _configured_cipher(path: Path | None) -> tuple[_FieldCipher | None, dict[str, Any], str]:
+    mode, required, enabled = _normalise_encryption_mode()
+    if not enabled:
+        return None, _disabled_encryption_status(mode=mode, required=required), ""
+    if Fernet is None:
+        warning = "SQLite persistence encryption requires the cryptography package."
+        return None, _disabled_encryption_status(mode=mode, required=required, warning=warning), warning
+
+    raw_key = (os.environ.get("HELIOS_DB_ENCRYPTION_KEY") or "").strip()
+    if raw_key:
+        try:
+            cipher = _FieldCipher(raw_key, key_source="environment", required=required, mode=mode)
+            return cipher, cipher.status, ""
+        except Exception as exc:
+            warning = f"SQLite persistence encryption key is invalid: {exc}"
+            return None, _disabled_encryption_status(mode=mode, required=required, warning=warning), warning
+
+    key_path = Path(os.environ.get("HELIOS_DB_ENCRYPTION_KEY_PATH") or "").expanduser() if os.environ.get("HELIOS_DB_ENCRYPTION_KEY_PATH") else None
+    if key_path is None and path is not None:
+        key_path = path.with_suffix(".key")
+    if key_path is None:
+        warning = "SQLite persistence encryption is enabled but no key path is available."
+        return None, _disabled_encryption_status(mode=mode, required=required, warning=warning), warning
+
+    try:
+        if key_path.is_file():
+            key = key_path.read_text(encoding="utf-8").strip()
+            key_source = "local_key_file"
+        elif required:
+            warning = "SQLite persistence encryption is required but no key is configured."
+            return None, _disabled_encryption_status(mode=mode, required=True, warning=warning), warning
+        else:
+            key_path.parent.mkdir(parents=True, exist_ok=True)
+            key = Fernet.generate_key().decode("ascii")
+            key_path.write_text(key + "\n", encoding="utf-8")
+            try:
+                key_path.chmod(0o600)
+            except Exception:
+                pass
+            key_source = "generated_local_key_file"
+        cipher = _FieldCipher(key, key_source=key_source, required=required, mode=mode)
+        return cipher, cipher.status, ""
+    except Exception as exc:
+        warning = f"SQLite persistence encryption unavailable: {exc}"
+        return None, _disabled_encryption_status(mode=mode, required=required, warning=warning), warning
+
+
 def get_store() -> "SQLiteStore":
     global _STORE
     if _STORE is None:
@@ -86,8 +196,12 @@ class SQLiteStore:
         self.disabled = disabled
         self.available = False
         self.warning = ""
+        self._cipher, self.encryption, encryption_warning = _configured_cipher(path)
         if disabled:
             self.warning = "SQLite persistence is disabled by HELIOS_DB_PATH."
+            return
+        if encryption_warning and self.encryption.get("required"):
+            self.warning = encryption_warning
             return
         self._ensure()
 
@@ -106,6 +220,7 @@ class SQLiteStore:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with self._connect() as conn:
                 _create_schema(conn)
+                self._encrypt_existing_rows(conn)
             self.available = True
             self.warning = ""
         except Exception as exc:
@@ -121,6 +236,140 @@ class SQLiteStore:
         conn.execute("PRAGMA journal_mode = WAL")
         return conn
 
+    def _store_text(self, value: Any) -> Any:
+        if self._cipher and isinstance(value, str) and value.startswith(ENCRYPTED_PREFIX):
+            return value
+        text = redact_secrets(str(value or ""))
+        return self._cipher.encrypt(text) if self._cipher else text
+
+    def _load_text(self, value: Any) -> str:
+        if self._cipher is None and isinstance(value, str) and value.startswith(ENCRYPTED_PREFIX):
+            raise RuntimeError("encrypted SQLite persistence requires the configured encryption key")
+        decoded = self._cipher.decrypt(value) if self._cipher else value
+        return str(decoded or "")
+
+    def _store_number(self, value: Any) -> Any:
+        if self._cipher and isinstance(value, str) and value.startswith(ENCRYPTED_PREFIX):
+            return value
+        number = _optional_float(value)
+        if number is None:
+            return None
+        return self._cipher.encrypt(number) if self._cipher else number
+
+    def _load_number(self, value: Any) -> float | None:
+        if self._cipher is None and isinstance(value, str) and value.startswith(ENCRYPTED_PREFIX):
+            raise RuntimeError("encrypted SQLite persistence requires the configured encryption key")
+        decoded = self._cipher.decrypt(value) if self._cipher else value
+        return _optional_float(decoded)
+
+    def _store_json(self, value: dict[str, Any]) -> Any:
+        if self._cipher and isinstance(value, str) and value.startswith(ENCRYPTED_PREFIX):
+            return value
+        encoded = _json_dumps(value)
+        return self._cipher.encrypt(encoded) if self._cipher else encoded
+
+    def _load_json(self, value: Any) -> dict[str, Any]:
+        if self._cipher is None and isinstance(value, str) and value.startswith(ENCRYPTED_PREFIX):
+            raise RuntimeError("encrypted SQLite persistence requires the configured encryption key")
+        decoded = self._cipher.decrypt(value) if self._cipher else value
+        return _json_loads(str(decoded or ""))
+
+    def _refresh_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "symbol": row["symbol"],
+            "attempted_at": row["attempted_at"],
+            "status": row["status"],
+            "rows_added": int(row["rows_added"]),
+            "message": self._load_text(row["message"]),
+            "source": row["source"],
+        }
+
+    def _signal_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        return _signal_row(row, self)
+
+    def _encrypt_existing_rows(self, conn: sqlite3.Connection) -> None:
+        if not self._cipher:
+            return
+        for row in conn.execute("SELECT symbol, display_name, metadata_json FROM instruments").fetchall():
+            conn.execute(
+                "UPDATE instruments SET display_name = ?, metadata_json = ? WHERE symbol = ?",
+                (self._store_text(self._load_text(row["display_name"])), self._store_json(self._load_json(row["metadata_json"])), row["symbol"]),
+            )
+        for row in conn.execute("SELECT symbol, date, open, high, low, close, volume FROM price_history").fetchall():
+            conn.execute(
+                """
+                UPDATE price_history
+                SET open = ?, high = ?, low = ?, close = ?, volume = ?
+                WHERE symbol = ? AND date = ?
+                """,
+                (
+                    self._store_number(self._load_number(row["open"])),
+                    self._store_number(self._load_number(row["high"])),
+                    self._store_number(self._load_number(row["low"])),
+                    self._store_number(self._load_number(row["close"])),
+                    self._store_number(self._load_number(row["volume"])),
+                    row["symbol"],
+                    row["date"],
+                ),
+            )
+        for row in conn.execute("SELECT model_id, name, mandate_context, source_filename, metadata_json FROM models").fetchall():
+            conn.execute(
+                """
+                UPDATE models
+                SET name = ?, mandate_context = ?, source_filename = ?, metadata_json = ?
+                WHERE model_id = ?
+                """,
+                (
+                    self._store_text(self._load_text(row["name"])),
+                    self._store_text(self._load_text(row["mandate_context"])),
+                    self._store_text(self._load_text(row["source_filename"])),
+                    self._store_json(self._load_json(row["metadata_json"])),
+                    row["model_id"],
+                ),
+            )
+        for row in conn.execute("SELECT rowid, ticker, weight, source_state, metadata_json FROM holdings").fetchall():
+            conn.execute(
+                "UPDATE holdings SET ticker = ?, weight = ?, source_state = ?, metadata_json = ? WHERE rowid = ?",
+                (
+                    self._store_text(self._load_text(row["ticker"])),
+                    self._store_number(self._load_number(row["weight"])),
+                    self._store_text(self._load_text(row["source_state"])),
+                    self._store_json(self._load_json(row["metadata_json"])),
+                    row["rowid"],
+                ),
+            )
+        for row in conn.execute("SELECT id, message FROM refresh_log").fetchall():
+            conn.execute("UPDATE refresh_log SET message = ? WHERE id = ?", (self._store_text(self._load_text(row["message"])), row["id"]))
+        for row in conn.execute("SELECT * FROM signal_journal").fetchall():
+            conn.execute(
+                """
+                UPDATE signal_journal
+                SET target_name = ?, benchmark = ?, score = ?, action_label = ?,
+                    data_mode = ?, source_counts_json = ?, forward_status = ?,
+                    forward_start_date = ?, forward_end_date = ?,
+                    forward_result_pct = ?, benchmark_result_pct = ?, alpha_pct = ?,
+                    evaluated_at = ?, metadata_json = ?
+                WHERE id = ?
+                """,
+                (
+                    self._store_text(self._load_text(row["target_name"])),
+                    self._store_text(self._load_text(row["benchmark"])),
+                    self._store_number(self._load_number(row["score"])),
+                    self._store_text(self._load_text(row["action_label"])),
+                    self._store_text(self._load_text(row["data_mode"])),
+                    self._store_json(self._load_json(row["source_counts_json"])),
+                    self._store_text(self._load_text(row["forward_status"])),
+                    self._store_text(self._load_text(row["forward_start_date"])),
+                    self._store_text(self._load_text(row["forward_end_date"])),
+                    self._store_number(self._load_number(row["forward_result_pct"])),
+                    self._store_number(self._load_number(row["benchmark_result_pct"])),
+                    self._store_number(self._load_number(row["alpha_pct"])),
+                    self._store_text(self._load_text(row["evaluated_at"])),
+                    self._store_json(self._load_json(row["metadata_json"])),
+                    row["id"],
+                ),
+            )
+
     def status(self) -> dict[str, Any]:
         status = {
             "configured": self.configured and not self.disabled,
@@ -128,6 +377,7 @@ class SQLiteStore:
             "path": str(self.path) if self.path else "",
             "warning": self.warning,
             "schema_version": SCHEMA_VERSION if self.available else None,
+            "encryption": dict(self.encryption),
             "real_instrument_count": 0,
             "persisted_model_count": 0,
             "last_refresh": None,
@@ -147,7 +397,7 @@ class SQLiteStore:
                     "FROM refresh_log ORDER BY attempted_at DESC, id DESC LIMIT 1"
                 ).fetchone()
                 if last:
-                    status["last_refresh"] = dict(last)
+                    status["last_refresh"] = self._refresh_row(last)
         except Exception as exc:
             self.available = False
             self.warning = f"SQLite persistence unavailable: {exc}"
@@ -176,17 +426,17 @@ class SQLiteStore:
             now = utc_now()
             first_date = str(clean.index.min().date())
             last_date = str(clean.index.max().date())
-            meta_json = _json_dumps(metadata or {})
+            meta_json = self._store_json(metadata or {})
             rows = []
             for idx, row in clean.iterrows():
                 rows.append((
                     symbol,
                     str(idx.date()),
-                    _optional_float(row.get("open")),
-                    _optional_float(row.get("high")),
-                    _optional_float(row.get("low")),
-                    _optional_float(row.get("close")),
-                    _optional_float(row.get("volume")),
+                    self._store_number(row.get("open")),
+                    self._store_number(row.get("high")),
+                    self._store_number(row.get("low")),
+                    self._store_number(row.get("close")),
+                    self._store_number(row.get("volume")),
                     source,
                     None if adjusted is None else int(bool(adjusted)),
                 ))
@@ -210,7 +460,7 @@ class SQLiteStore:
                       updated_at = excluded.updated_at,
                       metadata_json = excluded.metadata_json
                     """,
-                    (symbol, name, source, first_date, last_date, len(clean), created_at, now, meta_json),
+                    (symbol, self._store_text(name), source, first_date, last_date, len(clean), created_at, now, meta_json),
                 )
                 conn.executemany(
                     """
@@ -254,17 +504,27 @@ class SQLiteStore:
                     ).fetchall()
                     if not prices:
                         continue
-                    df = pd.DataFrame([dict(p) for p in prices])
+                    df = pd.DataFrame([
+                        {
+                            "date": p["date"],
+                            "open": self._load_number(p["open"]),
+                            "high": self._load_number(p["high"]),
+                            "low": self._load_number(p["low"]),
+                            "close": self._load_number(p["close"]),
+                            "volume": self._load_number(p["volume"]),
+                        }
+                        for p in prices
+                    ])
                     df.index = pd.to_datetime(df.pop("date"), errors="coerce")
                     df = df[~df.index.isna()]
                     if "close" not in df or df["close"].dropna().empty:
                         continue
                     out.append(PersistedInstrument(
                         symbol=row["symbol"],
-                        name=row["display_name"],
+                        name=self._load_text(row["display_name"]),
                         source=row["source"],
                         df=df,
-                        metadata=_json_loads(row["metadata_json"]),
+                        metadata=self._load_json(row["metadata_json"]),
                     ))
                 return out
         except Exception as exc:
@@ -289,7 +549,7 @@ class SQLiteStore:
             now = utc_now()
             clean_context = redact_secrets(mandate_context)[:400]
             safe_source = safe_filename(source_filename)
-            meta_json = _json_dumps(metadata or {})
+            meta_json = self._store_json(metadata or {})
             with self._connect() as conn:
                 existing = conn.execute(
                     "SELECT created_at FROM models WHERE model_id = ?", (model_id,)
@@ -309,7 +569,16 @@ class SQLiteStore:
                       updated_at = excluded.updated_at,
                       metadata_json = excluded.metadata_json
                     """,
-                    (model_id, name, mandate_key, clean_context, safe_source, created_at, now, meta_json),
+                    (
+                        model_id,
+                        self._store_text(name),
+                        mandate_key,
+                        self._store_text(clean_context),
+                        self._store_text(safe_source),
+                        created_at,
+                        now,
+                        meta_json,
+                    ),
                 )
                 conn.execute("DELETE FROM holdings WHERE model_id = ?", (model_id,))
                 conn.executemany(
@@ -321,10 +590,10 @@ class SQLiteStore:
                     [
                         (
                             model_id,
-                            str(h["ticker"]),
-                            float(h["weight"]),
-                            str(h.get("source_state") or h.get("source") or "pending"),
-                            _json_dumps(h.get("metadata") or {}),
+                            self._store_text(str(h["ticker"])),
+                            self._store_number(h["weight"]),
+                            self._store_text(str(h.get("source_state") or h.get("source") or "pending")),
+                            self._store_json(h.get("metadata") or {}),
                         )
                         for h in holdings
                     ],
@@ -347,26 +616,28 @@ class SQLiteStore:
                         SELECT ticker, weight, source_state, metadata_json
                         FROM holdings
                         WHERE model_id = ?
-                        ORDER BY weight DESC, ticker
+                        ORDER BY rowid
                         """,
                         (row["model_id"],),
                     ).fetchall()
+                    holding_rows = [
+                        {
+                            "ticker": self._load_text(h["ticker"]),
+                            "weight": float(self._load_number(h["weight"]) or 0.0),
+                            "source_state": self._load_text(h["source_state"]),
+                            "metadata": self._load_json(h["metadata_json"]),
+                        }
+                        for h in holdings
+                    ]
+                    holding_rows.sort(key=lambda h: (-float(h["weight"]), h["ticker"]))
                     out.append(PersistedModel(
                         id=row["model_id"],
-                        name=row["name"],
+                        name=self._load_text(row["name"]),
                         mandate_key=row["mandate_key"],
-                        mandate_context=row["mandate_context"] or "",
-                        source_filename=row["source_filename"] or "",
-                        holdings=[
-                            {
-                                "ticker": h["ticker"],
-                                "weight": float(h["weight"]),
-                                "source_state": h["source_state"],
-                                "metadata": _json_loads(h["metadata_json"]),
-                            }
-                            for h in holdings
-                        ],
-                        metadata=_json_loads(row["metadata_json"]),
+                        mandate_context=self._load_text(row["mandate_context"]),
+                        source_filename=self._load_text(row["source_filename"]),
+                        holdings=holding_rows,
+                        metadata=self._load_json(row["metadata_json"]),
                     ))
                 return out
         except Exception as exc:
@@ -393,7 +664,7 @@ class SQLiteStore:
                       (symbol, attempted_at, status, rows_added, message, source)
                     VALUES (?, ?, ?, ?, ?, ?)
                     """,
-                    (symbol, utc_now(), status, int(rows_added), redact_secrets(message)[:500], source),
+                    (symbol, utc_now(), status, int(rows_added), self._store_text(redact_secrets(message)[:500]), source),
                 )
         except Exception as exc:
             self.warning = f"Could not record refresh log: {exc}"
@@ -412,7 +683,7 @@ class SQLiteStore:
                     """,
                     (int(limit),),
                 ).fetchall()
-                return [dict(row) for row in rows]
+                return [self._refresh_row(row) for row in rows]
         except Exception:
             return []
 
@@ -456,32 +727,32 @@ class SQLiteStore:
                         now,
                         redact_secrets(str(event["target_kind"]))[:24],
                         redact_secrets(str(event["target_id"]))[:64],
-                        redact_secrets(str(event["target_name"]))[:120],
-                        redact_secrets(str(event.get("benchmark") or ""))[:32],
+                        self._store_text(redact_secrets(str(event["target_name"]))[:120]),
+                        self._store_text(redact_secrets(str(event.get("benchmark") or ""))[:32]),
                         str(event["input_start_date"]),
                         str(event["input_end_date"]),
                         int(event["input_rows"]),
                         int(event["horizon_days"]),
-                        float(event["score"]),
-                        redact_secrets(str(event["action_label"]))[:16],
-                        redact_secrets(str(event.get("data_mode") or ""))[:32],
+                        self._store_number(event["score"]),
+                        self._store_text(redact_secrets(str(event["action_label"]))[:16]),
+                        self._store_text(redact_secrets(str(event.get("data_mode") or ""))[:32]),
                         int(bool(event.get("eligible_for_real_research"))),
-                        _json_dumps(source_counts),
-                        redact_secrets(str(event.get("forward_status") or "pending"))[:16],
-                        str(event.get("forward_start_date") or ""),
-                        str(event.get("forward_end_date") or ""),
-                        _optional_float(event.get("forward_result_pct")),
-                        _optional_float(event.get("benchmark_result_pct")),
-                        _optional_float(event.get("alpha_pct")),
-                        str(event.get("evaluated_at") or ""),
-                        _json_dumps(metadata),
+                        self._store_json(source_counts),
+                        self._store_text(redact_secrets(str(event.get("forward_status") or "pending"))[:16]),
+                        self._store_text(str(event.get("forward_start_date") or "")),
+                        self._store_text(str(event.get("forward_end_date") or "")),
+                        self._store_number(event.get("forward_result_pct")),
+                        self._store_number(event.get("benchmark_result_pct")),
+                        self._store_number(event.get("alpha_pct")),
+                        self._store_text(str(event.get("evaluated_at") or "")),
+                        self._store_json(metadata),
                     ),
                 )
                 row = conn.execute(
                     "SELECT * FROM signal_journal WHERE dedupe_key = ?",
                     (redact_secrets(str(event["dedupe_key"]))[:96],),
                 ).fetchone()
-                return {"recorded": True, "entry": _signal_row(row) if row else None}
+                return {"recorded": True, "entry": self._signal_row(row) if row else None}
         except Exception as exc:
             self.warning = f"Could not record signal journal entry: {exc}"
             return {"recorded": False, "warning": self.warning}
@@ -504,13 +775,13 @@ class SQLiteStore:
                     WHERE dedupe_key = ?
                     """,
                     (
-                        redact_secrets(str(result.get("forward_status") or "pending"))[:16],
-                        str(result.get("forward_start_date") or ""),
-                        str(result.get("forward_end_date") or ""),
-                        _optional_float(result.get("forward_result_pct")),
-                        _optional_float(result.get("benchmark_result_pct")),
-                        _optional_float(result.get("alpha_pct")),
-                        str(result.get("evaluated_at") or ""),
+                        self._store_text(redact_secrets(str(result.get("forward_status") or "pending"))[:16]),
+                        self._store_text(str(result.get("forward_start_date") or "")),
+                        self._store_text(str(result.get("forward_end_date") or "")),
+                        self._store_number(result.get("forward_result_pct")),
+                        self._store_number(result.get("benchmark_result_pct")),
+                        self._store_number(result.get("alpha_pct")),
+                        self._store_text(str(result.get("evaluated_at") or "")),
                         redact_secrets(str(dedupe_key))[:96],
                     ),
                 )
@@ -531,7 +802,7 @@ class SQLiteStore:
                     """,
                     (max(1, min(int(limit), 500)),),
                 ).fetchall()
-                return [_signal_row(row) for row in rows]
+                return [self._signal_row(row) for row in rows]
         except Exception:
             return []
 
@@ -701,32 +972,41 @@ def _json_loads(value: str | None) -> dict[str, Any]:
         return {}
 
 
-def _signal_row(row: sqlite3.Row) -> dict[str, Any]:
+def _signal_row(row: sqlite3.Row, store: SQLiteStore | None = None) -> dict[str, Any]:
+    def text(name: str) -> str:
+        return store._load_text(row[name]) if store else str(row[name] or "")
+
+    def number(name: str) -> float | None:
+        return store._load_number(row[name]) if store else _optional_float(row[name])
+
+    def object_json(name: str) -> dict[str, Any]:
+        return store._load_json(row[name]) if store else _json_loads(row[name])
+
     return {
         "id": int(row["id"]),
         "dedupe_key": row["dedupe_key"],
         "created_at": row["created_at"],
         "target_kind": row["target_kind"],
         "target_id": row["target_id"],
-        "target_name": row["target_name"],
-        "benchmark": row["benchmark"],
+        "target_name": text("target_name"),
+        "benchmark": text("benchmark"),
         "input_start_date": row["input_start_date"],
         "input_end_date": row["input_end_date"],
         "input_rows": int(row["input_rows"]),
         "horizon_days": int(row["horizon_days"]),
-        "score": float(row["score"]),
-        "action_label": row["action_label"],
-        "data_mode": row["data_mode"],
+        "score": float(number("score") or 0.0),
+        "action_label": text("action_label"),
+        "data_mode": text("data_mode"),
         "eligible_for_real_research": bool(row["eligible_for_real_research"]),
-        "source_counts": _json_loads(row["source_counts_json"]),
-        "forward_status": row["forward_status"],
-        "forward_start_date": row["forward_start_date"] or None,
-        "forward_end_date": row["forward_end_date"] or None,
-        "forward_result_pct": _optional_float(row["forward_result_pct"]),
-        "benchmark_result_pct": _optional_float(row["benchmark_result_pct"]),
-        "alpha_pct": _optional_float(row["alpha_pct"]),
-        "evaluated_at": row["evaluated_at"] or None,
-        "metadata": _json_loads(row["metadata_json"]),
+        "source_counts": object_json("source_counts_json"),
+        "forward_status": text("forward_status"),
+        "forward_start_date": text("forward_start_date") or None,
+        "forward_end_date": text("forward_end_date") or None,
+        "forward_result_pct": number("forward_result_pct"),
+        "benchmark_result_pct": number("benchmark_result_pct"),
+        "alpha_pct": number("alpha_pct"),
+        "evaluated_at": text("evaluated_at") or None,
+        "metadata": object_json("metadata_json"),
     }
 
 

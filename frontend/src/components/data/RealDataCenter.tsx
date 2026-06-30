@@ -32,6 +32,7 @@ export function RealDataCenter({
   const realRows = tickers.filter((ticker) => ticker.source === "live" || ticker.source === "upload");
   const missingTickers = dataStatus?.missing_data.missing_tickers || [];
   const autoLive = dataStatus?.auto_live;
+  const encryption = dataStatus?.database.encryption;
   const refreshAll = async () => {
     setPendingRefresh("all");
     try {
@@ -65,7 +66,9 @@ export function RealDataCenter({
             <StatTile label="Persisted models" value={fmtNumber(dataStatus?.persisted_model_count, 0)} />
             <StatTile label="Last refresh" value={fmtTimestamp(dataStatus?.last_refresh?.attempted_at)} />
             <StatTile label="Live refresh set" value={fmtNumber(liveCount, 0)} />
+            <StatTile label="At-rest storage" value={encryption?.enabled ? "Encrypted" : "Plaintext"} tone={encryption?.enabled ? "positive" : "warning"} />
           </div>
+          {encryption?.enabled && <p className="muted">Local persisted payloads are encrypted; lookup keys remain visible for database operation.</p>}
           {dataStatus?.warnings?.length ? (
             <div className="warning-list compact-list">{dataStatus.warnings.map((warning) => <span key={warning}>{warning}</span>)}</div>
           ) : (

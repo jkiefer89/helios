@@ -131,6 +131,15 @@ export interface DataStatusResponse {
     path: string;
     warning?: string;
     schema_version?: number | null;
+    encryption: {
+      enabled: boolean;
+      required: boolean;
+      mode: string;
+      key_source: string;
+      algorithm: string;
+      plaintext_lookup_keys: string[];
+      warning?: string;
+    };
     real_instrument_count: number;
     persisted_model_count: number;
     last_refresh?: RefreshLogEntry | null;

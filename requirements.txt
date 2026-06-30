@@ -3,6 +3,7 @@ waitress>=3.0
 numpy>=1.24
 pandas>=2.0
 openpyxl>=3.1
+cryptography>=42.0
 # Optional: enables live market data + free news headlines.
 # The platform runs fully offline on bundled sample data without it.
 yfinance>=0.2

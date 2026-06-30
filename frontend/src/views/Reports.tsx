@@ -173,6 +173,7 @@ function PersistenceSnapshot({ dataStatus }: { dataStatus: DataStatusResponse | 
         <div><dt>Eligible Price Histories</dt><dd>{dataStatus.real_instrument_count}</dd></div>
         <div><dt>Persisted Models</dt><dd>{dataStatus.persisted_model_count}</dd></div>
         <div><dt>Last Refresh</dt><dd>{fmtTimestamp(dataStatus.last_refresh?.attempted_at)}</dd></div>
+        <div><dt>At-Rest Storage</dt><dd>{dataStatus.database.encryption?.enabled ? "Encrypted" : "Plaintext"}</dd></div>
         <div><dt>Missing Holdings</dt><dd>{dataStatus.missing_data.missing_tickers.join(", ") || "None"}</dd></div>
       </dl>
       {dataStatus.warnings.length > 0 && <div className="warning-list compact-list">{dataStatus.warnings.map((warning) => <span key={warning}>{warning}</span>)}</div>}

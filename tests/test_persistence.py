@@ -298,6 +298,67 @@ def test_raw_upload_content_and_secret_tokens_are_not_stored(monkeypatch, tmp_pa
     assert "SECRET_TOKEN_SHOULD_NOT_STORE" not in text
 
 
+def test_local_persistence_encrypts_sensitive_payloads_when_key_configured(monkeypatch, tmp_path):
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION", "required")
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION_KEY", "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=")
+    store = _use_db(monkeypatch, tmp_path)
+
+    data.parse_csv(price_csv(days=90), "ENC1", "Sensitive Alpha Sleeve", source_filename="sensitive-alpha.csv")
+    portfolio.parse_model_file(
+        b"Ticker,Weight\nENC1,100\n",
+        "private-model.csv",
+        "Private Growth Mandate",
+        "balanced",
+        "client context should be sealed",
+    )
+
+    raw_db = store.path.read_bytes()
+    assert b"Sensitive Alpha Sleeve" not in raw_db
+    assert b"Private Growth Mandate" not in raw_db
+    assert b"client context should be sealed" not in raw_db
+    assert store.status()["encryption"]["enabled"] is True
+    assert store.status()["encryption"]["required"] is True
+
+    data._STORE.pop("ENC1")
+    portfolio._MODELS.clear()
+    data.load_persisted_instruments()
+    portfolio.load_persisted_models()
+
+    assert data.get("ENC1").name == "Sensitive Alpha Sleeve"
+    assert portfolio.all_models()[0].name == "Private Growth Mandate"
+    assert portfolio.all_models()[0].mandate_context == "client context should be sealed"
+
+
+def test_required_encryption_without_key_fails_closed(monkeypatch, tmp_path):
+    monkeypatch.setenv("HELIOS_DB_PATH", str(tmp_path / "helios.db"))
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION", "required")
+    monkeypatch.delenv("HELIOS_DB_ENCRYPTION_KEY", raising=False)
+    persistence.reset_store_for_tests()
+
+    store = persistence.get_store()
+
+    assert store.available is False
+    assert "encryption" in store.warning.lower()
+    assert store.status()["encryption"]["required"] is True
+
+
+def test_encrypted_database_does_not_load_as_plaintext(monkeypatch, tmp_path):
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION", "required")
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION_KEY", "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=")
+    store = _use_db(monkeypatch, tmp_path)
+    data.parse_csv(price_csv(days=90), "LOCKED", "Locked Store", source_filename="locked.csv")
+    data._STORE.pop("LOCKED")
+
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION", "off")
+    monkeypatch.delenv("HELIOS_DB_ENCRYPTION_KEY", raising=False)
+    persistence.reset_store_for_tests()
+    plaintext_store = persistence.get_store()
+
+    assert plaintext_store.load_instruments() == []
+    assert plaintext_store.available is False
+    assert "encrypted sqlite persistence" in plaintext_store.warning.lower()
+
+
 def _ohlcv(days=90):
     close = price_series(days=days)
     return pd.DataFrame({

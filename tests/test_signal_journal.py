@@ -61,3 +61,39 @@ def test_signal_journal_measures_forward_result_when_history_exists(monkeypatch,
     entries = signal_journal.list_entries()
     assert entries[0]["target_id"] == "FORWARD"
     assert entries[0]["forward_status"] == "measured"
+
+
+def test_live_refresh_resolves_pending_forward_results(monkeypatch, tmp_path):
+    store = _use_db(monkeypatch, tmp_path)
+    initial = price_series(days=80, start=100.0, daily=0.001)
+    live = data.Instrument("JOURNALX", "Journal X", initial.to_frame("close"), "live", [])
+    data.register(live)
+    data._persist_instrument(live, adjusted=True)
+    signal_journal.record_signal(
+        target_kind="instrument",
+        target_id="JOURNALX",
+        target_name="Journal X",
+        close=initial,
+        input_close=initial,
+        signal={"action": "BUY", "score": 0.55},
+        horizon_days=5,
+        benchmark="",
+        source_counts={"live": 1},
+        eligible_for_real_research=True,
+        data_mode="real",
+    )
+    assert store.signal_journal()[0]["forward_status"] == "pending"
+
+    refreshed = price_series(days=90, start=100.0, daily=0.001)
+
+    def fake_fetch(symbol):
+        assert symbol == "JOURNALX"
+        return data.Instrument(symbol, "Journal X", refreshed.to_frame("close"), "live", [])
+
+    result = data.refresh_live_symbol("JOURNALX", fetcher=fake_fetch)
+
+    assert result["status"] == "ok"
+    entry = store.signal_journal()[0]
+    assert entry["forward_status"] == "measured"
+    assert entry["forward_result_pct"] is not None
+    assert entry["forward_end_date"] > entry["input_end_date"]
