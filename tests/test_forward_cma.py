@@ -141,10 +141,14 @@ _SUBS = {"cik": _EQ_CIK, "name": "Equity Fund", "formerNames": [],
 
 
 def _fake_edgar():
+    atom = ('<feed xmlns="http://www.w3.org/2005/Atom"><entry><content>'
+            "<accession-number>0009-25-000001</accession-number><filing-type>NPORT-P</filing-type>"
+            "<filing-date>2099-02-01</filing-date></content></entry></feed>")
     url_map = {
         edgar.MF_TICKERS_URL: json.dumps(_MF),
         edgar.STOCK_TICKERS_URL: json.dumps({}),
         edgar.submissions_url(_EQ_CIK): json.dumps(_SUBS),
+        edgar.browse_series_url("S1"): atom,
         edgar.archives_doc_url(_EQ_CIK, "0009-25-000001", "primary_doc.xml"):
             _nport([("Apple", "AAPL", "60.0"), ("Microsoft", "MSFT", "40.0")]),
     }

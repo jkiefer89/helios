@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 # --------------------------------------------------------------------------- #
 MF_TICKERS_URL = "https://www.sec.gov/files/company_tickers_mf.json"
 STOCK_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
+BROWSE_EDGAR_URL = "https://www.sec.gov/cgi-bin/browse-edgar"
 
 _DEFAULT_UA = (
     os.environ.get("HELIOS_SEC_USER_AGENT")
@@ -133,6 +134,14 @@ def submissions_url(cik: str | int) -> str:
 def archives_doc_url(cik: str | int, accession: str, document: str) -> str:
     acc_nodash = (accession or "").replace("-", "")
     return f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc_nodash}/{document}"
+
+
+def browse_series_url(series_id: str, form: str = "NPORT-P", count: int = 10) -> str:
+    """EDGAR filing feed for ONE fund series (S000…). N-PORT is filed per series,
+    so a multi-series trust (iShares/Vanguard/SPDR) must be queried by series id,
+    not by the trust CIK — otherwise the wrong fund's holdings come back."""
+    return (f"{BROWSE_EDGAR_URL}?action=getcompany&CIK={series_id}"
+            f"&type={form}&dateb=&owner=include&count={int(count)}&output=atom")
 
 
 def _urllib_get(url: str, headers: dict, timeout: float) -> str:
@@ -255,12 +264,23 @@ class EdgarClient:
                 )
         return None
 
+    def latest_filing_for_series(self, series_id: str, forms) -> Filing | None:
+        """Most recent N-PORT filing for ONE series via the EDGAR browse feed."""
+        atom = self.get_text(browse_series_url(series_id, "NPORT-P", count=10))
+        return parse_browse_atom(atom, forms)
+
     # -- N-PORT holdings --------------------------------------------------- #
     def fetch_nport(self, resolution: Resolution, submissions: dict | None = None) -> NportReport:
         if resolution.kind != "fund":
             raise EdgarError(f"{resolution.symbol} is not a registered fund; no N-PORT look-through.")
-        subs = submissions or self.get_submissions(resolution.cik)
-        filing = self.latest_filing(subs, ["NPORT-P", "NPORT-P/A"])
+        # Per-series lookup first (correct for multi-series trusts); fall back to
+        # the registrant's recent-filing scan for single-series registrants.
+        filing = None
+        if resolution.series_id:
+            filing = self.latest_filing_for_series(resolution.series_id, ["NPORT-P", "NPORT-P/A"])
+        if filing is None:
+            subs = submissions or self.get_submissions(resolution.cik)
+            filing = self.latest_filing(subs, ["NPORT-P", "NPORT-P/A"])
         if filing is None:
             raise EdgarError(
                 f"No N-PORT-P filing found for {resolution.symbol} yet "
@@ -276,8 +296,37 @@ class EdgarClient:
 
 
 # --------------------------------------------------------------------------- #
-# Pure N-PORT XML parser (no network — directly unit-testable)
+# Pure parsers (no network — directly unit-testable)
 # --------------------------------------------------------------------------- #
+def parse_browse_atom(atom_text: str, forms) -> Filing | None:
+    """Return the most recent filing entry matching ``forms`` from an EDGAR
+    browse-edgar atom feed (entries are newest-first)."""
+    wanted = tuple(f.upper() for f in forms)
+    try:
+        root = ET.fromstring(atom_text)
+    except ET.ParseError as exc:
+        raise EdgarError(f"Could not parse EDGAR browse atom: {exc}") from exc
+    for entry in root.iter():
+        if _localname(entry.tag) != "entry":
+            continue
+        acc = ftype = fdate = ""
+        for c in entry.iter():
+            ln = _localname(c.tag)
+            if ln == "accession-number":
+                acc = (c.text or "").strip()
+            elif ln == "filing-type":
+                ftype = (c.text or "").strip()
+            elif ln == "filing-date":
+                fdate = (c.text or "").strip()
+        if not acc:
+            continue
+        if ftype and not ftype.upper().startswith(wanted):
+            continue
+        return Filing(accession=acc, form=ftype or wanted[0], primary_document="primary_doc.xml",
+                      filing_date=fdate, report_date="")
+    return None
+
+
 def _localname(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
 

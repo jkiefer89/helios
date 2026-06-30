@@ -80,6 +80,16 @@ _SUBS_NEWFUND = _subs(NEWFUND_CIK, "Helios Brand New Fund", "Helios Predecessor 
                       "485BPOS", "0002222222-25-000009", "prospectus.htm", "")
 
 
+def _atom(accession: str, ftype: str = "NPORT-P", date: str = "2025-05-20") -> str:
+    return ('<feed xmlns="http://www.w3.org/2005/Atom"><entry><content type="text/xml">'
+            f"<accession-number>{accession}</accession-number><filing-type>{ftype}</filing-type>"
+            f"<filing-date>{date}</filing-date></content></entry></feed>")
+
+
+def _atom_empty() -> str:
+    return '<feed xmlns="http://www.w3.org/2005/Atom"></feed>'
+
+
 def _url_map() -> dict:
     return {
         edgar.MF_TICKERS_URL: json.dumps(_MF_MAP),
@@ -87,6 +97,10 @@ def _url_map() -> dict:
         edgar.submissions_url(FUND_CIK): json.dumps(_SUBS_FUND),
         edgar.submissions_url(PART_CIK): json.dumps(_SUBS_PART),
         edgar.submissions_url(NEWFUND_CIK): json.dumps(_SUBS_NEWFUND),
+        # N-PORT is selected per series via the browse feed (multi-series trusts).
+        edgar.browse_series_url("S000099999"): _atom("0001111111-25-000001"),
+        edgar.browse_series_url("S000077777"): _atom("0003333333-25-000003"),
+        edgar.browse_series_url("S000088888"): _atom_empty(),  # VNEW: no N-PORT yet
         edgar.archives_doc_url(FUND_CIK, "0001111111-25-000001", "primary_doc.xml"): _NPORT_XML,
         edgar.archives_doc_url(PART_CIK, "0003333333-25-000003", "primary_doc.xml"): _NPORT_PART_XML,
     }
@@ -134,6 +148,12 @@ def test_parse_nport_extracts_positions_and_metadata():
 def test_parse_nport_bad_xml_raises():
     with pytest.raises(edgar.EdgarError):
         edgar.parse_nport("<not-valid")
+
+
+def test_parse_browse_atom_selects_latest_nport():
+    f = edgar.parse_browse_atom(_atom("0001234567-26-000001", date="2026-06-25"), ["NPORT-P", "NPORT-P/A"])
+    assert f is not None and f.accession == "0001234567-26-000001"
+    assert edgar.parse_browse_atom(_atom_empty(), ["NPORT-P"]) is None
 
 
 def test_parse_nport_rejects_entity_declaration():
