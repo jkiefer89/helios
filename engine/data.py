@@ -27,6 +27,15 @@ MAX_USER_INSTRUMENTS = 50
 # Sanitizing at the boundary neutralizes XSS-in-symbol and yfinance URL injection.
 _SYMBOL_RE = re.compile(r"[^A-Z0-9.\-=^]")
 _CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
+DEFAULT_LIVE_UNIVERSE = (
+    "SPY", "QQQ", "IWM", "DIA",
+    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA",
+    "JPM", "XOM", "UNH", "BND", "TLT", "GLD", "BTC-USD",
+)
+LIVE_UNIVERSES = {
+    "core": DEFAULT_LIVE_UNIVERSE,
+    "advisor": DEFAULT_LIVE_UNIVERSE,
+}
 
 
 def clean_symbol(s: str, fallback: str = "CLIENT") -> str:
@@ -337,6 +346,70 @@ def refresh_live_symbol(symbol: str, fetcher=None) -> dict:
         message = str(exc) or "Live refresh failed."
         _record_refresh(sym, "error", 0, message)
         return {"symbol": sym, "status": "error", "rows_added": 0, "message": message}
+
+
+def expand_live_symbols(raw: str | list[str] | tuple[str, ...] | None) -> list[str]:
+    """Return a de-duplicated live universe from a preset name or comma list."""
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text or text.lower() in {"0", "false", "off", "none", "disabled"}:
+            return []
+        tokens = LIVE_UNIVERSES.get(text.lower()) or re.split(r"[\s,]+", text)
+    else:
+        tokens = raw
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in tokens:
+        symbol = clean_symbol(str(item), fallback="")
+        if symbol and symbol not in seen:
+            seen.add(symbol)
+            out.append(symbol)
+    return out[:MAX_USER_INSTRUMENTS]
+
+
+def ensure_live_symbols(symbols: list[str] | tuple[str, ...], period: str = "2y", fetcher=None) -> dict:
+    """Fetch or refresh a configured live universe and persist real provider data.
+
+    Existing sample instruments are intentionally replaced only after the live
+    provider returns a valid series. If a fetch fails, the prior sample/demo row
+    remains in place and is not promoted to real research evidence.
+    """
+    requested = expand_live_symbols(list(symbols))
+    results = []
+    for symbol in requested:
+        before = get(symbol)
+        before_dates = set()
+        if before is not None and before.source == "live":
+            before_dates = set(pd.to_datetime(before.df.index).normalize())
+        try:
+            if fetcher is None:
+                if not HAS_YF:
+                    raise RuntimeError("yfinance is not installed; live data unavailable.")
+                inst = fetch_live(symbol, period=period, persist=False)
+            else:
+                inst = fetcher(symbol, period=period, persist=False)
+                if not isinstance(inst, Instrument):
+                    raise RuntimeError("Live provider returned an invalid payload.")
+                inst.symbol = symbol
+                inst.source = "live"
+                register(inst)
+            after_dates = set(pd.to_datetime(inst.df.index).normalize())
+            rows_added = max(0, len(after_dates - before_dates)) if before_dates else len(after_dates)
+            _persist_instrument(inst, adjusted=True, metadata={"period": period, "imported_via": "auto_live"})
+            _record_refresh(symbol, "ok", rows_added, f"Auto live updated {len(inst.df)} rows.")
+            results.append({"symbol": symbol, "status": "ok", "rows_added": rows_added, "rows": len(inst.df), "message": f"Auto live updated {len(inst.df)} rows."})
+        except Exception as exc:
+            message = str(exc) or "Auto live update failed."
+            _record_refresh(symbol, "error", 0, message)
+            results.append({"symbol": symbol, "status": "error", "rows_added": 0, "message": message})
+    return {
+        "requested": requested,
+        "refreshed": sum(1 for item in results if item["status"] == "ok"),
+        "failed": sum(1 for item in results if item["status"] == "error"),
+        "results": results,
+    }
 
 
 def _persist_instrument(

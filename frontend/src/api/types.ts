@@ -98,6 +98,7 @@ export interface DataStatusResponse {
   last_refresh?: RefreshLogEntry | null;
   data_mode_summary: DataQuality;
   source_counts: Record<string, number>;
+  auto_live: AutoLiveStatus;
   warnings: string[];
   missing_data: {
     models: ModelCoverageStatus[];
@@ -121,6 +122,28 @@ export interface DataRefreshResponse {
   }>;
   warnings: string[];
   data_status: DataStatusResponse;
+}
+
+export interface AutoLiveStatus {
+  enabled: boolean;
+  live_available: boolean;
+  symbols: string[];
+  period: string;
+  interval_seconds: number;
+  running: boolean;
+  last_run?: string | null;
+  last_result?: {
+    requested: string[];
+    refreshed: number;
+    failed: number;
+    results: Array<{
+      symbol: string;
+      status: string;
+      rows_added: number;
+      rows?: number;
+      message: string;
+    }>;
+  } | null;
 }
 
 export interface RegimeDriver {

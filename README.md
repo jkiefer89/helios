@@ -150,6 +150,21 @@ coverage, missing tickers, and copyable import templates. Refresh controls only
 refresh symbols already imported as `live`; bundled samples and uploaded CSVs
 are never silently promoted into live market data.
 
+For a no-upload live workflow, enable automatic polling before startup:
+
+```bash
+HELIOS_AUTO_LIVE_SYMBOLS=core \
+HELIOS_AUTO_LIVE_REFRESH_SECONDS=300 \
+./run.sh
+```
+
+`HELIOS_AUTO_LIVE_SYMBOLS=core` fetches a built-in liquid advisor universe from
+yfinance, persists those histories locally, and refreshes them every five
+minutes. You can also provide a comma-separated ticker list. This is a polling
+workflow using the latest available provider data, not a streaming quote feed;
+failed provider calls leave existing/sample data untouched and logged as failed
+refresh attempts.
+
 ### Optional AI Copilot
 
 AI Copilot is disabled by default and is not required for any Helios workflow.

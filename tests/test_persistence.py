@@ -121,6 +121,44 @@ def test_refresh_endpoint_uses_mocked_live_fetch_without_network(monkeypatch, tm
     assert body["data_status"]["last_refresh"]["status"] == "ok"
 
 
+def test_auto_live_bootstrap_fetches_and_persists_live_symbols(monkeypatch, tmp_path):
+    store = _use_db(monkeypatch, tmp_path)
+    calls = []
+
+    def fake_fetch(symbol, period="2y", persist=True):
+        calls.append((symbol, period, persist))
+        return data.Instrument(symbol, f"{symbol} Live", _ohlcv(days=95), "live", [])
+
+    result = data.ensure_live_symbols(["AAPL", "SPY"], period="1y", fetcher=fake_fetch)
+
+    assert result["requested"] == ["AAPL", "SPY"]
+    assert result["refreshed"] == 2
+    assert result["failed"] == 0
+    assert result["results"][0]["status"] == "ok"
+    assert calls == [("AAPL", "1y", False), ("SPY", "1y", False)]
+    assert data.get("AAPL").source == "live"
+    assert data.get("SPY").source == "live"
+    assert store.status()["real_instrument_count"] == 2
+    assert store.refresh_log(limit=2)[0]["status"] == "ok"
+
+
+def test_auto_live_bootstrap_keeps_sample_when_fetch_fails(monkeypatch, tmp_path):
+    store = _use_db(monkeypatch, tmp_path)
+    original = data.get("AAPL")
+
+    def failing_fetch(symbol, period="2y", persist=True):
+        raise RuntimeError("provider unavailable")
+
+    result = data.ensure_live_symbols(["AAPL"], fetcher=failing_fetch)
+
+    assert result["refreshed"] == 0
+    assert result["failed"] == 1
+    assert result["results"][0]["status"] == "error"
+    assert data.get("AAPL") is original
+    assert data.get("AAPL").source == "sample"
+    assert store.status()["real_instrument_count"] == 0
+
+
 def test_sample_and_simulated_sources_are_not_persisted_as_real(monkeypatch, tmp_path):
     store = _use_db(monkeypatch, tmp_path)
     sample = data.get("AAPL")

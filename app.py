@@ -94,6 +94,99 @@ _LIVE_SEMAPHORE = threading.BoundedSemaphore(2)
 # Bound concurrent spreadsheet parses so a few large uploads can't pin every
 # worker thread on CPU-heavy XML parsing.
 _UPLOAD_SEMAPHORE = threading.BoundedSemaphore(2)
+_AUTO_LIVE_LOCK = threading.Lock()
+_AUTO_LIVE_THREAD: threading.Thread | None = None
+_AUTO_LIVE_STOP = threading.Event()
+_AUTO_LIVE_LAST_RESULT: dict | None = None
+_AUTO_LIVE_LAST_RUN: str | None = None
+
+
+def _env_int(name: str, default: int, min_value: int, max_value: int) -> int:
+    try:
+        value = int(str(os.environ.get(name, default)).strip())
+    except (TypeError, ValueError):
+        value = default
+    return max(min_value, min(max_value, value))
+
+
+def _auto_live_config() -> dict:
+    symbols = data.expand_live_symbols(os.environ.get("HELIOS_AUTO_LIVE_SYMBOLS"))
+    return {
+        "enabled": bool(symbols),
+        "live_available": data.HAS_YF,
+        "symbols": symbols,
+        "period": (os.environ.get("HELIOS_AUTO_LIVE_PERIOD") or "2y").strip() or "2y",
+        "interval_seconds": _env_int("HELIOS_AUTO_LIVE_REFRESH_SECONDS", 300, 60, 86_400),
+    }
+
+
+def _auto_live_worker(config: dict) -> None:
+    global _AUTO_LIVE_LAST_RESULT, _AUTO_LIVE_LAST_RUN
+    while not _AUTO_LIVE_STOP.is_set():
+        started = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        try:
+            result = data.ensure_live_symbols(config["symbols"], period=config["period"])
+        except Exception as exc:
+            result = {
+                "requested": config["symbols"],
+                "refreshed": 0,
+                "failed": len(config["symbols"]),
+                "results": [{"symbol": symbol, "status": "error", "rows_added": 0, "message": str(exc)} for symbol in config["symbols"]],
+            }
+        with _AUTO_LIVE_LOCK:
+            _AUTO_LIVE_LAST_RUN = started
+            _AUTO_LIVE_LAST_RESULT = result
+        _AUTO_LIVE_STOP.wait(config["interval_seconds"])
+
+
+def _start_auto_live_refresh() -> dict:
+    global _AUTO_LIVE_THREAD
+    config = _auto_live_config()
+    if not config["enabled"]:
+        return config
+    if not config["live_available"]:
+        with _AUTO_LIVE_LOCK:
+            global _AUTO_LIVE_LAST_RESULT, _AUTO_LIVE_LAST_RUN
+            _AUTO_LIVE_LAST_RUN = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            _AUTO_LIVE_LAST_RESULT = {
+                "requested": config["symbols"],
+                "refreshed": 0,
+                "failed": len(config["symbols"]),
+                "results": [
+                    {
+                        "symbol": symbol,
+                        "status": "error",
+                        "rows_added": 0,
+                        "message": "yfinance is not installed; live data unavailable.",
+                    }
+                    for symbol in config["symbols"]
+                ],
+            }
+        return config
+    with _AUTO_LIVE_LOCK:
+        if _AUTO_LIVE_THREAD and _AUTO_LIVE_THREAD.is_alive():
+            return config
+        _AUTO_LIVE_STOP.clear()
+        _AUTO_LIVE_THREAD = threading.Thread(target=_auto_live_worker, args=(config,), name="helios-auto-live", daemon=True)
+        _AUTO_LIVE_THREAD.start()
+    return config
+
+
+def _auto_live_status() -> dict:
+    config = _auto_live_config()
+    with _AUTO_LIVE_LOCK:
+        running = bool(_AUTO_LIVE_THREAD and _AUTO_LIVE_THREAD.is_alive())
+        last_result = _AUTO_LIVE_LAST_RESULT
+        last_run = _AUTO_LIVE_LAST_RUN
+    return {
+        **config,
+        "running": running,
+        "last_run": last_run,
+        "last_result": last_result,
+    }
+
+
+_start_auto_live_refresh()
 
 
 # --------------------------------------------------------------------------- #
@@ -1169,6 +1262,7 @@ def _data_status_payload() -> dict:
         "last_refresh": store_status.get("last_refresh"),
         "data_mode_summary": universe,
         "source_counts": universe["source_counts"],
+        "auto_live": _auto_live_status(),
         "warnings": _dedupe_strings(warnings),
         "missing_data": {
             "models": model_rows,

@@ -31,6 +31,7 @@ export function RealDataCenter({
   const liveCount = tickers.filter((ticker) => ticker.source === "live").length;
   const realRows = tickers.filter((ticker) => ticker.source === "live" || ticker.source === "upload");
   const missingTickers = dataStatus?.missing_data.missing_tickers || [];
+  const autoLive = dataStatus?.auto_live;
   const refreshAll = async () => {
     setPendingRefresh("all");
     try {
@@ -87,6 +88,26 @@ export function RealDataCenter({
               </ul>
             ) : <span className="muted">No refresh attempts recorded yet.</span>}
           </div>
+        </Panel>
+        <Panel title="Automatic Live Refresh" meta={autoLive?.enabled ? `${autoLive.symbols.length} symbols` : "off"}>
+          {autoLive?.enabled ? (
+            <div className="auto-live-status">
+              <div className="status-line">
+                <b>{autoLive.running ? "Running" : autoLive.live_available ? "Configured" : "Provider unavailable"}</b>
+                <span>Every {formatInterval(autoLive.interval_seconds)} · {autoLive.period} history</span>
+              </div>
+              <div className="symbol-strip">
+                {autoLive.symbols.slice(0, 12).map((symbol) => <span key={symbol}>{symbol}</span>)}
+                {autoLive.symbols.length > 12 && <span>+{autoLive.symbols.length - 12}</span>}
+              </div>
+              <div className="refresh-log">
+                <span>Last run: {fmtTimestamp(autoLive.last_run)}</span>
+                {autoLive.last_result && <span>{autoLive.last_result.refreshed} refreshed · {autoLive.last_result.failed} failed</span>}
+              </div>
+            </div>
+          ) : (
+            <p className="muted">Set HELIOS_AUTO_LIVE_SYMBOLS to keep a live universe refreshed automatically.</p>
+          )}
         </Panel>
         <Panel title="Missing Coverage" meta={`${missingTickers.length} tickers`}>
           {missingTickers.length ? (
@@ -168,4 +189,10 @@ function formatDateRange(ticker: TickerSummary) {
   if (!ticker.first_date && !ticker.last_date) return "—";
   if (ticker.first_date === ticker.last_date) return ticker.last_date || "—";
   return `${ticker.first_date || "?"} to ${ticker.last_date || "?"}`;
+}
+
+function formatInterval(seconds: number) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return "—";
+  if (seconds < 3600) return `${Math.round(seconds / 60)} min`;
+  return `${Math.round(seconds / 3600)} hr`;
 }

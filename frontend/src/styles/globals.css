@@ -1195,6 +1195,7 @@ p {
 }
 
 .refresh-control,
+.auto-live-status,
 .template-card,
 .model-coverage-list {
   display: grid;
@@ -1236,6 +1237,37 @@ p {
 .model-coverage-list small {
   color: var(--muted);
   font-size: 0.68rem;
+}
+
+.auto-live-status .status-line {
+  display: grid;
+  gap: 0.18rem;
+}
+
+.auto-live-status .status-line b {
+  color: var(--green);
+  font-size: 0.82rem;
+}
+
+.auto-live-status .status-line span {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.symbol-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.36rem;
+}
+
+.symbol-strip span {
+  border: 1px solid rgba(66, 153, 255, 0.26);
+  border-radius: 999px;
+  background: rgba(66, 153, 255, 0.08);
+  color: var(--blue);
+  padding: 0.22rem 0.46rem;
+  font-size: 0.66rem;
+  font-weight: 800;
 }
 
 .missing-ticker-list {
