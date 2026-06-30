@@ -1,0 +1,317 @@
+"""Fund look-through: EDGAR parsing, roll-up, forward provenance, endpoints.
+
+Fully offline. A fake EDGAR client serves canned SEC payloads from a URL map, so
+the *real* N-PORT parser and aggregation run without touching the network.
+"""
+import datetime
+import json
+
+import pytest
+
+import app as helios
+from engine import edgar, holdings, portfolio, provenance
+
+FUND_CIK = 1234567
+PART_CIK = 2345678
+NEWFUND_CIK = 7654321
+AAPL_CIK = 320193
+
+# A recent report date so the realistic "ready" path is exercised regardless of
+# when the suite runs (N-PORT staleness gating keys off this date).
+_AS_OF = (datetime.date.today() - datetime.timedelta(days=25)).isoformat()
+
+
+def _nport(as_of: str, rows) -> str:
+    body = []
+    for name, ticker, cusip, pct, cat in rows:
+        ident = f'<ticker value="{ticker}"/>' if ticker else ""
+        body.append(
+            f"<invstOrSec><name>{name}</name><title>{name}</title>"
+            f"<cusip>{cusip}</cusip><identifiers>{ident}</identifiers>"
+            f"<valUSD>1000.0</valUSD><pctVal>{pct}</pctVal><assetCat>{cat}</assetCat></invstOrSec>"
+        )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<edgarSubmission xmlns="http://www.sec.gov/edgar/nport"><formData>'
+        f"<genInfo><repPdDate>{as_of}</repPdDate></genInfo>"
+        "<fundInfo><netAssets>1000000000.00</netAssets></fundInfo>"
+        "<invstOrSecs>" + "".join(body) + "</invstOrSecs></formData></edgarSubmission>"
+    )
+
+
+# Full-coverage fund: listed positions sum to ~100% of NAV.
+_NPORT_XML = _nport(_AS_OF, [
+    ("Microsoft Corp", "MSFT", "594918104", "45.0", "EC"),
+    ("NVIDIA Corp", "NVDA", "67066G104", "35.0", "EC"),
+    ("US Treasury Note 4.0% 2030", "", "91282CJL6", "20.0", "DBT"),
+])
+
+# Partial-coverage fund: listed positions sum to only 60% (rest cash/derivatives).
+_NPORT_PART_XML = _nport(_AS_OF, [
+    ("Microsoft Corp", "MSFT", "594918104", "40.0", "EC"),
+    ("US Treasury Note 4.0% 2030", "", "91282CJL6", "20.0", "DBT"),
+])
+
+_MF_MAP = {"fields": ["cik", "seriesId", "classId", "symbol"],
+           "data": [[FUND_CIK, "S000099999", "C000099999", "VTEST"],
+                    [PART_CIK, "S000077777", "C000077777", "VPART"],
+                    [NEWFUND_CIK, "S000088888", "C000088888", "VNEW"]]}
+
+_STOCK_MAP = {"0": {"cik_str": AAPL_CIK, "ticker": "AAPL", "title": "Apple Inc."}}
+
+
+def _subs(cik, name, former, form, acc, prim, report_date):
+    return {
+        "cik": cik, "name": name,
+        "formerNames": [{"name": former, "from": "2010-01-01", "to": "2024-12-31"}],
+        "filings": {"recent": {
+            "accessionNumber": [acc], "form": [form], "primaryDocument": [prim],
+            "filingDate": ["2025-05-20"], "reportDate": [report_date],
+        }},
+    }
+
+
+_SUBS_FUND = _subs(FUND_CIK, "Helios Test Fund", "Helios Legacy Closed Fund",
+                   "NPORT-P", "0001111111-25-000001", "primary_doc.xml", _AS_OF)
+_SUBS_PART = _subs(PART_CIK, "Helios Partial Fund", "Helios Old Partial Fund",
+                   "NPORT-P", "0003333333-25-000003", "primary_doc.xml", _AS_OF)
+# A newly-launched fund that has registered but not yet filed any N-PORT.
+_SUBS_NEWFUND = _subs(NEWFUND_CIK, "Helios Brand New Fund", "Helios Predecessor Fund",
+                      "485BPOS", "0002222222-25-000009", "prospectus.htm", "")
+
+
+def _url_map() -> dict:
+    return {
+        edgar.MF_TICKERS_URL: json.dumps(_MF_MAP),
+        edgar.STOCK_TICKERS_URL: json.dumps(_STOCK_MAP),
+        edgar.submissions_url(FUND_CIK): json.dumps(_SUBS_FUND),
+        edgar.submissions_url(PART_CIK): json.dumps(_SUBS_PART),
+        edgar.submissions_url(NEWFUND_CIK): json.dumps(_SUBS_NEWFUND),
+        edgar.archives_doc_url(FUND_CIK, "0001111111-25-000001", "primary_doc.xml"): _NPORT_XML,
+        edgar.archives_doc_url(PART_CIK, "0003333333-25-000003", "primary_doc.xml"): _NPORT_PART_XML,
+    }
+
+
+def _fake_client(url_map=None):
+    url_map = _url_map() if url_map is None else url_map
+
+    def http_get(url, headers):
+        if url not in url_map:
+            raise KeyError(f"no canned response for {url}")
+        return url_map[url]
+
+    return edgar.EdgarClient(http_get=http_get)
+
+
+@pytest.fixture(autouse=True)
+def _reset_lookthrough_state():
+    holdings.set_default_client(_fake_client())
+    yield
+    holdings.set_default_client(None)
+
+
+def _model(*pairs):
+    return portfolio.Model(
+        id="MTEST", name="Test Model", mandate_key="balanced", mandate_context="",
+        holdings=[portfolio.Holding(t, w) for t, w in pairs],
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Pure parser
+# --------------------------------------------------------------------------- #
+def test_parse_nport_extracts_positions_and_metadata():
+    report = edgar.parse_nport(_NPORT_XML)
+    assert report.as_of == _AS_OF
+    assert report.total_net_assets == 1_000_000_000.0
+    assert [p.ticker for p in report.positions] == ["MSFT", "NVDA", ""]  # sorted by weight desc
+    assert report.positions[0].weight_pct == 45.0
+    assert report.positions[2].asset_label == "Debt"
+    assert report.positions[2].cusip == "91282CJL6"
+    assert report.parse_errors == 0 and report.truncated is False
+
+
+def test_parse_nport_bad_xml_raises():
+    with pytest.raises(edgar.EdgarError):
+        edgar.parse_nport("<not-valid")
+
+
+def test_parse_nport_rejects_entity_declaration():
+    bomb = ('<?xml version="1.0"?><!DOCTYPE r [<!ENTITY a "x">]>'
+            '<edgarSubmission><formData><invstOrSecs></invstOrSecs></formData></edgarSubmission>')
+    with pytest.raises(edgar.EdgarError):
+        edgar.parse_nport(bomb)
+
+
+# --------------------------------------------------------------------------- #
+# Resolution + single look-through
+# --------------------------------------------------------------------------- #
+def test_resolve_fund_and_stock():
+    client = _fake_client()
+    fund = client.resolve("vtest")
+    assert fund.kind == "fund" and fund.series_id == "S000099999"
+    stock = client.resolve("AAPL")
+    assert stock.kind == "stock" and stock.cik == str(AAPL_CIK)
+
+
+def test_fetch_lookthrough_fund_returns_real_positions():
+    lt = holdings.fetch_lookthrough("VTEST", client=_fake_client())
+    assert lt.resolved and lt.kind == "fund" and lt.source == "sec_nport"
+    assert lt.as_of == _AS_OF
+    assert {p["ticker"] for p in lt.positions} == {"MSFT", "NVDA", ""}
+    assert lt.former_names and lt.former_names[0]["name"] == "Helios Legacy Closed Fund"
+
+
+def test_fetch_lookthrough_stock_is_leaf():
+    lt = holdings.fetch_lookthrough("AAPL", client=_fake_client())
+    assert lt.resolved and lt.kind == "stock" and lt.source == "leaf"
+    assert lt.positions == []
+
+
+def test_newly_launched_fund_resolves_but_reports_no_nport_honestly():
+    lt = holdings.fetch_lookthrough("VNEW", client=_fake_client())
+    assert lt.kind == "fund" and lt.resolved is False
+    assert lt.source == "none"
+    assert "N-PORT" in lt.warning
+    assert lt.former_names[0]["name"] == "Helios Predecessor Fund"
+
+
+def test_unresolved_symbol_is_flagged_not_fabricated():
+    lt = holdings.fetch_lookthrough("ZZZZ", client=_fake_client())
+    assert lt.resolved is False and lt.kind == "unresolved"
+    assert lt.positions == [] and lt.warning
+
+
+def test_network_failure_degrades_gracefully():
+    def boom(url, headers):
+        raise OSError("offline")
+
+    lt = holdings.fetch_lookthrough("VTEST", client=edgar.EdgarClient(http_get=boom))
+    assert lt.resolved is False and lt.positions == []
+
+
+def test_summarize_weights_and_identification():
+    lt = holdings.fetch_lookthrough("VTEST", client=_fake_client())
+    s = holdings.summarize(lt)
+    assert s["n_positions"] == 3
+    assert s["covered_weight_pct"] == 100.0
+    assert s["identified_weight_pct"] == 80.0   # MSFT + NVDA carry tickers; the bond does not
+    assert s["uncovered_weight_pct"] == 0.0
+    assert s["asset_class_weights_pct"]["Equity (common)"] == 80.0
+    assert s["asset_class_weights_pct"]["Debt"] == 20.0
+    assert s["warnings"] == []
+
+
+def test_summarize_partial_coverage_warns():
+    lt = holdings.fetch_lookthrough("VPART", client=_fake_client())
+    s = holdings.summarize(lt)
+    assert s["covered_weight_pct"] == 60.0
+    assert s["uncovered_weight_pct"] == 40.0
+    assert any("not represented" in w for w in s["warnings"])
+
+
+# --------------------------------------------------------------------------- #
+# Model roll-up + forward provenance
+# --------------------------------------------------------------------------- #
+def test_model_rollup_combines_lookthrough_and_leaf():
+    roll = holdings.model_lookthrough(_model(("VTEST", 0.6), ("AAPL", 0.4)), client=_fake_client())
+    cov = roll["coverage"]
+    assert cov["looked_through_pct"] == 60.0
+    assert cov["leaf_pct"] == 40.0
+    assert cov["composition_coverage_pct"] == 100.0
+    assert cov["uncovered_pct"] == 0.0
+    weights = {d["ticker"]: d["weight_pct"] for d in roll["exposure"]["top_holdings"]}
+    assert weights["AAPL"] == pytest.approx(40.0, abs=0.01)
+    assert weights["MSFT"] == pytest.approx(27.0, abs=0.01)   # 0.6 * 45%
+    eq = roll["exposure"]["asset_class_weights_pct"]["Equity (common)"]
+    assert eq == pytest.approx(88.0, abs=0.05)
+
+
+def test_model_rollup_counts_intra_fund_gap_as_uncovered():
+    # VPART lists only 60% of its NAV -> the unseen 40% of that holding's weight
+    # must register as uncovered, not be silently treated as fully characterized.
+    roll = holdings.model_lookthrough(_model(("VPART", 1.0)), client=_fake_client())
+    cov = roll["coverage"]
+    assert cov["looked_through_pct"] == pytest.approx(60.0, abs=0.01)
+    assert cov["uncovered_pct"] == pytest.approx(40.0, abs=0.01)
+
+
+def test_model_rollup_records_uncovered_without_inventing():
+    roll = holdings.model_lookthrough(_model(("VTEST", 0.5), ("ZZZZ", 0.5)), client=_fake_client())
+    cov = roll["coverage"]
+    assert cov["looked_through_pct"] == 50.0
+    assert cov["uncovered_pct"] == 50.0
+    assert any(u["ticker"] == "ZZZZ" for u in cov["unresolved"])
+
+
+def test_forward_research_axis_states():
+    fresh = {"oldest": _AS_OF, "newest": _AS_OF}
+    ready = provenance.forward_research({"n_holdings": 2, "looked_through_pct": 60.0,
+                                         "leaf_pct": 40.0, "uncovered_pct": 0.0,
+                                         "composition_coverage_pct": 100.0, "as_of_range": fresh})
+    assert ready["forward_mode"] == "ready" and ready["eligible_for_forward_research"]
+
+    partial = provenance.forward_research({"n_holdings": 2, "looked_through_pct": 50.0,
+                                           "leaf_pct": 0.0, "uncovered_pct": 50.0,
+                                           "composition_coverage_pct": 50.0, "as_of_range": fresh,
+                                           "unresolved": [{"ticker": "ZZZZ"}]})
+    assert partial["forward_mode"] == "partial"
+    assert partial["eligible_for_forward_research"] is False
+    assert "ZZZZ" in partial["unresolved_tickers"]
+
+    blocked = provenance.forward_research({"n_holdings": 0})
+    assert blocked["forward_mode"] == "unavailable"
+
+
+def test_forward_research_staleness_gate():
+    cov = {"n_holdings": 1, "looked_through_pct": 100.0, "leaf_pct": 0.0, "uncovered_pct": 0.0,
+           "composition_coverage_pct": 100.0, "as_of_range": {"oldest": "2024-01-01", "newest": "2024-01-01"}}
+    assert provenance.forward_research(cov, now=datetime.date(2024, 2, 1))["forward_mode"] == "ready"
+
+    warned = provenance.forward_research(cov, now=datetime.date(2024, 6, 1))  # ~152 days
+    assert warned["forward_mode"] == "ready" and warned["warnings"]
+
+    stale = provenance.forward_research(cov, now=datetime.date(2024, 11, 1))  # ~305 days
+    assert stale["forward_mode"] == "partial" and stale["eligible_for_forward_research"] is False
+
+    blocked = provenance.forward_research(cov, now=datetime.date(2025, 6, 1))  # ~517 days
+    assert blocked["forward_mode"] == "unavailable"
+
+
+# --------------------------------------------------------------------------- #
+# Endpoints (offline via injected default client)
+# --------------------------------------------------------------------------- #
+@pytest.fixture()
+def client():
+    helios.app.config.update(TESTING=True, PROPAGATE_EXCEPTIONS=False)
+    return helios.app.test_client()
+
+
+def test_endpoint_lookthrough_fund(client):
+    body = client.get("/api/lookthrough?ticker=VTEST").get_json()
+    assert body["resolved"] and body["kind"] == "fund"
+    assert body["forward"]["forward_mode"] == "ready"
+    assert body["summary"]["n_positions"] == 3
+    assert body["former_names"][0]["name"] == "Helios Legacy Closed Fund"
+
+
+def test_endpoint_lookthrough_partial_fund_is_not_ready(client):
+    body = client.get("/api/lookthrough?ticker=VPART").get_json()
+    assert body["resolved"] and body["summary"]["covered_weight_pct"] == 60.0
+    assert body["forward"]["forward_mode"] == "partial"
+
+
+def test_endpoint_lookthrough_requires_symbol(client):
+    assert client.get("/api/lookthrough").status_code == 400
+
+
+def test_endpoint_model_lookthrough(client):
+    portfolio.register(_model(("VTEST", 0.6), ("AAPL", 0.4)))
+    body = client.get("/api/model/lookthrough?id=MTEST").get_json()
+    assert body["coverage"]["composition_coverage_pct"] == 100.0
+    assert body["forward"]["forward_mode"] == "ready"
+    assert body["exposure"]["n_underlying"] >= 3
+
+
+def test_endpoint_model_lookthrough_unknown_model(client):
+    assert client.get("/api/model/lookthrough?id=NOPE").status_code == 404

@@ -62,8 +62,9 @@ def _load_local_env_file(path: Path | None = None) -> dict:
 _LOCAL_ENV_STATUS = _load_local_env_file()
 
 from engine import (
-    ai_copilot, backtest, data, forecast, indicators, insights, mandate, opportunity, portfolio, portfolio_clinic,
-    persistence, provenance, regime, reporting, sentiment, signals, strategy,
+    ai_copilot, backtest, cma, data, forecast, fundamentals, holdings, indicators, insights, mandate,
+    opportunity, portfolio, portfolio_clinic, persistence, provenance, regime, reporting, sentiment,
+    signals, strategy,
 )
 
 app = Flask(__name__)
@@ -1188,6 +1189,129 @@ def model_clinic():
     except ValueError as e:
         return err(str(e), 400)
     return ok({**result, "disclaimer": ANALYSIS_ONLY_DISCLAIMER})
+
+
+@app.route("/api/lookthrough")
+def lookthrough_instrument():
+    """See inside one ETF/mutual fund via SEC N-PORT (no price history needed)."""
+    symbol = data.clean_symbol(request.args.get("ticker", ""), fallback="")
+    if not symbol:
+        return err("Provide a fund ticker symbol.", 400)
+    lt = holdings.fetch_lookthrough(symbol)
+    summary = holdings.summarize(lt)
+    # Forward provenance reflects REAL intra-fund coverage: a fund whose listed
+    # N-PORT positions only sum to e.g. 60% of NAV is 60% covered, not 100%.
+    if lt.kind == "fund" and lt.resolved:
+        covered = float(summary["covered_weight_pct"])
+        looked, leaf = covered, 0.0
+    elif lt.kind == "stock" and lt.resolved:
+        covered, looked, leaf = 100.0, 0.0, 100.0
+    else:
+        covered, looked, leaf = 0.0, 0.0, 0.0
+    forward = provenance.forward_research({
+        "n_holdings": 1,
+        "looked_through_pct": looked,
+        "leaf_pct": leaf,
+        "uncovered_pct": round(max(0.0, 100.0 - covered), 2),
+        "composition_coverage_pct": covered,
+        "unresolved": [] if lt.resolved else [{"ticker": symbol, "reason": lt.warning}],
+        "as_of_range": {"oldest": lt.as_of, "newest": lt.as_of},
+    })
+    return ok({
+        "symbol": lt.symbol,
+        "resolved": lt.resolved,
+        "kind": lt.kind,
+        "source": lt.source,
+        "cik": lt.cik,
+        "series_id": lt.series_id,
+        "as_of": lt.as_of,
+        "total_net_assets": lt.total_net_assets,
+        "former_names": lt.former_names,
+        "summary": summary,
+        "positions": lt.positions[:50],
+        "forward": forward,
+        "warning": lt.warning,
+        "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+    })
+
+
+@app.route("/api/model/lookthrough")
+def model_lookthrough():
+    """Roll every holding's look-through up to a model-level real exposure."""
+    mdl = portfolio.get(request.args.get("id", ""))
+    if mdl is None:
+        return err("Unknown model.", 404)
+    roll = holdings.model_lookthrough(mdl)
+    forward = provenance.forward_research(roll["coverage"])
+    return ok({
+        "id": mdl.id,
+        "name": mdl.name,
+        "mandate": {"key": mdl.mandate_key, "label": mandate.get(mdl.mandate_key)["label"]},
+        "exposure": roll["exposure"],
+        "per_holding": roll["per_holding"],
+        "coverage": roll["coverage"],
+        "forward": forward,
+        "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+    })
+
+
+# Bound how many per-holding fundamentals one forward analysis may fetch, so a
+# wide model can't trigger an unbounded fan-out of (network) provider calls.
+_FORWARD_FUNDAMENTALS_BUDGET = 60
+
+
+def _fundamentals_map_for(underlyings: list) -> dict:
+    """Fetch fundamentals for the heaviest equity underlyings (bounded, offline-
+    safe). Non-equity sleeves need none — the CMA anchors them by asset class."""
+    fmap: dict = {}
+    fetched = 0
+    for u in underlyings:
+        if fetched >= _FORWARD_FUNDAMENTALS_BUDGET:
+            break
+        ticker = (u.get("ticker") or "").upper()
+        asset_class = (u.get("asset_class") or "").lower()
+        if not ticker or not asset_class.startswith("equity"):
+            continue
+        fmap[ticker] = fundamentals.fetch(ticker)
+        fetched += 1
+    return fmap
+
+
+@app.route("/api/model/forward")
+def model_forward():
+    """Forward expected return from holdings look-through + building-block CMA.
+
+    Needs no price history, so it works for a newly-launched fund: it sees what
+    the model holds, values each sleeve forward, and blends uncovered weight to
+    the mandate anchor — reporting coverage and every building block honestly.
+    """
+    mdl = portfolio.get(request.args.get("id", ""))
+    if mdl is None:
+        return err("Unknown model.", 404)
+    roll = holdings.model_lookthrough(mdl)
+    underlyings = roll["exposure"].get("underlyings", [])
+    fmap = _fundamentals_map_for(underlyings)
+    forward_return = cma.aggregate(underlyings, fmap, mdl.mandate_key)
+    forward_prov = provenance.forward_research(roll["coverage"])
+    blended = mandate.blended_anchor(
+        mdl.mandate_key,
+        cma_return=forward_return["expected_return_covered_pct"] / 100.0,
+        coverage=forward_return["coverage_pct"] / 100.0,
+    )
+    return ok({
+        "id": mdl.id,
+        "name": mdl.name,
+        "mandate": {"key": mdl.mandate_key, "label": mandate.get(mdl.mandate_key)["label"]},
+        "forward_return": forward_return,
+        "blended_anchor_pct": round(blended * 100.0, 2),
+        # Forward hypotheses in the Portfolio Clinic's schema so both feed one
+        # unified research-hypothesis surface (backward + forward), not two.
+        "research_hypotheses": cma.research_hypotheses(forward_return, mdl.mandate_key),
+        "exposure": {k: v for k, v in roll["exposure"].items() if k != "underlyings"},
+        "coverage": roll["coverage"],
+        "forward": forward_prov,
+        "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+    })
 
 
 @app.route("/api/report/instrument")

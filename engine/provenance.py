@@ -1,6 +1,8 @@
 """Data-provenance gates for Helios Pro research features."""
 from __future__ import annotations
 
+import datetime
+
 REAL_SOURCES = {"live", "upload"}
 DEMO_SOURCES = {"sample", "simulated"}
 BLOCKED_SOURCES = {"missing", "excluded", "unknown"}
@@ -74,6 +76,103 @@ def instrument(source: str, history_days: int, min_history: int = 60) -> dict:
         "source_counts": {source: 1},
         "history_days": history_days,
         "warnings": [] if eligible else [reason],
+    }
+
+
+def _as_of_age_days(coverage: dict, now: "datetime.date | None") -> int | None:
+    newest = (coverage.get("as_of_range") or {}).get("newest", "")
+    if not newest:
+        return None
+    try:
+        d = datetime.date.fromisoformat(str(newest)[:10])
+    except ValueError:
+        return None
+    today = now or datetime.date.today()
+    return (today - d).days
+
+
+def forward_research(coverage: dict, ready_pct: float = 80.0, partial_pct: float = 40.0,
+                     now: "datetime.date | None" = None,
+                     warn_days: int = 135, stale_days: int = 270, block_days: int = 450) -> dict:
+    """Second provenance axis: forward-data (holdings look-through) sufficiency.
+
+    The existing :func:`portfolio` / :func:`instrument` gates answer "is there
+    real PRICE history?" — a backward-looking question. A newly-launched fund
+    fails that gate yet can be richly evaluated forward from what it HOLDS. This
+    gate answers the orthogonal question: "do we know the model's composition
+    well enough to run holdings-based forward research?" so a no-price-history
+    fund is correctly ``invalid_for_price`` yet can still be ``valid_for_forward``.
+
+    ``coverage`` is the block returned by ``holdings.model_lookthrough``. The
+    decision is driven by composition coverage = look-through + transparent
+    leaves; opaque (unresolved) fund weight is what blocks readiness.
+    """
+    looked = float(coverage.get("looked_through_pct", 0.0))
+    leaf = float(coverage.get("leaf_pct", 0.0))
+    uncovered = float(coverage.get("uncovered_pct", 0.0))
+    composition = float(coverage.get("composition_coverage_pct", looked + leaf))
+    n_holdings = int(coverage.get("n_holdings", 0) or 0)
+
+    if n_holdings == 0:
+        mode, label = "unavailable", "Forward Research Blocked"
+        reason = "Model has no holdings to look through."
+        eligible = False
+    elif composition >= ready_pct:
+        mode, label = "ready", "Forward Research Ready"
+        reason = "Holdings look-through covers enough model weight for composition-based forward research."
+        eligible = True
+    elif composition >= partial_pct:
+        mode, label = "partial", "Forward Research — Partial Coverage"
+        reason = "Some holdings could not be looked through; forward research is based on partial composition."
+        eligible = False
+    else:
+        mode, label = "unavailable", "Forward Research Blocked"
+        reason = "Too little of the model's composition could be resolved for forward research."
+        eligible = False
+
+    unresolved = [u.get("ticker", "") for u in (coverage.get("unresolved") or []) if u.get("ticker")]
+    warnings = []
+    if uncovered > 0 and unresolved:
+        warnings.append("Could not look through: " + ", ".join(unresolved))
+
+    # Staleness: N-PORT is quarterly with a ~60-day public lag, so even fresh
+    # filings describe a portfolio that has since drifted. Past a quarter+lag we
+    # warn; past two quarters we stop calling it "ready"; past a year we block.
+    age = _as_of_age_days(coverage, now)
+    newest = (coverage.get("as_of_range") or {}).get("newest", "")
+    if n_holdings > 0:
+        if age is None and composition > 0:
+            warnings.append("Holdings as-of date is unknown; composition recency cannot be confirmed.")
+        elif age is not None and age > block_days:
+            mode, label, eligible = "unavailable", "Forward Research Blocked", False
+            reason = f"Holdings as of {newest} are {age} days old — too stale for forward research."
+            warnings.append(reason)
+        elif age is not None and age > stale_days:
+            if mode == "ready":
+                mode, label = "partial", "Forward Research — Stale Holdings"
+            eligible = False
+            warnings.append(f"Holdings as of {newest} are {age} days old; composition may have drifted materially.")
+        elif age is not None and age > warn_days:
+            warnings.append(f"Holdings as of {newest} are {age} days old (quarterly N-PORT lag); treat composition as indicative.")
+
+    required_action = "" if eligible else (
+        "Provide SEC look-through or a holdings CSV for: " + ", ".join(unresolved)
+        if unresolved else "Refresh holdings: the latest available composition is too stale or thin."
+    )
+    return {
+        "forward_mode": mode,
+        "display_label": label,
+        "eligible_for_forward_research": eligible,
+        "reason": reason,
+        "required_action": required_action,
+        "composition_coverage_pct": round(composition, 1),
+        "looked_through_pct": round(looked, 1),
+        "leaf_pct": round(leaf, 1),
+        "uncovered_pct": round(uncovered, 1),
+        "as_of_days": age,
+        "unresolved_tickers": unresolved,
+        "as_of_range": coverage.get("as_of_range", {"oldest": "", "newest": ""}),
+        "warnings": warnings,
     }
 
 

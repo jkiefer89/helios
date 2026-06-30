@@ -111,6 +111,22 @@ def anchor_return(key: str) -> float:
     return RF + ERP * get(key)["growth_orientation"]
 
 
+def blended_anchor(key: str, cma_return: float | None = None, coverage: float = 0.0) -> float:
+    """Forward anchor that blends the generic CAPM anchor with a holdings-derived
+    CMA expected return by look-through coverage.
+
+    Backward-compatible seam for the forward spine: with ``cma_return=None`` or
+    zero coverage this returns the unchanged generic anchor, so existing callers
+    (and forecast_long) behave identically until a CMA estimate is supplied.
+    ``coverage`` is the fraction (0..1) of model weight the CMA actually covers.
+    """
+    generic = anchor_return(key)
+    if cma_return is None or coverage <= 0:
+        return generic
+    c = max(0.0, min(coverage, 1.0))
+    return c * cma_return + (1.0 - c) * generic
+
+
 def target_return(key: str) -> float:
     """Annualized return the mandate is expected to clear (for prob_meets_mandate)."""
     if key_or_default(key) == "cd_alternative":

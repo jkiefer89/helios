@@ -278,6 +278,11 @@ frontend/            React + Vite + TypeScript research terminal
   src/views/         Command Center, Opportunity Radar, Strategy Lab, Clinic, Reports
 engine/
   data.py             data store, samples, CSV import, live fetch, holding resolution
+  edgar.py            SEC EDGAR client: ticker→registrant, N-PORT holdings, former names
+  holdings.py         fund look-through: see inside ETFs/funds, roll exposures up to a model
+  fundamentals.py     per-holding valuation/yield/growth (provider seam: yfinance now, FMP/Tiingo later)
+  macro.py            forward macro & sector valuation anchors (offline fallbacks for RF/ERP)
+  cma.py              building-block forward expected return (yield + growth + valuation reversion)
   persistence.py      local SQLite schema, reload, refresh logs, provenance metadata
   indicators.py       SMA/EMA/RSI/MACD/Bollinger + performance metrics
   forecast.py         Ridge cone (short) + long-horizon strategic projection
@@ -304,6 +309,9 @@ static/styles.css     legacy dashboard theme
 | `GET /api/strategy/analyze` | Strategy Lab for a single instrument with no-lookahead evidence |
 | `GET /api/model/strategy/analyze` | Strategy Lab for a client model; blocks when model provenance is invalid |
 | `GET /api/model/clinic` | Portfolio Clinic diagnostics and hypothetical, analysis-only suggestions |
+| `GET /api/lookthrough?ticker=SYM` | Fund look-through: real SEC N-PORT holdings of one ETF/mutual fund, with former-name (predecessor) linkage and forward-data provenance — needs no price history |
+| `GET /api/model/lookthrough?id=ID` | Roll every holding's look-through up to a model-level real exposure (asset-class weights, underlying concentration) with composition-coverage provenance |
+| `GET /api/model/forward?id=ID` | Forward expected return from look-through fundamentals via a building-block CMA (yield + earnings growth + valuation reversion), coverage-weighted toward the mandate anchor — needs no price history, with every block and coverage % exposed |
 | `GET /api/report/instrument` | Analysis-only advisor report for an instrument |
 | `GET /api/report/model` | Analysis-only advisor report for a model |
 | `GET /api/mandates` | list mandate presets for the model-import form |
