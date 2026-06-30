@@ -5,6 +5,7 @@ from pathlib import Path
 os.environ.setdefault("HELIOS_AUTH", "0")
 os.environ.setdefault("HELIOS_RF", "0.02")
 os.environ.setdefault("HELIOS_DB_PATH", "off")
+os.environ.setdefault("HELIOS_LOAD_DOTENV", "0")
 
 import numpy as np
 import pandas as pd
