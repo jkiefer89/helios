@@ -82,8 +82,13 @@ def _yfinance_provider(ticker: str) -> dict:
         info = data._yf.Ticker(ticker).info or {}
     except Exception:
         return {}
+    # yfinance reports dividendYield as a PERCENT (AAPL 0.38 == 0.38%, JPM 1.82
+    # == 1.82%); normalize to a fraction here so the CMA never reads a 0.4% payer
+    # as a 38% one. earningsGrowth is already a fraction and passes through.
+    dy = info.get("dividendYield")
+    dy = dy / 100.0 if isinstance(dy, (int, float)) and dy == dy else None
     return {
-        "dividend_yield": info.get("dividendYield"),
+        "dividend_yield": dy,
         "forward_pe": info.get("forwardPE"),
         "trailing_pe": info.get("trailingPE"),
         "earnings_growth": info.get("earningsGrowth"),
