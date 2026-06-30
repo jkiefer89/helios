@@ -1,4 +1,6 @@
 import sqlite3
+import threading
+import time
 from io import BytesIO
 
 import pandas as pd
@@ -140,6 +142,41 @@ def test_auto_live_bootstrap_fetches_and_persists_live_symbols(monkeypatch, tmp_
     assert data.get("SPY").source == "live"
     assert store.status()["real_instrument_count"] == 2
     assert store.refresh_log(limit=2)[0]["status"] == "ok"
+
+
+def test_auto_live_bootstrap_fetches_symbols_concurrently(monkeypatch, tmp_path):
+    store = _use_db(monkeypatch, tmp_path)
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+    calls = []
+
+    def fake_fetch(symbol, period="2y", persist=True):
+        nonlocal active, max_active
+        with lock:
+            calls.append((symbol, period, persist))
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.05)
+        with lock:
+            active -= 1
+        return data.Instrument(symbol, f"{symbol} Live", _ohlcv(days=95), "live", [])
+
+    result = data.ensure_live_symbols(
+        ["AAPL", "SPY", "MSFT", "NVDA"],
+        period="1y",
+        fetcher=fake_fetch,
+        max_workers=4,
+    )
+
+    assert result["requested"] == ["AAPL", "SPY", "MSFT", "NVDA"]
+    assert [item["symbol"] for item in result["results"]] == result["requested"]
+    assert result["refreshed"] == 4
+    assert result["failed"] == 0
+    assert max_active > 1
+    assert {call[0] for call in calls} == set(result["requested"])
+    assert all(call[1:] == ("1y", False) for call in calls)
+    assert store.status()["real_instrument_count"] == 4
 
 
 def test_auto_live_bootstrap_keeps_sample_when_fetch_fails(monkeypatch, tmp_path):

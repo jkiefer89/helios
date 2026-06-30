@@ -89,6 +89,7 @@ def test_auto_live_config_is_disabled_without_symbols(monkeypatch):
 def test_auto_live_config_parses_core_universe_and_interval(monkeypatch):
     monkeypatch.setenv("HELIOS_AUTO_LIVE_SYMBOLS", "core")
     monkeypatch.setenv("HELIOS_AUTO_LIVE_REFRESH_SECONDS", "30")
+    monkeypatch.setenv("HELIOS_AUTO_LIVE_MAX_WORKERS", "99")
     monkeypatch.setenv("HELIOS_AUTO_LIVE_PERIOD", "1y")
 
     config = helios._auto_live_config()
@@ -96,6 +97,7 @@ def test_auto_live_config_parses_core_universe_and_interval(monkeypatch):
     assert config["enabled"] is True
     assert config["period"] == "1y"
     assert config["interval_seconds"] == 60
+    assert config["max_workers"] == 16
     assert {"SPY", "QQQ", "AAPL"} <= set(config["symbols"])
 
 
@@ -110,6 +112,7 @@ def test_data_status_includes_auto_live_configuration(client, monkeypatch):
     assert auto_live["enabled"] is True
     assert auto_live["symbols"] == ["SPY", "QQQ"]
     assert auto_live["interval_seconds"] == 120
+    assert auto_live["max_workers"] == 6
 
 
 def test_model_upload_and_analyze_smoke(client, monkeypatch):

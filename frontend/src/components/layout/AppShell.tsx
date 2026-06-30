@@ -373,10 +373,20 @@ function ImportPanel(props: ShellProps) {
     }
   };
   const liveCount = props.tickers.filter((ticker) => ticker.source === "live").length;
+  const realDataReady = liveCount > 0 || Boolean(props.dataStatus?.data_mode_summary?.eligible_for_real_research);
+  const onboardingCopy = realDataReady
+    ? {
+        title: "Live refresh active",
+        body: `${liveCount} live ${liveCount === 1 ? "history is" : "histories are"} ready for real research. Automatic refresh keeps the local evidence set current while provenance checks remain visible.`,
+      }
+    : {
+        title: "Real Data Onboarding",
+        body: "Connect live or uploaded price history to unlock real research. Bundled sample histories are excluded from real research evidence.",
+      };
   return (
     <section className="side-section onboarding">
-      <h2>Real Data Onboarding</h2>
-      <p>Real research unlocks only from live or uploaded price history. Sample data remains demo-only.</p>
+      <h2>{onboardingCopy.title}</h2>
+      <p>{onboardingCopy.body}</p>
       {formNotice && <div className="form-feedback" role="status">{formNotice}</div>}
       <form onSubmit={liveForm}>
         <label>Fetch live ticker</label>

@@ -155,6 +155,7 @@ For a no-upload live workflow, enable automatic polling before startup:
 ```bash
 HELIOS_AUTO_LIVE_SYMBOLS=core \
 HELIOS_AUTO_LIVE_REFRESH_SECONDS=300 \
+HELIOS_AUTO_LIVE_MAX_WORKERS=6 \
 ./run.sh
 ```
 
@@ -162,9 +163,12 @@ HELIOS_AUTO_LIVE_REFRESH_SECONDS=300 \
 yfinance, persists those histories locally, and refreshes them every five
 minutes. Use `HELIOS_AUTO_LIVE_SYMBOLS=starter_models` to cover every holding in
 the example model templates under `examples/models/`. You can also provide a
-comma-separated ticker list. This is a polling workflow using the latest
-available provider data, not a streaming quote feed; failed provider calls leave
-existing/sample data untouched and logged as failed refresh attempts.
+comma-separated ticker list. Live polling fetches symbols with bounded parallel
+network workers (`HELIOS_AUTO_LIVE_MAX_WORKERS`, default `6`, max `16`) and then
+persists the validated provider histories sequentially. This is a polling
+workflow using the latest available provider data, not a streaming quote feed;
+failed provider calls leave existing/sample data untouched and logged as failed
+refresh attempts.
 
 ### Optional AI Copilot
 

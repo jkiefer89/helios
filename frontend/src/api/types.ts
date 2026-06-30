@@ -130,6 +130,7 @@ export interface AutoLiveStatus {
   symbols: string[];
   period: string;
   interval_seconds: number;
+  max_workers: number;
   running: boolean;
   last_run?: string | null;
   last_result?: {

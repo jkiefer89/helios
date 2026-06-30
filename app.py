@@ -159,6 +159,12 @@ def _auto_live_config() -> dict:
         "symbols": symbols,
         "period": (os.environ.get("HELIOS_AUTO_LIVE_PERIOD") or "2y").strip() or "2y",
         "interval_seconds": _env_int("HELIOS_AUTO_LIVE_REFRESH_SECONDS", 300, 60, 86_400),
+        "max_workers": _env_int(
+            "HELIOS_AUTO_LIVE_MAX_WORKERS",
+            data.DEFAULT_LIVE_REFRESH_WORKERS,
+            1,
+            data.MAX_LIVE_REFRESH_WORKERS,
+        ),
     }
 
 
@@ -167,12 +173,17 @@ def _auto_live_worker(config: dict) -> None:
     while not _AUTO_LIVE_STOP.is_set():
         started = datetime.now(timezone.utc).isoformat(timespec="seconds")
         try:
-            result = data.ensure_live_symbols(config["symbols"], period=config["period"])
+            result = data.ensure_live_symbols(
+                config["symbols"],
+                period=config["period"],
+                max_workers=config["max_workers"],
+            )
         except Exception as exc:
             result = {
                 "requested": config["symbols"],
                 "refreshed": 0,
                 "failed": len(config["symbols"]),
+                "max_workers": config["max_workers"],
                 "results": [{"symbol": symbol, "status": "error", "rows_added": 0, "message": str(exc)} for symbol in config["symbols"]],
             }
         with _AUTO_LIVE_LOCK:
@@ -194,6 +205,7 @@ def _start_auto_live_refresh() -> dict:
                 "requested": config["symbols"],
                 "refreshed": 0,
                 "failed": len(config["symbols"]),
+                "max_workers": config["max_workers"],
                 "results": [
                     {
                         "symbol": symbol,

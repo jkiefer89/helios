@@ -59,6 +59,15 @@ def test_ai_copilot_disabled_state_is_non_actionable_and_not_repetitive():
     assert source.count("AI Copilot is off. Helios analytics still work normally.") == 1
 
 
+def test_real_data_onboarding_copy_switches_when_live_histories_exist():
+    source = (ROOT / "frontend" / "src" / "components" / "layout" / "AppShell.tsx").read_text()
+
+    assert "const onboardingCopy" in source
+    assert "Live refresh active" in source
+    assert "ready for real research" in source
+    assert "Sample data remains demo-only." not in source
+
+
 def test_flask_serves_react_build_when_present(tmp_path, monkeypatch):
     dist = tmp_path / "dist"
     assets = dist / "assets"
