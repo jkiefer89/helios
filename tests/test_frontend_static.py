@@ -68,6 +68,15 @@ def test_real_data_onboarding_copy_switches_when_live_histories_exist():
     assert "Sample data remains demo-only." not in source
 
 
+def test_models_view_exposes_governed_model_library():
+    source = (ROOT / "frontend" / "src" / "views" / "Models.tsx").read_text()
+
+    assert "Model Library" in source
+    assert "Risk limits" in source
+    assert "Rebalance" in source
+    assert "Import template" in source
+
+
 def test_flask_serves_react_build_when_present(tmp_path, monkeypatch):
     dist = tmp_path / "dist"
     assets = dist / "assets"

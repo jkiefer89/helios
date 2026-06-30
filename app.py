@@ -62,8 +62,8 @@ def _load_local_env_file(path: Path | None = None) -> dict:
 _LOCAL_ENV_STATUS = _load_local_env_file()
 
 from engine import (
-    ai_copilot, backtest, data, forecast, indicators, insights, mandate, opportunity, portfolio, portfolio_clinic,
-    persistence, provenance, regime, reporting, sentiment, signals, strategy,
+    ai_copilot, backtest, data, forecast, indicators, insights, mandate, model_library, opportunity, portfolio,
+    portfolio_clinic, persistence, provenance, regime, reporting, sentiment, signals, strategy,
 )
 
 app = Flask(__name__)
@@ -1001,6 +1001,37 @@ def models():
         })
     out.sort(key=lambda d: d["name"])
     return ok({"models": out})
+
+
+@app.route("/api/model-library")
+def model_library_list():
+    return ok({"templates": model_library.public_list()})
+
+
+@app.route("/api/model-library/import", methods=["POST"])
+def model_library_import():
+    payload = request.get_json(silent=True) or {}
+    slug = str(payload.get("slug") or "")
+    template = model_library.get(slug)
+    if not template:
+        return err("Unknown model library template.", 404)
+    mdl = model_library.import_template(slug)
+    if not mdl:
+        return err("Unknown model library template.", 404)
+    coverage = _model_coverage(mdl)
+    return ok({
+        "id": mdl.id,
+        "name": mdl.name,
+        "mandate": mdl.mandate_key,
+        "n_holdings": len(mdl.holdings),
+        "coverage_state": coverage["coverage_state"],
+        "missing_tickers": coverage["missing_tickers"],
+        "template_only": template["template_only"],
+        "benchmark": template["benchmark"],
+        "rebalance_rules": template["rebalance_rules"],
+        "risk_limits": template["risk_limits"],
+        "provenance": template["provenance"],
+    })
 
 
 @app.route("/api/model/upload", methods=["POST"])

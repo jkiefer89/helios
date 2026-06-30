@@ -1321,6 +1321,72 @@ p {
   white-space: pre-wrap;
 }
 
+.model-library-card {
+  align-content: start;
+}
+
+.model-library-card > div span {
+  color: var(--blue);
+  font-size: 0.66rem;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.model-library-card p,
+.model-library-card small {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
+.template-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.42rem;
+  margin: 0;
+}
+
+.template-meta div {
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 5px;
+  padding: 0.42rem 0.5rem;
+  background: rgba(5, 10, 17, 0.46);
+}
+
+.template-meta dt {
+  color: var(--muted);
+  font-size: 0.62rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.template-meta dd {
+  margin: 0.12rem 0 0;
+  color: var(--soft);
+  font-size: 0.74rem;
+  font-weight: 800;
+}
+
+.template-holdings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.34rem;
+}
+
+.template-holdings span {
+  border: 1px solid rgba(76, 157, 255, 0.22);
+  border-radius: 999px;
+  padding: 0.22rem 0.42rem;
+  color: var(--soft);
+  font-size: 0.66rem;
+  font-weight: 800;
+}
+
+.template-holdings b {
+  color: var(--green);
+}
+
 .source-context-strip,
 .unlock-evidence-strip {
   display: grid;

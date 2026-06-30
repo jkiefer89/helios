@@ -8,6 +8,8 @@ import type {
   DataStatusResponse,
   MandateSummary,
   ModelSummary,
+  ModelTemplate,
+  ModelTemplateImportResponse,
   OpportunitiesResponse,
   ReportResponse,
   StrategyResponse,
@@ -44,6 +46,13 @@ export const api = {
   tickers: () => request<TickersResponse>("/api/tickers"),
   mandates: () => request<{ mandates: MandateSummary[] }>("/api/mandates"),
   models: () => request<{ models: ModelSummary[] }>("/api/models"),
+  modelLibrary: () => request<{ templates: ModelTemplate[] }>("/api/model-library"),
+  importModelTemplate: (slug: string) =>
+    request<ModelTemplateImportResponse>("/api/model-library/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slug }),
+    }),
   opportunities: (params: { kind: string; includeHold: boolean; minScore: number; limit?: number }) => {
     const query = new URLSearchParams({
       kind: params.kind,

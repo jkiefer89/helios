@@ -245,6 +245,14 @@ Prices for each holding are resolved from samples/uploads/cache, then live
 `yfinance` when available, then deterministic simulation, with every source
 flagged.
 
+The React **Models** workspace also includes a governed starter model library:
+AI infrastructure, quality compounders, defense/security, energy/grid,
+healthcare innovation, inflation hedges, and cash/defensive reserve. Each
+template has real public tickers, a mandate, benchmark, rebalance rule, risk
+limits, and provenance/caveats. These are workflow templates, not investment
+advice or managed account models, and Helios keeps model research blocked until
+every analyzed holding has eligible live or uploaded history.
+
 ```csv
 Ticker,Weight
 AAPL,30
@@ -312,6 +320,8 @@ static/styles.css     legacy dashboard theme
 | `GET /api/report/model` | Analysis-only advisor report for a model |
 | `GET /api/mandates` | list mandate presets for the model-import form |
 | `GET /api/models` | list imported portfolio models |
+| `GET /api/model-library` | governed starter model templates with mandate, benchmark, rebalance, risk-limit and provenance metadata |
+| `POST /api/model-library/import` | import a governed starter template by slug; still requires real holding histories before real model research |
 | `POST /api/model/upload` | import an Excel/CSV model (multipart `file`, `name`, `mandate`, `context`) |
 | `GET /api/model/analyze?id=ID&horizon=H` | full model analysis (`H` = 5–90 or `6M`/`1Y`/`3Y`/`5Y`) |
 | `GET /api/tickers` | list single instruments + last price/change |

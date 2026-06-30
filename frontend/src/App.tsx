@@ -5,6 +5,7 @@ import type {
   DataStatusResponse,
   MandateSummary,
   ModelSummary,
+  ModelTemplate,
   OpportunitiesResponse,
   TickerSummary,
 } from "./api/types";
@@ -22,6 +23,7 @@ export default function App() {
   const [activeView, setActiveView] = useState<ViewId>("command");
   const [tickers, setTickers] = useState<TickerSummary[]>([]);
   const [models, setModels] = useState<ModelSummary[]>([]);
+  const [modelLibrary, setModelLibrary] = useState<ModelTemplate[]>([]);
   const [mandates, setMandates] = useState<MandateSummary[]>([]);
   const [liveAvailable, setLiveAvailable] = useState(false);
   const [selectedInstrument, setSelectedInstrument] = useState<string>("");
@@ -33,14 +35,16 @@ export default function App() {
   const [notice, setNotice] = useState<string>("");
 
   const refreshLists = async () => {
-    const [tickerPayload, modelPayload, mandatePayload, statusPayload] = await Promise.all([
+    const [tickerPayload, modelPayload, libraryPayload, mandatePayload, statusPayload] = await Promise.all([
       api.tickers(),
       api.models(),
+      api.modelLibrary(),
       api.mandates(),
       api.dataStatus(),
     ]);
     setTickers(tickerPayload.tickers);
     setModels(modelPayload.models);
+    setModelLibrary(libraryPayload.templates);
     setMandates(mandatePayload.mandates);
     setDataStatus(statusPayload);
     setLiveAvailable(tickerPayload.live_available);
@@ -108,6 +112,19 @@ export default function App() {
     }
   };
 
+  const onImportTemplate = async (slug: string) => {
+    try {
+      const result = await api.importModelTemplate(slug);
+      setNotice(`Imported ${result.name} with ${result.n_holdings} governed holdings.`);
+      await Promise.all([refreshLists(), refreshCommand()]);
+      selectModelOnly(result.id);
+      setActiveView("clinic");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Model template import failed.");
+      throw error;
+    }
+  };
+
   const onFetchLive = async (symbol: string) => {
     try {
       const result = await api.fetchLive(symbol);
@@ -161,7 +178,15 @@ export default function App() {
       );
     }
     if (activeView === "models") {
-      return <Models models={models} onOpenModel={openModel} onOpenClinic={(id) => { selectModelOnly(id); setActiveView("clinic"); }} />;
+      return (
+        <Models
+          models={models}
+          templates={modelLibrary}
+          onImportTemplate={onImportTemplate}
+          onOpenModel={openModel}
+          onOpenClinic={(id) => { selectModelOnly(id); setActiveView("clinic"); }}
+        />
+      );
     }
     if (activeView === "opportunities") {
       return (

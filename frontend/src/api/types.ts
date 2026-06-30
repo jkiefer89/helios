@@ -62,6 +62,49 @@ export interface ModelSummary {
   coverage_state?: "real" | "mixed" | "blocked" | "empty" | string;
 }
 
+export interface ModelTemplate {
+  slug: string;
+  model_id: string;
+  name: string;
+  category: string;
+  mandate: string;
+  benchmark: string;
+  thesis: string;
+  template_only: boolean;
+  holdings: Array<{ ticker: string; weight: number }>;
+  rebalance_rules: {
+    frequency: string;
+    drift_band_pct: number;
+    review_trigger: string;
+  };
+  risk_limits: {
+    max_single_position_pct: number;
+    max_theme_position_pct: number;
+    max_etf_position_pct: number;
+    min_holdings: number;
+  };
+  provenance: {
+    source_type: string;
+    version: string;
+    basis: string;
+    caveat: string;
+  };
+}
+
+export interface ModelTemplateImportResponse {
+  id: string;
+  name: string;
+  mandate: string;
+  n_holdings: number;
+  coverage_state: string;
+  missing_tickers: string[];
+  template_only: boolean;
+  benchmark: string;
+  rebalance_rules: ModelTemplate["rebalance_rules"];
+  risk_limits: ModelTemplate["risk_limits"];
+  provenance: ModelTemplate["provenance"];
+}
+
 export interface RefreshLogEntry {
   symbol: string;
   attempted_at: string;
