@@ -4,7 +4,7 @@ import type { ClinicResponse, ModelSummary } from "../api/types";
 import { AICopilotPanel, clinicCopilotActions } from "../components/ai/AICopilotPanel";
 import { DataQualityBanner } from "../components/badges/DataModeBadge";
 import { Panel, StatTile } from "../components/cards/Panel";
-import { MiniBars } from "../components/charts/Charts";
+import { DonutChart, MiniBars } from "../components/charts/Charts";
 import { EmptyState } from "../components/empty-states/EmptyState";
 import { TerminalSelect } from "../components/forms/TerminalSelect";
 import { fmtAuto, fmtNumber, fmtPct, titleCase } from "../utils/format";
@@ -120,7 +120,14 @@ export function PortfolioClinic({
           </section>
           <section className="dashboard-grid">
             <Panel title="Risk Contribution">
-              <MiniBars rows={payload.risk_contributions.slice(0, 10).map((item) => ({ label: item.ticker, value: item.mrc_pct, tone: "negative" }))} />
+              <div className="clinic-risk-chart">
+                <DonutChart
+                  segments={payload.risk_contributions.slice(0, 8).map((item) => ({ label: item.ticker, value: item.mrc_pct, tone: item.mrc_pct > 18 ? "negative" : "warning" }))}
+                  centerLabel="Risk share"
+                  centerValue={`${fmtNumber(payload.risk_contributions.slice(0, 8).reduce((sum, item) => sum + item.mrc_pct, 0), 1)}%`}
+                />
+                <MiniBars rows={payload.risk_contributions.slice(0, 10).map((item) => ({ label: item.ticker, value: item.mrc_pct, tone: "negative" }))} />
+              </div>
             </Panel>
             <Panel title="Before / After Estimates">
               <div className="comparison-grid">

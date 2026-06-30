@@ -1,10 +1,28 @@
 import { fmtNumber } from "../../utils/format";
 
 type ChartTone = "positive" | "negative" | "warning" | "info" | "neutral";
+type ChartPoint = { label: string; x: number; y: number; size?: number; tone?: string; meta?: string };
+type ChartSegment = { label: string; value: number; tone?: string };
+
+const TONE_COLORS: Record<ChartTone, string> = {
+  positive: "#47d66f",
+  negative: "#ff5c67",
+  warning: "#f4c542",
+  info: "#4c9dff",
+  neutral: "#9aa8ba",
+};
 
 function safeTone(tone?: string): ChartTone {
   if (tone === "positive" || tone === "negative" || tone === "warning" || tone === "info" || tone === "neutral") return tone;
   return "neutral";
+}
+
+function finiteNumber(value: unknown, fallback = 0): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function clamp(value: number, min = 0, max = 100): number {
+  return Math.max(min, Math.min(max, value));
 }
 
 export function ScoreBar({ value, tone = "positive" }: { value?: number; tone?: string }) {
@@ -33,6 +51,166 @@ export function MiniBars({ rows }: { rows: Array<{ label: string; value: number;
           </div>
         );
       })}
+    </div>
+  );
+}
+
+export function ChartSummary({ items }: { items: Array<{ label: string; value: string; tone?: string }> }) {
+  if (!items.length) return null;
+  return (
+    <div className="chart-summary" aria-label="Chart summary">
+      {items.map((item) => (
+        <span key={item.label} className={`tone-${safeTone(item.tone || "neutral")}`}>
+          <b>{item.value}</b>
+          <small>{item.label}</small>
+        </span>
+      ))}
+    </div>
+  );
+}
+
+export function HistogramChart({
+  values,
+  label = "Value",
+  buckets = 8,
+  tone = "info",
+  min,
+  max,
+}: {
+  values: Array<number | null | undefined>;
+  label?: string;
+  buckets?: number;
+  tone?: string;
+  min?: number;
+  max?: number;
+}) {
+  const clean = values.filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  if (clean.length < 2) return <div className="chart-empty">Histogram appears when enough real-data points are available.</div>;
+  const bucketCount = Math.max(3, Math.min(12, Math.round(buckets)));
+  const floor = typeof min === "number" ? min : Math.min(...clean);
+  const ceiling = typeof max === "number" ? max : Math.max(...clean);
+  const span = ceiling - floor || 1;
+  const counts = Array.from({ length: bucketCount }, () => 0);
+  clean.forEach((value) => {
+    const rawIndex = Math.floor(((value - floor) / span) * bucketCount);
+    counts[clamp(rawIndex, 0, bucketCount - 1)] += 1;
+  });
+  const high = Math.max(...counts, 1);
+  const toneClass = safeTone(tone);
+  return (
+    <div className="histogram-chart" role="img" aria-label={`${label} distribution histogram`}>
+      <div className="histogram-chart__bars" style={{ gridTemplateColumns: `repeat(${bucketCount}, minmax(0, 1fr))` }}>
+        {counts.map((count, index) => {
+          const bucketStart = floor + (span / bucketCount) * index;
+          const bucketEnd = floor + (span / bucketCount) * (index + 1);
+          return (
+            <span
+              key={`${bucketStart}-${bucketEnd}`}
+              className={`tone-${toneClass}`}
+              style={{ height: `${Math.max(4, (count / high) * 100)}%` }}
+              title={`${fmtNumber(bucketStart, 1)} to ${fmtNumber(bucketEnd, 1)}: ${count}`}
+            >
+              <b>{count}</b>
+            </span>
+          );
+        })}
+      </div>
+      <div className="histogram-chart__axis">
+        <span>{fmtNumber(floor, 1)}</span>
+        <b>{label}</b>
+        <span>{fmtNumber(ceiling, 1)}</span>
+      </div>
+    </div>
+  );
+}
+
+export function ScoreScatter({
+  points,
+  xLabel = "Risk score",
+  yLabel = "Opportunity score",
+  height = 220,
+}: {
+  points: ChartPoint[];
+  xLabel?: string;
+  yLabel?: string;
+  height?: number;
+}) {
+  const clean = points.filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
+  if (!clean.length) return <div className="chart-empty">Score map appears when real ranked candidates are available.</div>;
+  const width = 520;
+  const pad = 34;
+  const toX = (value: number) => pad + (clamp(value) / 100) * (width - pad * 2);
+  const toY = (value: number) => pad + (1 - clamp(value) / 100) * (height - pad * 2);
+  return (
+    <div className="score-scatter">
+      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${yLabel} by ${xLabel}`} style={{ height }}>
+        <g className="grid-lines">
+          {[25, 50, 75].map((value) => (
+            <g key={value}>
+              <line x1={toX(value)} x2={toX(value)} y1={pad} y2={height - pad} />
+              <line x1={pad} x2={width - pad} y1={toY(value)} y2={toY(value)} />
+            </g>
+          ))}
+        </g>
+        <line className="chart-axis-line" x1={pad} x2={width - pad} y1={height - pad} y2={height - pad} />
+        <line className="chart-axis-line" x1={pad} x2={pad} y1={pad} y2={height - pad} />
+        <text className="chart-axis-label" x={width / 2} y={height - 8}>{xLabel}</text>
+        <text className="chart-axis-label" x={12} y={height / 2} transform={`rotate(-90 12 ${height / 2})`}>{yLabel}</text>
+        {clean.map((point) => {
+          const toneClass = safeTone(point.tone || (point.y >= 70 ? "positive" : point.y >= 50 ? "warning" : "neutral"));
+          const radius = clamp(finiteNumber(point.size, 7), 4, 11);
+          return (
+            <g key={`${point.label}-${point.x}-${point.y}`}>
+              <circle
+                className={`score-scatter__dot tone-${toneClass}`}
+                cx={toX(point.x)}
+                cy={toY(point.y)}
+                r={radius}
+              >
+                <title>{`${point.label}: ${yLabel} ${fmtNumber(point.y, 1)}, ${xLabel} ${fmtNumber(point.x, 1)}${point.meta ? `, ${point.meta}` : ""}`}</title>
+              </circle>
+              {radius >= 8 && <text className="score-scatter__label" x={toX(point.x) + radius + 3} y={toY(point.y) + 3}>{point.label}</text>}
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
+export function DonutChart({
+  segments,
+  centerLabel = "Total",
+  centerValue,
+}: {
+  segments: ChartSegment[];
+  centerLabel?: string;
+  centerValue?: string;
+}) {
+  const clean = segments.filter((segment) => Number.isFinite(segment.value) && segment.value > 0);
+  if (!clean.length) return <div className="chart-empty">Donut chart appears when weighted rows are available.</div>;
+  const total = clean.reduce((sum, segment) => sum + segment.value, 0) || 1;
+  let cursor = 0;
+  const gradient = clean.map((segment) => {
+    const start = cursor;
+    cursor += (segment.value / total) * 100;
+    const color = TONE_COLORS[safeTone(segment.tone || "info")];
+    return `${color} ${start.toFixed(2)}% ${cursor.toFixed(2)}%`;
+  }).join(", ");
+  return (
+    <div className="donut-chart">
+      <div className="donut-chart__ring" style={{ background: `conic-gradient(${gradient})` }}>
+        <span><b>{centerValue || fmtNumber(total, 1)}</b><small>{centerLabel}</small></span>
+      </div>
+      <div className="donut-chart__legend">
+        {clean.slice(0, 8).map((segment) => (
+          <span key={segment.label} className={`tone-${safeTone(segment.tone || "info")}`}>
+            <i />
+            <b>{segment.label}</b>
+            <small>{fmtNumber(segment.value, 1)}</small>
+          </span>
+        ))}
+      </div>
     </div>
   );
 }
@@ -75,10 +253,15 @@ export function LineChart({
   };
   return (
     <div className="line-chart">
+      <div className="line-chart__scale" aria-hidden="true">
+        <span>{fmtNumber(max, 2)}</span>
+        <span>{fmtNumber(min, 2)}</span>
+      </div>
       <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Historical line chart" style={{ height }}>
         <g className="grid-lines">
           {[0.25, 0.5, 0.75].map((pct) => <line key={pct} x1="0" x2={width} y1={height * pct} y2={height * pct} />)}
         </g>
+        <line className="chart-axis-line" x1={pad} x2={width - pad} y1={height - pad} y2={height - pad} />
         {series.flatMap((item) => {
           const toneClass = safeTone(item.tone || "info");
           return segmentsFor(item.values).map((segment, index) => (

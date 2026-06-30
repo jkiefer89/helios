@@ -20,6 +20,21 @@ def test_react_frontend_scaffold_exists():
     assert (ROOT / "frontend" / "src" / "api" / "client.ts").is_file()
 
 
+def test_react_terminal_exposes_richer_chart_components():
+    chart_source = (ROOT / "frontend" / "src" / "components" / "charts" / "Charts.tsx").read_text()
+    opportunity_source = (ROOT / "frontend" / "src" / "views" / "OpportunityRadar.tsx").read_text()
+    clinic_source = (ROOT / "frontend" / "src" / "views" / "PortfolioClinic.tsx").read_text()
+    strategy_source = (ROOT / "frontend" / "src" / "views" / "StrategyLab.tsx").read_text()
+
+    assert "export function ScoreScatter" in chart_source
+    assert "export function HistogramChart" in chart_source
+    assert "export function DonutChart" in chart_source
+    assert "ScoreScatter" in opportunity_source
+    assert "HistogramChart" in opportunity_source
+    assert "DonutChart" in clinic_source
+    assert "ChartSummary" in strategy_source
+
+
 def test_flask_serves_react_build_when_present(tmp_path, monkeypatch):
     dist = tmp_path / "dist"
     assets = dist / "assets"

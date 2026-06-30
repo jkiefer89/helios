@@ -3,7 +3,7 @@ import { api } from "../api/client";
 import type { AnalysisResponse, DataMode, ModelSummary, ProvenancePayload, TickerSummary } from "../api/types";
 import { DataQualityBanner, SourcePill } from "../components/badges/DataModeBadge";
 import { Panel, StatTile } from "../components/cards/Panel";
-import { LineChart } from "../components/charts/Charts";
+import { HistogramChart, LineChart } from "../components/charts/Charts";
 import { EmptyState } from "../components/empty-states/EmptyState";
 import { TerminalSelect } from "../components/forms/TerminalSelect";
 import { fmtAuto, fmtNumber, fmtPct, titleCase } from "../utils/format";
@@ -90,6 +90,8 @@ function AnalysisPayload({ payload }: { payload: AnalysisResponse }) {
   const actionClass = eligible ? safeAction(payload.signal.action) : "preview";
   const signalLabel = eligible ? payload.signal.action : "PREVIEW";
   const panelSuffix = eligible ? "" : " preview";
+  const dailyReturns = pctReturns(payload.series.close);
+  const drawdown = drawdownSeries(payload.series.close);
   return (
     <>
       <DataQualityBanner payload={quality} />
@@ -117,13 +119,21 @@ function AnalysisPayload({ payload }: { payload: AnalysisResponse }) {
           <KeyObject data={payload.backtest} />
         </Panel>
       </section>
-      <Panel title={`Price and Trend${panelSuffix}`}>
-        <LineChart labels={payload.series.dates} series={[
-          { label: "Close", values: payload.series.close, tone: "info" },
-          { label: "SMA 50", values: payload.series.sma50 || [], tone: "positive" },
-          { label: "SMA 200", values: payload.series.sma200 || [], tone: "warning" },
-        ]} />
-      </Panel>
+      <section className="dashboard-grid">
+        <Panel title={`Price and Trend${panelSuffix}`} className="span-2">
+          <LineChart labels={payload.series.dates} series={[
+            { label: "Close", values: payload.series.close, tone: "info" },
+            { label: "SMA 50", values: payload.series.sma50 || [], tone: "positive" },
+            { label: "SMA 200", values: payload.series.sma200 || [], tone: "warning" },
+          ]} />
+        </Panel>
+        <Panel title={`Drawdown${panelSuffix}`}>
+          <LineChart labels={payload.series.dates} series={[{ label: "Drawdown", values: drawdown, tone: "negative" }]} height={150} />
+        </Panel>
+        <Panel title={`Daily Return Distribution${panelSuffix}`}>
+          <HistogramChart values={dailyReturns} label="Daily return %" buckets={9} tone={eligible ? "info" : "warning"} />
+        </Panel>
+      </section>
       {payload.holdings && (
         <Panel title={`Holdings${panelSuffix}`}>
           <div className="holdings-table">
@@ -201,4 +211,21 @@ function displayValue(value: unknown): string {
   if (Array.isArray(value)) return `${value.length} items`;
   if (value && typeof value === "object") return "Details";
   return fmtAuto(value);
+}
+
+function pctReturns(values: Array<number | null>): Array<number | null> {
+  return values.map((value, index) => {
+    const previous = values[index - 1];
+    if (typeof value !== "number" || typeof previous !== "number" || !Number.isFinite(value) || !Number.isFinite(previous) || previous === 0) return null;
+    return ((value / previous) - 1) * 100;
+  });
+}
+
+function drawdownSeries(values: Array<number | null>): Array<number | null> {
+  let peak = 0;
+  return values.map((value) => {
+    if (typeof value !== "number" || !Number.isFinite(value)) return null;
+    peak = Math.max(peak || value, value);
+    return peak > 0 ? ((value / peak) - 1) * 100 : 0;
+  });
 }

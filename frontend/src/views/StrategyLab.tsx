@@ -4,7 +4,7 @@ import type { ModelSummary, StrategyResponse, TickerSummary } from "../api/types
 import { AICopilotPanel, strategyCopilotActions } from "../components/ai/AICopilotPanel";
 import { DataQualityBanner } from "../components/badges/DataModeBadge";
 import { Panel, StatTile } from "../components/cards/Panel";
-import { LineChart } from "../components/charts/Charts";
+import { ChartSummary, LineChart } from "../components/charts/Charts";
 import { EmptyState } from "../components/empty-states/EmptyState";
 import { TerminalSelect } from "../components/forms/TerminalSelect";
 import { fmtAuto, fmtNumber, fmtPct, fmtTimestamp, titleCase } from "../utils/format";
@@ -137,6 +137,12 @@ export function StrategyLab({
             </Panel>
           </section>
           <Panel title="Equity Curve" meta="strategy vs benchmark">
+            <ChartSummary items={[
+              { label: "Strategy return", value: fmtPct(payload.strategy?.total_return_pct), tone: (payload.strategy?.total_return_pct || 0) >= 0 ? "positive" : "negative" },
+              { label: "Benchmark return", value: fmtPct(payload.benchmark?.total_return_pct), tone: (payload.benchmark?.total_return_pct || 0) >= 0 ? "positive" : "negative" },
+              { label: "Strategy max drawdown", value: fmtPct(payload.strategy?.max_drawdown_pct), tone: "negative" },
+              { label: "Exposure", value: fmtPct(Number(payload.trade_stats?.exposure_pct)), tone: "info" },
+            ]} />
             <LineChart labels={payload.dates || []} series={[
               { label: "Signal strategy", values: payload.strategy_curve || [], tone: "positive" },
               { label: "Buy-and-hold", values: payload.benchmark_curve || [], tone: "neutral" },

@@ -4,7 +4,7 @@ import type { OpportunitiesResponse, OpportunityItem } from "../api/types";
 import { AICopilotPanel, opportunityCopilotActions } from "../components/ai/AICopilotPanel";
 import { DataQualityBanner, SourcePill } from "../components/badges/DataModeBadge";
 import { Panel } from "../components/cards/Panel";
-import { ScoreBar } from "../components/charts/Charts";
+import { HistogramChart, ScoreBar, ScoreScatter } from "../components/charts/Charts";
 import { EmptyState } from "../components/empty-states/EmptyState";
 import { TerminalSelect } from "../components/forms/TerminalSelect";
 import { fmtNumber, fmtPct } from "../utils/format";
@@ -54,6 +54,15 @@ export function OpportunityRadar({
     const direction = sort === "risk_score" ? -1 : 1;
     return direction * ((b[sort] || 0) - (a[sort] || 0));
   }), [payload, sort]);
+  const scorePoints = useMemo(() => items.map((item) => ({
+    label: item.symbol,
+    x: item.risk_score,
+    y: item.opportunity_score,
+    size: Math.max(5, Math.min(11, item.evidence_score / 10)),
+    tone: safeActionTone(item.action),
+    meta: `${fmtNumber(item.evidence_score, 1)} evidence`,
+  })), [items]);
+  const opportunityScores = useMemo(() => items.map((item) => item.opportunity_score), [items]);
   const selected = items.find((item) => item.id === selectedId) || items[0];
   const lockedRows = buildLockedOpportunityRows(payload);
   const copilotPayload = useMemo<Record<string, unknown> | null>(() => {
@@ -110,6 +119,16 @@ export function OpportunityRadar({
         </form>
       </header>
       {error && <div className="notice danger">{error}</div>}
+      {items.length > 0 && (
+        <section className="dashboard-grid">
+          <Panel title="Opportunity Score Map" meta="return/risk review">
+            <ScoreScatter points={scorePoints} xLabel="Risk score" yLabel="Opportunity score" />
+          </Panel>
+          <Panel title="Opportunity Distribution" meta={`${items.length} ranked`}>
+            <HistogramChart values={opportunityScores} label="Opportunity score" min={0} max={100} buckets={10} tone="positive" />
+          </Panel>
+        </section>
+      )}
       <section className="radar-layout">
         <Panel title="Ranked Candidates" meta={`${items.length} shown${payload?.total_candidates ? ` · ${payload.total_candidates} screened` : ""}`}>
           {items.length === 0 ? (
