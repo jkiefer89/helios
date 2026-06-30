@@ -255,7 +255,8 @@ def model_lookthrough(model, client=None, budget: int = _RESOLVE_BUDGET) -> dict
                 contrib = w * ((p["weight_pct"] or 0.0) / 100.0)
                 if contrib <= 0:
                     continue
-                _accumulate(combined, p["name"], p["ticker"], p["asset_class"], contrib)
+                _accumulate(combined, p["name"], p["ticker"], p["asset_class"], contrib,
+                            cusip=p.get("cusip", ""))
                 by_class[p["asset_class"]] = by_class.get(p["asset_class"], 0.0) + contrib
             state = "looked_through"
         elif lt.kind == "stock" and lt.resolved:
@@ -278,7 +279,7 @@ def model_lookthrough(model, client=None, budget: int = _RESOLVE_BUDGET) -> dict
     underlying = sorted(combined.values(), key=lambda d: d["weight_pct"], reverse=True)
     hhi = sum((d["weight_pct"] / 100.0) ** 2 for d in underlying)
     underlyings_full = [
-        {"name": d["name"], "ticker": d["ticker"],
+        {"name": d["name"], "ticker": d["ticker"], "cusip": d.get("cusip", ""),
          "weight_pct": round(d["weight_pct"], 4), "asset_class": d["asset_class"]}
         for d in underlying[:300]   # bound JSON/CMA work; covers the material weight
     ]
@@ -306,16 +307,20 @@ def model_lookthrough(model, client=None, budget: int = _RESOLVE_BUDGET) -> dict
     }
 
 
-def _accumulate(combined: dict, name: str, ticker: str, asset_class: str, contrib_frac: float) -> None:
-    key = (ticker or name or "").upper() or name
+def _accumulate(combined: dict, name: str, ticker: str, asset_class: str, contrib_frac: float,
+                cusip: str = "") -> None:
+    key = (ticker or cusip or name or "").upper() or name
     slot = combined.get(key)
     add = contrib_frac * 100.0
     if slot is None:
-        combined[key] = {"name": name, "ticker": ticker, "asset_class": asset_class, "weight_pct": add}
+        combined[key] = {"name": name, "ticker": ticker, "cusip": cusip,
+                         "asset_class": asset_class, "weight_pct": add}
     else:
         slot["weight_pct"] += add
         if not slot["ticker"] and ticker:
             slot["ticker"] = ticker
+        if not slot.get("cusip") and cusip:
+            slot["cusip"] = cusip
 
 
 def _date_range(dates: list[str]) -> dict:

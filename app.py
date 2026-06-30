@@ -62,7 +62,7 @@ def _load_local_env_file(path: Path | None = None) -> dict:
 _LOCAL_ENV_STATUS = _load_local_env_file()
 
 from engine import (
-    ai_copilot, backtest, cma, data, forecast, fundamentals, holdings, indicators, insights, mandate,
+    ai_copilot, backtest, cma, data, forecast, figi, fundamentals, holdings, indicators, insights, mandate,
     opportunity, portfolio, portfolio_clinic, persistence, provenance, regime, reporting, sentiment,
     signals, strategy,
 )
@@ -1261,19 +1261,28 @@ _FORWARD_FUNDAMENTALS_BUDGET = 60
 
 
 def _fundamentals_map_for(underlyings: list) -> dict:
-    """Fetch fundamentals for the heaviest equity underlyings (bounded, offline-
-    safe). Non-equity sleeves need none — the CMA anchors them by asset class."""
+    """Resolve CUSIP-only N-PORT holdings to tickers (OpenFIGI) and fetch
+    fundamentals for the heaviest equity sleeves. N-PORT usually omits tickers,
+    so without the CUSIP bridge most underlyings fall back to the generic anchor.
+    Mutates each resolved underlying's ticker in place so the CMA can match it;
+    bounded by the fundamentals budget and offline-safe."""
+    equity = [u for u in underlyings if (u.get("asset_class") or "").lower().startswith("equity")]
+    equity.sort(key=lambda u: u.get("weight_pct", 0.0), reverse=True)
+    top = equity[:_FORWARD_FUNDAMENTALS_BUDGET]
+
+    need = [(u.get("cusip") or "").upper() for u in top
+            if not (u.get("ticker") or "").strip() and u.get("cusip")]
+    cusip_to_ticker = figi.map_cusips(need) if need else {}
+
     fmap: dict = {}
-    fetched = 0
-    for u in underlyings:
-        if fetched >= _FORWARD_FUNDAMENTALS_BUDGET:
-            break
+    for u in top:
         ticker = (u.get("ticker") or "").upper()
-        asset_class = (u.get("asset_class") or "").lower()
-        if not ticker or not asset_class.startswith("equity"):
-            continue
-        fmap[ticker] = fundamentals.fetch(ticker)
-        fetched += 1
+        if not ticker:
+            ticker = cusip_to_ticker.get((u.get("cusip") or "").upper(), "")
+            if ticker:
+                u["ticker"] = ticker  # so cma.aggregate can join the fundamentals
+        if ticker and ticker not in fmap:
+            fmap[ticker] = fundamentals.fetch(ticker)
     return fmap
 
 

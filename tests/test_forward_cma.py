@@ -8,7 +8,7 @@ import json
 import pytest
 
 import app as helios
-from engine import cma, edgar, fundamentals, holdings, macro, mandate, portfolio
+from engine import cma, edgar, figi, fundamentals, holdings, macro, mandate, portfolio
 
 
 # --------------------------------------------------------------------------- #
@@ -170,9 +170,55 @@ def _fake_fund_provider(t):
 def _inject_providers():
     holdings.set_default_client(_fake_edgar())
     fundamentals.set_default_provider(_fake_fund_provider)
+    figi.set_default_post(None)  # clear figi cache between tests
     yield
     holdings.set_default_client(None)
     fundamentals.set_default_provider(None)
+    figi.set_default_post(None)
+
+
+def _nport_cusip(rows):
+    body = "".join(f"<invstOrSec><name>{n}</name><cusip>{c}</cusip><identifiers></identifiers>"
+                   f"<pctVal>{p}</pctVal><assetCat>EC</assetCat></invstOrSec>" for n, c, p in rows)
+    return ('<?xml version="1.0"?><edgarSubmission xmlns="http://www.sec.gov/edgar/nport"><formData>'
+            "<genInfo><repPdDate>2099-01-01</repPdDate></genInfo>"
+            f"<invstOrSecs>{body}</invstOrSecs></formData></edgarSubmission>")
+
+
+_CUS_CIK = 556222
+
+
+def _fake_edgar_cusip():
+    mf = {"fields": ["cik", "seriesId", "classId", "symbol"], "data": [[_CUS_CIK, "SX", "CX", "VCUS"]]}
+    subs = {"cik": _CUS_CIK, "name": "Cusip Fund", "formerNames": [],
+            "filings": {"recent": {"accessionNumber": ["0001-25-1"], "form": ["NPORT-P"],
+                                   "primaryDocument": ["primary_doc.xml"], "filingDate": ["2099-02-01"],
+                                   "reportDate": ["2099-01-01"]}}}
+    atom = ('<feed xmlns="http://www.w3.org/2005/Atom"><entry><content>'
+            "<accession-number>0001-25-1</accession-number><filing-type>NPORT-P</filing-type>"
+            "<filing-date>2099-02-01</filing-date></content></entry></feed>")
+    um = {edgar.MF_TICKERS_URL: json.dumps(mf), edgar.STOCK_TICKERS_URL: json.dumps({}),
+          edgar.submissions_url(_CUS_CIK): json.dumps(subs), edgar.browse_series_url("SX"): atom,
+          edgar.archives_doc_url(_CUS_CIK, "0001-25-1", "primary_doc.xml"):
+              _nport_cusip([("NVIDIA", "67066G104", "100.0")])}
+    return edgar.EdgarClient(http_get=lambda u, h: um[u] if u in um else _raise(u))
+
+
+def test_figi_map_cusips_injected_and_cached():
+    figi.set_default_post(None)
+    calls = {"n": 0}
+
+    def fake_post(url, headers, body):
+        calls["n"] += 1
+        jobs = json.loads(body.decode())
+        m = {"67066G104": "NVDA", "037833100": "AAPL"}
+        return [{"data": [{"ticker": m.get(j["idValue"], "")}]} for j in jobs]
+
+    out = figi.map_cusips(["67066G104", "037833100"], http_post=fake_post)
+    assert out == {"67066G104": "NVDA", "037833100": "AAPL"} and calls["n"] == 1
+    assert figi.map_cusips(["67066G104"], http_post=fake_post) == {"67066G104": "NVDA"}  # cached
+    assert calls["n"] == 1
+    figi.set_default_post(None)
 
 
 @pytest.fixture()
@@ -196,3 +242,19 @@ def test_endpoint_model_forward(client):
 
 def test_endpoint_model_forward_unknown(client):
     assert client.get("/api/model/forward?id=NOPE").status_code == 404
+
+
+def test_forward_enriches_cusip_only_holdings_via_figi(client):
+    # N-PORT usually omits tickers; the CUSIP->ticker bridge is what gives the CMA
+    # real coverage instead of falling back to the generic anchor.
+    holdings.set_default_client(_fake_edgar_cusip())
+    figi.set_default_post(lambda url, headers, body:
+                          [{"data": [{"ticker": "NVDA"}]} if j["idValue"] == "67066G104" else {"data": []}
+                           for j in json.loads(body.decode())])
+    fundamentals.set_default_provider(lambda t: {"NVDA": {"dividend_yield": 0.0, "forward_pe": 40.0,
+                                                          "earnings_growth": 0.25, "sector": "Technology"}}.get(t.upper(), {}))
+    portfolio.register(portfolio.Model(id="MCUS", name="Cusip Model", mandate_key="balanced",
+                                       mandate_context="", holdings=[portfolio.Holding("VCUS", 1.0)]))
+    fr = client.get("/api/model/forward?id=MCUS").get_json()["forward_return"]
+    assert fr["coverage_pct"] == 100.0 and fr["n_usable"] == 1
+    assert any(c["ticker"] == "NVDA" and c["basis"] == "fundamentals" for c in fr["top_contributions"])
