@@ -612,6 +612,44 @@ export interface EvidenceConfidenceBand {
   ci90_high?: number | null;
 }
 
+export interface EvidenceProspectiveEntry {
+  id?: number | null;
+  created_at?: string | null;
+  target_kind?: string | null;
+  target_id?: string | null;
+  target_name?: string | null;
+  benchmark?: string | null;
+  input_start_date?: string | null;
+  input_end_date?: string | null;
+  input_rows?: number | null;
+  horizon_days?: number | null;
+  score?: number | null;
+  action_label?: string | null;
+  forward_status?: string | null;
+  forward_end_date?: string | null;
+  forward_result_pct?: number | null;
+  benchmark_result_pct?: number | null;
+  alpha_pct?: number | null;
+  paper_hit?: boolean | null;
+}
+
+export interface EvidenceProspectiveValidation {
+  status: string;
+  basis: string;
+  total_count: number;
+  measured_count: number;
+  pending_count: number;
+  hit_count: number;
+  hit_rate_pct?: number | null;
+  avg_score?: number | null;
+  avg_forward_result_pct?: number | null;
+  avg_benchmark_result_pct?: number | null;
+  avg_alpha_pct?: number | null;
+  benchmark_comparison: SignalJournalBenchmarkComparison[];
+  latest_entries: EvidenceProspectiveEntry[];
+  caveat: string;
+}
+
 export interface EvidenceLabResponse extends ProvenancePayload {
   target: { kind: "instrument" | "model" | string; id: string; name: string; mandate?: string; source?: string };
   benchmark: { symbol: string; status: string };
@@ -647,6 +685,7 @@ export interface EvidenceLabResponse extends ProvenancePayload {
     confidence_bands: EvidenceConfidenceBand;
   }>;
   windows: EvidenceLabWindow[];
+  prospective_validation: EvidenceProspectiveValidation;
   evidence_unavailable?: boolean;
   missing_tickers?: string[];
   methodology: Record<string, unknown>;

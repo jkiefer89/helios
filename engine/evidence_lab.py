@@ -163,18 +163,20 @@ def analyze_series(
         },
         "regime_sensitivity": _regime_sensitivity(base_windows),
         "decay": decay,
+        "prospective_validation": _prospective_validation(target),
         "windows": base_windows,
         "warnings": _dedupe(out_warnings),
         "methodology": {
             "analysis_only": True,
             "paper_tracking_only": True,
             "no_lookahead": True,
+            "evidence_layers": "Historical walk-forward windows plus prospective Signal Journal measurements when available.",
             "signal_basis": "Existing causal Helios historical signal: trend and momentum only.",
             "forward_measurement": "Signal is frozen at the close; forward return is measured over later sessions.",
             "alpha_basis": f"Forward return minus {benchmark_symbol} return when benchmark history is available.",
             "confidence_bands": "Percentiles and normal-approximation 90% mean confidence interval over measured walk-forward windows.",
         },
-        "disclaimer": "Analysis only. Walk-forward evidence is historical paper evidence, not a guarantee of future returns.",
+        "disclaimer": "Analysis only. Evidence Lab combines historical walk-forward paper evidence with prospective Signal Journal tracking when available; it does not execute trades or guarantee outcomes.",
     }
 
 
@@ -215,11 +217,108 @@ def _blocked_payload(
         "confidence_bands": {"forward_result_pct": {}, "alpha_pct": {}, "hit_rate_pct": {}},
         "regime_sensitivity": [],
         "decay": [],
+        "prospective_validation": _empty_prospective_validation("blocked", "Prospective tracking waits for eligible real-data evidence."),
         "windows": [],
         "warnings": _dedupe(list(warnings or []) + [reason]),
         "methodology": {"analysis_only": True, "paper_tracking_only": True, "no_lookahead": True},
         "disclaimer": "Analysis only. Walk-forward evidence requires eligible real price history.",
     }
+
+
+def _prospective_validation(target: dict[str, Any]) -> dict[str, Any]:
+    target_kind = str(target.get("kind") or "")
+    target_id = str(target.get("id") or "")
+    if not target_kind or not target_id:
+        return _empty_prospective_validation("not_started", "No target is selected for prospective tracking.")
+    try:
+        entries = [
+            entry for entry in signal_journal.list_entries(limit=500)
+            if str(entry.get("target_kind") or "") == target_kind and str(entry.get("target_id") or "") == target_id
+        ]
+    except Exception as exc:
+        return _empty_prospective_validation("unavailable", f"Signal Journal unavailable: {exc}")
+    if not entries:
+        return _empty_prospective_validation(
+            "not_started",
+            "Run deterministic analysis over time to create prospective Signal Journal evidence for this target.",
+        )
+
+    measured = [entry for entry in entries if entry.get("forward_status") == "measured"]
+    pending = [entry for entry in entries if entry.get("forward_status") != "measured"]
+    hit_flags = [_journal_hit(entry) for entry in measured]
+    hit_flags = [flag for flag in hit_flags if flag is not None]
+    status = "active"
+    if measured and not pending:
+        status = "measured"
+    elif pending and not measured:
+        status = "measuring"
+    ordered = sorted(entries, key=lambda entry: (str(entry.get("input_end_date") or ""), str(entry.get("created_at") or "")), reverse=True)
+    return {
+        "status": status,
+        "basis": "Same-target prospective Signal Journal entries. Measured rows resolve only after later local/live history covers the original horizon.",
+        "total_count": len(entries),
+        "measured_count": len(measured),
+        "pending_count": len(pending),
+        "hit_count": sum(1 for flag in hit_flags if flag),
+        "hit_rate_pct": _pct(sum(1 for flag in hit_flags if flag), len(hit_flags)),
+        "avg_score": _avg(entry.get("score") for entry in entries),
+        "avg_forward_result_pct": _avg(entry.get("forward_result_pct") for entry in measured),
+        "avg_benchmark_result_pct": _avg(entry.get("benchmark_result_pct") for entry in measured),
+        "avg_alpha_pct": _avg(entry.get("alpha_pct") for entry in measured),
+        "benchmark_comparison": signal_journal.benchmark_comparison(entries),
+        "latest_entries": [_compact_journal_entry(entry) for entry in ordered[:10]],
+        "caveat": "Prospective paper tracking only; no orders, brokerage execution, return guarantee, or investment advice.",
+    }
+
+
+def _empty_prospective_validation(status: str, basis: str) -> dict[str, Any]:
+    return {
+        "status": status,
+        "basis": basis,
+        "total_count": 0,
+        "measured_count": 0,
+        "pending_count": 0,
+        "hit_count": 0,
+        "hit_rate_pct": None,
+        "avg_score": None,
+        "avg_forward_result_pct": None,
+        "avg_benchmark_result_pct": None,
+        "avg_alpha_pct": None,
+        "benchmark_comparison": [],
+        "latest_entries": [],
+        "caveat": "Prospective paper tracking only; no orders, brokerage execution, return guarantee, or investment advice.",
+    }
+
+
+def _compact_journal_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": entry.get("id"),
+        "created_at": entry.get("created_at"),
+        "target_kind": entry.get("target_kind"),
+        "target_id": entry.get("target_id"),
+        "target_name": entry.get("target_name"),
+        "benchmark": entry.get("benchmark"),
+        "input_start_date": entry.get("input_start_date"),
+        "input_end_date": entry.get("input_end_date"),
+        "input_rows": entry.get("input_rows"),
+        "horizon_days": entry.get("horizon_days"),
+        "score": entry.get("score"),
+        "action_label": entry.get("action_label"),
+        "forward_status": entry.get("forward_status"),
+        "forward_end_date": entry.get("forward_end_date"),
+        "forward_result_pct": entry.get("forward_result_pct"),
+        "benchmark_result_pct": entry.get("benchmark_result_pct"),
+        "alpha_pct": entry.get("alpha_pct"),
+        "paper_hit": _journal_hit(entry),
+    }
+
+
+def _journal_hit(entry: dict[str, Any]) -> bool | None:
+    return _paper_hit(
+        str(entry.get("action_label") or "HOLD").upper(),
+        _finite(entry.get("forward_result_pct")),
+        _finite(entry.get("alpha_pct")),
+    )
 
 
 def _walk_windows(

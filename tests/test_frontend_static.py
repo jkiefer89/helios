@@ -197,6 +197,8 @@ def test_evidence_lab_view_is_dedicated_and_routed():
     assert "Regime Sensitivity" in view_source
     assert "Signal Decay" in view_source
     assert "Confidence Bands" in view_source
+    assert "Prospective Validation" in view_source
+    assert "Signal Journal" in view_source
 
 
 def test_flask_serves_react_build_when_present(tmp_path, monkeypatch):

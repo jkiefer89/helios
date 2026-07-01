@@ -3120,6 +3120,11 @@ p {
   grid-template-columns: minmax(120px, 1fr) repeat(5, minmax(84px, 1fr));
 }
 
+.evidence-prospective-table .terminal-table__head,
+.evidence-prospective-table .table-row {
+  grid-template-columns: minmax(145px, 1.1fr) minmax(74px, .6fr) minmax(68px, .55fr) minmax(92px, .7fr) minmax(86px, .65fr) minmax(80px, .65fr) minmax(70px, .55fr);
+}
+
 .risk-cluster-list {
   display: grid;
   gap: 0.55rem;

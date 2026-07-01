@@ -3,7 +3,7 @@ from io import BytesIO
 import pandas as pd
 
 import app as helios
-from engine import data, portfolio
+from engine import data, persistence, portfolio, signal_journal
 from tests.conftest import price_series
 
 
@@ -22,6 +22,14 @@ def _csv_for(symbol: str, daily: float, days: int = 430) -> bytes:
         "Date": series.index.strftime("%Y-%m-%d"),
         "Close": series.values,
     }).to_csv(index=False).encode("utf-8")
+
+
+def _use_db(monkeypatch, tmp_path):
+    monkeypatch.setenv("HELIOS_DB_PATH", str(tmp_path / "helios.db"))
+    persistence.reset_store_for_tests()
+    store = persistence.get_store()
+    assert store.available is True
+    return store
 
 
 def test_walk_forward_evidence_engine_reports_oos_metrics_for_real_model():
@@ -144,3 +152,53 @@ def test_evidence_lab_endpoint_supports_real_instrument_signals():
     assert body["benchmark"]["symbol"] == "SPY"
     assert body["summary"]["window_count"] > 0
     assert body["false_positives"]["rate_pct"] is not None
+
+
+def test_evidence_lab_includes_prospective_signal_journal_evidence(monkeypatch, tmp_path):
+    _use_db(monkeypatch, tmp_path)
+    from engine.evidence_lab import analyze_instrument
+
+    benchmark = price_series(days=120, start=100, daily=0.0005)
+    close = price_series(days=430, start=100, daily=0.0011)
+    _register_upload("SPY", benchmark)
+    _register_upload("PROSPECT", close)
+    inst = data.get("PROSPECT")
+    assert inst is not None
+    signal_journal.record_signal(
+        target_kind="instrument",
+        target_id="PROSPECT",
+        target_name="Prospective Evidence",
+        close=close,
+        input_close=close.iloc[:180],
+        signal={"action": "BUY", "score": 0.62},
+        horizon_days=21,
+        benchmark="SPY",
+        source_counts={"upload": 1},
+        eligible_for_real_research=True,
+        data_mode="real",
+    )
+    signal_journal.record_signal(
+        target_kind="instrument",
+        target_id="PROSPECT",
+        target_name="Prospective Evidence",
+        close=close.iloc[:200],
+        input_close=close.iloc[:200],
+        signal={"action": "HOLD", "score": 0.11},
+        horizon_days=252,
+        benchmark="SPY",
+        source_counts={"upload": 1},
+        eligible_for_real_research=True,
+        data_mode="real",
+    )
+
+    result = analyze_instrument(inst, horizon_days=21, train_window=126, step=21)
+
+    prospective = result["prospective_validation"]
+    assert prospective["status"] in {"active", "measured", "measuring"}
+    assert prospective["total_count"] == 2
+    assert prospective["measured_count"] == 1
+    assert prospective["pending_count"] == 1
+    assert prospective["hit_rate_pct"] is not None
+    assert prospective["latest_entries"][0]["target_id"] == "PROSPECT"
+    assert "raw_price_history" not in prospective["latest_entries"][0]
+    assert "no orders" in prospective["caveat"].lower()

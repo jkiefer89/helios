@@ -159,6 +159,8 @@ export function EvidenceLab({
             <LineChart labels={labels} series={chartSeries} height={230} />
           </Panel>
 
+          <ProspectiveValidationPanel payload={payload} />
+
           <section className="dashboard-grid">
             <Panel title="Signal Decay" meta="horizon comparison">
               {payload.decay.length === 0 ? (
@@ -244,6 +246,43 @@ export function EvidenceLab({
         </>
       )}
     </div>
+  );
+}
+
+function ProspectiveValidationPanel({ payload }: { payload: EvidenceLabResponse }) {
+  const prospective = payload.prospective_validation;
+  return (
+    <Panel title="Prospective Validation" meta={`Signal Journal · ${titleCase(prospective.status)}`}>
+      {prospective.total_count === 0 ? (
+        <EmptyState title="No prospective journal yet" body={prospective.basis} />
+      ) : (
+        <>
+          <div className="metric-grid compact-metrics">
+            <StatTile label="Journal signals" value={fmtNumber(prospective.total_count, 0)} />
+            <StatTile label="Measured" value={fmtNumber(prospective.measured_count, 0)} tone={prospective.measured_count ? "positive" : "warning"} />
+            <StatTile label="Pending" value={fmtNumber(prospective.pending_count, 0)} tone={prospective.pending_count ? "warning" : "positive"} />
+            <StatTile label="Hit rate" value={fmtPct(prospective.hit_rate_pct)} tone={toneForHit(prospective.hit_rate_pct)} />
+            <StatTile label="Avg alpha" value={fmtPct(prospective.avg_alpha_pct)} tone={toneForSigned(prospective.avg_alpha_pct)} />
+          </div>
+          <p className="muted">{prospective.basis}</p>
+          <div className="terminal-table evidence-prospective-table" tabIndex={0} aria-label="Prospective Signal Journal evidence">
+            <div className="terminal-table__head"><span>Input End</span><span>Action</span><span>Score</span><span>Status</span><span>Forward</span><span>Alpha</span><span>Hit</span></div>
+            {prospective.latest_entries.slice(0, 8).map((entry) => (
+              <div className="table-row" key={`${entry.id}-${entry.input_end_date}-${entry.horizon_days}`}>
+                <span>{entry.input_end_date || "Pending"}<small>{fmtNumber(entry.input_rows, 0)} rows · {fmtNumber(entry.horizon_days, 0)}d</small></span>
+                <strong>{entry.action_label || "HOLD"}</strong>
+                <span>{fmtNumber(entry.score, 2)}</span>
+                <span>{titleCase(entry.forward_status || "pending")}</span>
+                <span className={toneClass(entry.forward_result_pct)}>{fmtPct(entry.forward_result_pct)}</span>
+                <span className={toneClass(entry.alpha_pct)}>{fmtPct(entry.alpha_pct)}</span>
+                <span className={entry.paper_hit ? "tone-positive" : entry.paper_hit === false ? "tone-negative" : ""}>{entry.paper_hit == null ? "Pending" : entry.paper_hit ? "Hit" : "Miss"}</span>
+              </div>
+            ))}
+          </div>
+          <p className="report-disclaimer">{prospective.caveat}</p>
+        </>
+      )}
+    </Panel>
   );
 }
 
