@@ -24,7 +24,7 @@ except Exception:  # pragma: no cover - exercised when dependency install is bro
     Fernet = None
     InvalidToken = Exception
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 REAL_SOURCES = {"live", "upload"}
 DISABLED_VALUES = {"", "0", "false", "off", "disabled", "none"}
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[1] / ".helios" / "helios.db"
@@ -777,6 +777,97 @@ class SQLiteStore:
             self.warning = f"Could not load persisted models: {exc}"
             return []
 
+    def next_model_governance_version(self, model_id: str) -> int:
+        if not self.available:
+            return 1
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT MAX(version) AS version FROM model_governance_events WHERE model_id = ?",
+                    (model_id,),
+                ).fetchone()
+                current = int(row["version"] or 1) if row else 1
+                return current + 1
+        except Exception:
+            return 1
+
+    def record_model_governance_event(
+        self,
+        *,
+        model_id: str,
+        version: int,
+        actor: str,
+        action: str,
+        note: str = "",
+        approval_status: str = "",
+        snapshot: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        if not self.available:
+            return None
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO model_governance_events
+                      (model_id, created_at, version, actor, action, note,
+                       approval_status, snapshot_json, metadata_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        redact_secrets(str(model_id))[:64],
+                        utc_now(),
+                        int(version),
+                        self._store_text(redact_secrets(str(actor or "Advisor Console"))[:120]),
+                        self._store_text(redact_secrets(str(action or "change_note"))[:48]),
+                        self._store_text(redact_secrets(str(note or ""))[:800]),
+                        self._store_text(redact_secrets(str(approval_status or ""))[:32]),
+                        self._store_json(snapshot or {}),
+                        self._store_json(metadata or {}),
+                    ),
+                )
+                row = conn.execute(
+                    """
+                    SELECT *
+                    FROM model_governance_events
+                    WHERE id = last_insert_rowid()
+                    """
+                ).fetchone()
+                return _model_governance_event_row(row, self) if row else None
+        except Exception as exc:
+            self.warning = f"Could not record model governance event: {exc}"
+            return None
+
+    def model_governance_events(self, model_id: str | None = None, limit: int = 500) -> list[dict[str, Any]]:
+        if not self.available:
+            return []
+        try:
+            with self._connect() as conn:
+                if model_id:
+                    rows = conn.execute(
+                        """
+                        SELECT *
+                        FROM model_governance_events
+                        WHERE model_id = ?
+                        ORDER BY created_at DESC, id DESC
+                        LIMIT ?
+                        """,
+                        (model_id, max(1, min(int(limit), 2000))),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """
+                        SELECT *
+                        FROM model_governance_events
+                        ORDER BY created_at DESC, id DESC
+                        LIMIT ?
+                        """,
+                        (max(1, min(int(limit), 2000)),),
+                    ).fetchall()
+                return [_model_governance_event_row(row, self) for row in rows]
+        except Exception:
+            return []
+
     def record_refresh(
         self,
         *,
@@ -1151,6 +1242,23 @@ def _create_schema(conn: sqlite3.Connection) -> None:
         """
     )
     conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS model_governance_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          model_id TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          version INTEGER NOT NULL,
+          actor TEXT NOT NULL DEFAULT '',
+          action TEXT NOT NULL DEFAULT 'change_note',
+          note TEXT NOT NULL DEFAULT '',
+          approval_status TEXT NOT NULL DEFAULT '',
+          snapshot_json TEXT NOT NULL DEFAULT '{}',
+          metadata_json TEXT NOT NULL DEFAULT '{}',
+          FOREIGN KEY(model_id) REFERENCES models(model_id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
         "INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES (?, ?)",
         (SCHEMA_VERSION, utc_now()),
     )
@@ -1158,6 +1266,7 @@ def _create_schema(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_refresh_log_symbol_time ON refresh_log(symbol, attempted_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_signal_journal_target ON signal_journal(target_kind, target_id, input_end_date)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_report_snapshots_target ON report_snapshots(target_kind, target_id, created_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_model_governance_model ON model_governance_events(model_id, created_at)")
 
 
 def _normalise_price_frame(frame: pd.DataFrame) -> pd.DataFrame:
@@ -1239,6 +1348,27 @@ def _signal_row(row: sqlite3.Row, store: SQLiteStore | None = None) -> dict[str,
         "benchmark_result_pct": number("benchmark_result_pct"),
         "alpha_pct": number("alpha_pct"),
         "evaluated_at": text("evaluated_at") or None,
+        "metadata": object_json("metadata_json"),
+    }
+
+
+def _model_governance_event_row(row: sqlite3.Row, store: SQLiteStore | None = None) -> dict[str, Any]:
+    def text(name: str) -> str:
+        return store._load_text(row[name]) if store else str(row[name] or "")
+
+    def object_json(name: str) -> dict[str, Any]:
+        return store._load_json(row[name]) if store else _json_loads(row[name])
+
+    return {
+        "id": int(row["id"]),
+        "model_id": row["model_id"],
+        "created_at": row["created_at"],
+        "version": int(row["version"]),
+        "actor": text("actor"),
+        "action": text("action"),
+        "note": text("note"),
+        "approval_status": text("approval_status"),
+        "snapshot": object_json("snapshot_json"),
         "metadata": object_json("metadata_json"),
     }
 

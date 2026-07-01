@@ -9,6 +9,7 @@ import type {
   DataStatusResponse,
   MandateSummary,
   ModelSummary,
+  ModelGovernanceResponse,
   ModelTemplate,
   ModelTemplateImportResponse,
   OpportunitiesResponse,
@@ -52,6 +53,19 @@ export const api = {
   tickers: () => request<TickersResponse>("/api/tickers"),
   mandates: () => request<{ mandates: MandateSummary[] }>("/api/mandates"),
   models: () => request<{ models: ModelSummary[] }>("/api/models"),
+  modelGovernance: () => request<ModelGovernanceResponse>("/api/model-governance"),
+  recordModelGovernanceEvent: (
+    id: string,
+    payload: { actor?: string; action?: string; note?: string; approval_status?: string },
+  ) =>
+    request<{ event: ModelGovernanceResponse["change_log"][number] & { snapshot?: Record<string, unknown> } }>(
+      `/api/model-governance/${encodeURIComponent(id)}/events`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      },
+    ),
   modelLibrary: () => request<{ templates: ModelTemplate[] }>("/api/model-library"),
   importModelTemplate: (slug: string) =>
     request<ModelTemplateImportResponse>("/api/model-library/import", {

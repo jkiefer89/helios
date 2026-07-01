@@ -4,6 +4,7 @@ import type {
   CommandCenterResponse,
   DataStatusResponse,
   MandateSummary,
+  ModelGovernanceResponse,
   ModelSummary,
   ModelTemplate,
   OpportunitiesResponse,
@@ -25,6 +26,7 @@ export default function App() {
   const [activeView, setActiveView] = useState<ViewId>("command");
   const [tickers, setTickers] = useState<TickerSummary[]>([]);
   const [models, setModels] = useState<ModelSummary[]>([]);
+  const [modelGovernance, setModelGovernance] = useState<ModelGovernanceResponse | null>(null);
   const [modelLibrary, setModelLibrary] = useState<ModelTemplate[]>([]);
   const [mandates, setMandates] = useState<MandateSummary[]>([]);
   const [liveAvailable, setLiveAvailable] = useState(false);
@@ -37,15 +39,17 @@ export default function App() {
   const [notice, setNotice] = useState<string>("");
 
   const refreshLists = async () => {
-    const [tickerPayload, modelPayload, libraryPayload, mandatePayload, statusPayload] = await Promise.all([
+    const [tickerPayload, modelPayload, governancePayload, libraryPayload, mandatePayload, statusPayload] = await Promise.all([
       api.tickers(),
       api.models(),
+      api.modelGovernance(),
       api.modelLibrary(),
       api.mandates(),
       api.dataStatus(),
     ]);
     setTickers(tickerPayload.tickers);
     setModels(modelPayload.models);
+    setModelGovernance(governancePayload);
     setModelLibrary(libraryPayload.templates);
     setMandates(mandatePayload.mandates);
     setDataStatus(statusPayload);
@@ -127,6 +131,20 @@ export default function App() {
     }
   };
 
+  const onRecordModelGovernance = async (
+    id: string,
+    payload: { actor?: string; action?: string; note?: string; approval_status?: string },
+  ) => {
+    try {
+      const result = await api.recordModelGovernanceEvent(id, payload);
+      setNotice(`Recorded model governance event v${result.event.version}.`);
+      await refreshLists();
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Model governance update failed.");
+      throw error;
+    }
+  };
+
   const onFetchLive = async (symbol: string) => {
     try {
       const result = await api.fetchLive(symbol);
@@ -183,8 +201,10 @@ export default function App() {
       return (
         <Models
           models={models}
+          governance={modelGovernance}
           templates={modelLibrary}
           onImportTemplate={onImportTemplate}
+          onRecordGovernance={onRecordModelGovernance}
           onOpenModel={openModel}
           onOpenClinic={(id) => { selectModelOnly(id); setActiveView("clinic"); }}
         />

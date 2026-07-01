@@ -70,11 +70,22 @@ def test_real_data_onboarding_copy_switches_when_live_histories_exist():
 
 def test_models_view_exposes_governed_model_library():
     source = (ROOT / "frontend" / "src" / "views" / "Models.tsx").read_text()
+    client_source = (ROOT / "frontend" / "src" / "api" / "client.ts").read_text()
+    type_source = (ROOT / "frontend" / "src" / "api" / "types.ts").read_text()
 
     assert "Model Library" in source
     assert "Risk limits" in source
     assert "Rebalance" in source
     assert "Import template" in source
+    assert "Model Governance" in source
+    assert "Approval Status" in source
+    assert "Mandate / Risk Limits" in source
+    assert "Archived Snapshots" in source
+    assert "Rebalance History" in source
+    assert "Who changed what" in source
+    assert "api.modelGovernance" in source
+    assert "modelGovernance:" in client_source
+    assert "ModelGovernanceResponse" in type_source
 
 
 def test_reports_view_exposes_signal_journal():

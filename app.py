@@ -62,7 +62,7 @@ def _load_local_env_file(path: Path | None = None) -> dict:
 _LOCAL_ENV_STATUS = _load_local_env_file()
 
 from engine import (
-    ai_copilot, backtest, data, forecast, indicators, insights, mandate, model_library, opportunity, portfolio,
+    ai_copilot, backtest, data, forecast, indicators, insights, mandate, model_governance, model_library, opportunity, portfolio,
     portfolio_clinic, persistence, provenance, regime, report_exports, reporting, sentiment, signal_journal, signals, strategy,
 )
 
@@ -1069,6 +1069,29 @@ def model_library_import():
         "risk_limits": template["risk_limits"],
         "provenance": template["provenance"],
     })
+
+
+@app.route("/api/model-governance")
+def model_governance_workspace():
+    return ok(model_governance.payload())
+
+
+@app.route("/api/model-governance/<model_id>/events", methods=["POST"])
+def model_governance_event(model_id):
+    mdl = portfolio.get(model_id)
+    if mdl is None:
+        return err("Unknown model.", 404)
+    payload = request.get_json(silent=True) or {}
+    result = model_governance.record_event(
+        mdl,
+        actor=str(payload.get("actor") or "Advisor Console"),
+        action=str(payload.get("action") or ""),
+        note=str(payload.get("note") or ""),
+        approval_status=str(payload.get("approval_status") or ""),
+    )
+    if not result.get("recorded"):
+        return err(result.get("warning") or "Could not record model governance event.", 503)
+    return ok({"event": result["event"]})
 
 
 @app.route("/api/model/upload", methods=["POST"])

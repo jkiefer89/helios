@@ -105,6 +105,87 @@ export interface ModelTemplateImportResponse {
   provenance: ModelTemplate["provenance"];
 }
 
+export interface ModelGovernanceViolation {
+  field: string;
+  ticker?: string;
+  limit: number;
+  actual: number;
+  message: string;
+}
+
+export interface ModelGovernanceRow {
+  id: string;
+  name: string;
+  mandate: string;
+  mandate_label: string;
+  mandate_context: string;
+  version: number;
+  approval_status: string;
+  approved_by: string;
+  approval_updated_at?: string | null;
+  risk_limits: ModelTemplate["risk_limits"];
+  risk_limit_state: "within_limits" | "breach" | string;
+  risk_limit_violations: ModelGovernanceViolation[];
+  rebalance_rules: ModelTemplate["rebalance_rules"];
+  rebalance_status: string;
+  last_rebalance_at?: string | null;
+  version_count: number;
+  snapshot_count: number;
+  change_note_count: number;
+  latest_change_note: string;
+  updated_by: string;
+  updated_at?: string | null;
+  holdings_count: number;
+  top_holding: string;
+  top_weight_pct: number;
+  source: string;
+  provenance: ModelTemplate["provenance"];
+}
+
+export interface ModelGovernanceEvent {
+  id: number;
+  model_id: string;
+  created_at: string;
+  version: number;
+  actor: string;
+  action: string;
+  note: string;
+  approval_status: string;
+}
+
+export interface ModelGovernanceSnapshot {
+  event_id: number;
+  model_id: string;
+  model_name: string;
+  version: number;
+  created_at: string;
+  actor: string;
+  action: string;
+  approval_status: string;
+  holding_count: number;
+  risk_limit_state: string;
+}
+
+export interface ModelGovernanceResponse {
+  models: ModelGovernanceRow[];
+  snapshots: ModelGovernanceSnapshot[];
+  change_log: ModelGovernanceEvent[];
+  rebalance_history: ModelGovernanceEvent[];
+  summary: {
+    available: boolean;
+    model_count: number;
+    approved_count: number;
+    pending_count: number;
+    draft_count: number;
+    archived_count: number;
+    breach_count: number;
+    snapshot_count: number;
+    change_count: number;
+  };
+  warning?: string;
+  disclaimer: string;
+}
+
 export interface RefreshLogEntry {
   symbol: string;
   attempted_at: string;
