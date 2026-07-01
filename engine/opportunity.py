@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 
 from . import (
-    data, forecast, indicators, mandate, portfolio, provenance,
+    analytics_cache, data, forecast, indicators, mandate, portfolio, provenance,
     regime as regime_mod, sentiment, signals, strategy,
 )
 
@@ -23,9 +23,12 @@ def score_candidate(candidate: dict, regime: dict | None = None) -> dict:
     max_drawdown = float(candidate.get("max_drawdown_pct", 0.0))
     action = candidate.get("action") or _action_from_signal(signal_score)
 
+    backtest = candidate.get("backtest") or {}
+    strategy_return = float(backtest.get("strategy_return_pct", 0.0))
+    benchmark_return = float(backtest.get("benchmark_return_pct", 0.0))
     data_quality = _data_quality(source, candidate)
     forecast_quality = _forecast_quality(candidate.get("forecast_quality") or {})
-    backtest_quality = _backtest_quality(candidate.get("backtest") or {})
+    backtest_quality = _backtest_quality(backtest)
     risk_score = float(np.clip(expected_vol * 1.05 + abs(max_drawdown) * 0.85, 0, 100))
     signal_quality = float(np.clip(50 + signal_score * 45, 0, 100))
     upside_quality = float(np.clip(50 + expected_return * 3.0, 0, 100))
@@ -65,6 +68,7 @@ def score_candidate(candidate: dict, regime: dict | None = None) -> dict:
         "name": candidate.get("name", candidate.get("symbol", "")),
         "symbol": candidate.get("symbol", ""),
         "model_id": candidate.get("model_id"),
+        "source": source,
         "action": action,
         "opportunity_score": round(float(np.clip(score, 0, 100)), 1),
         "risk_score": round(risk_score, 1),
@@ -72,6 +76,10 @@ def score_candidate(candidate: dict, regime: dict | None = None) -> dict:
         "expected_return_pct": round(expected_return, 2),
         "expected_vol_pct": round(expected_vol, 2),
         "max_drawdown_pct": round(max_drawdown, 2),
+        "strategy_return_pct": round(strategy_return, 2),
+        "benchmark_return_pct": round(benchmark_return, 2),
+        "beat_benchmark": strategy_return > benchmark_return,
+        "reason": candidate.get("reason", ""),
         "forecast_quality": round(forecast_quality, 1),
         "backtest_quality": round(backtest_quality, 1),
         "data_quality": round(data_quality, 1),
@@ -138,41 +146,61 @@ def opportunities(
     }
 
 
+def instrument_candidate(inst: data.Instrument) -> dict | None:
+    """Raw scoring candidate for one instrument, memoized per price series.
+
+    This is the single source of the forecast/signal/backtest evidence that
+    both the Opportunity Radar and the Command Center score via
+    :func:`score_candidate`. Returns None when the instrument lacks the 60
+    rows of history the forecast and strategy engines require.
+    """
+    close = inst.df["close"].dropna()
+    if len(close) < 60:
+        return None
+    cache_key = analytics_cache.series_key(f"{inst.symbol}:{inst.source}", close)
+    cached = analytics_cache.get("opportunity_candidate", cache_key)
+    if cached is not None:
+        return cached
+    fc = forecast.forecast(close, horizon=21, n_paths=700)
+    sent = sentiment.score_headlines(inst.headlines)
+    sig = signals.evaluate(close, fc, sent, history_days=len(close))
+    st = strategy.analyze_strategy(close)
+    metrics = indicators.metrics_summary(close)
+    candidate = {
+        "id": f"instrument:{inst.symbol}",
+        "kind": "instrument",
+        "name": inst.name,
+        "symbol": inst.symbol,
+        "source": inst.source,
+        "action": sig["action"],
+        "signal_score": sig["score"],
+        "expected_return_pct": fc["expected_return_pct"],
+        "expected_vol_pct": fc["expected_vol_pct"],
+        "max_drawdown_pct": metrics["max_drawdown_pct"],
+        "forecast_quality": fc.get("quality", {}),
+        "backtest": {
+            "strategy_return_pct": st["strategy"]["total_return_pct"],
+            "benchmark_return_pct": st["benchmark"]["total_return_pct"],
+            "sharpe": st["strategy"]["sharpe"],
+        },
+        "reason": sig.get("headline_rationale", ""),
+        "warnings": sig.get("caveats", []),
+    }
+    analytics_cache.put("opportunity_candidate", cache_key, candidate)
+    return candidate
+
+
 def _instrument_candidates(instruments: list[data.Instrument]) -> list[dict]:
     out = []
     for inst in instruments:
         if not provenance.is_real_source(inst.source):
             continue
-        close = inst.df["close"].dropna()
-        if len(close) < 60:
-            continue
         try:
-            fc = forecast.forecast(close, horizon=21, n_paths=700)
-            sent = sentiment.score_headlines(inst.headlines)
-            sig = signals.evaluate(close, fc, sent, history_days=len(close))
-            st = strategy.analyze_strategy(close)
-            metrics = indicators.metrics_summary(close)
+            candidate = instrument_candidate(inst)
         except Exception:
             continue
-        out.append({
-            "id": f"instrument:{inst.symbol}",
-            "kind": "instrument",
-            "name": inst.name,
-            "symbol": inst.symbol,
-            "source": inst.source,
-            "action": sig["action"],
-            "signal_score": sig["score"],
-            "expected_return_pct": fc["expected_return_pct"],
-            "expected_vol_pct": fc["expected_vol_pct"],
-            "max_drawdown_pct": metrics["max_drawdown_pct"],
-            "forecast_quality": fc.get("quality", {}),
-            "backtest": {
-                "strategy_return_pct": st["strategy"]["total_return_pct"],
-                "benchmark_return_pct": st["benchmark"]["total_return_pct"],
-                "sharpe": st["strategy"]["sharpe"],
-            },
-            "warnings": sig.get("caveats", []),
-        })
+        if candidate is not None:
+            out.append(candidate)
     return out
 
 
@@ -222,6 +250,7 @@ def _model_candidates(models: list[portfolio.Model]) -> tuple[list[dict], list[d
                 "benchmark_return_pct": st["benchmark"]["total_return_pct"],
                 "sharpe": st["strategy"]["sharpe"],
             },
+            "reason": sig.get("headline_rationale", ""),
             "warnings": ps.warnings + sig.get("caveats", []),
             "mandate_label": m["label"],
         })

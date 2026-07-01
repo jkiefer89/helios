@@ -183,6 +183,6 @@ def test_command_center_screen_uses_cache():
     data.register(inst)  # register clears the cache before the first screen
     first = helios._quick_instrument_screen(inst)
     assert first is not None
-    assert analytics_cache.size() == 1
+    assert analytics_cache.size() == 1  # memoized opportunity candidate evidence
     second = helios._quick_instrument_screen(inst)
     assert second == first

@@ -390,67 +390,40 @@ ANALYSIS_ONLY_DISCLAIMER = (
 )
 
 
-def _quick_instrument_screen(inst: data.Instrument) -> dict | None:
-    close = inst.df["close"].dropna()
-    if len(close) < 60:
-        return None
-    cache_key = analytics_cache.series_key(f"{inst.symbol}:{inst.source}", close)
-    cached = analytics_cache.get("command_center_screen", cache_key)
-    if cached is not None:
-        return cached
+def _quick_instrument_screen(inst: data.Instrument, market: dict | None = None) -> dict | None:
+    """Command-center card for one instrument, scored by the shared engine.
+
+    Delegates to opportunity.instrument_candidate / score_candidate so the
+    Command Center and the Opportunity Radar report identical numbers. The
+    candidate evidence is memoized per price series inside the engine.
+    """
     try:
-        fc = forecast.forecast(close, horizon=21, n_paths=600)
-        sent = sentiment.score_headlines(inst.headlines)
-        sig = signals.evaluate(close, fc, sent, history_days=len(close))
-        bt = backtest.run(close)
-        metrics = indicators.metrics_summary(close)
+        candidate = opportunity.instrument_candidate(inst)
     except Exception:
         app.logger.exception("command-center screen failed for %s", inst.symbol)
         return None
-
-    quality = fc.get("quality", {}) or {}
-    dir_acc = quality.get("directional_accuracy")
-    evidence = 50.0
-    if dir_acc is not None:
-        evidence += (float(dir_acc) - 0.50) * 80
-    evidence += max(min(bt["strategy"]["sharpe"], 3.0), -3.0) * 8
-    if inst.source == "sample":
-        evidence -= 18
-    risk_score = max(0.0, metrics["annual_vol_pct"] * 0.75 + abs(metrics["max_drawdown_pct"]) * 0.70)
-    opportunity_score = (
-        48.0
-        + sig["score"] * 28.0
-        + max(min(fc["expected_return_pct"], 12.0), -12.0) * 1.2
-        + max(min(evidence - 50.0, 25.0), -25.0) * 0.45
-        - max(risk_score - 35.0, 0.0) * 0.35
-    )
-    warnings = list(sig.get("caveats") or [])
-    if inst.source == "sample":
-        warnings.append("Uses bundled sample data; treat as a workflow demonstration, not live market evidence.")
-    if dir_acc is not None and dir_acc <= 0.50:
-        warnings.append("Forecast edge is weak or below coin-flip on the out-of-sample window.")
-
-    card = {
-        "id": f"instrument:{inst.symbol}",
-        "kind": "instrument",
-        "symbol": inst.symbol,
-        "name": inst.name,
-        "source": inst.source,
-        "action": sig["action"],
-        "score": round(float(np.clip(opportunity_score, 0, 100)), 1),
-        "risk_score": round(float(np.clip(risk_score, 0, 100)), 1),
-        "evidence_score": round(float(np.clip(evidence, 0, 100)), 1),
-        "expected_return_pct": round(float(fc["expected_return_pct"]), 2),
-        "expected_vol_pct": round(float(fc["expected_vol_pct"]), 2),
-        "max_drawdown_pct": round(float(metrics["max_drawdown_pct"]), 2),
-        "strategy_return_pct": round(float(bt["strategy"]["total_return_pct"]), 2),
-        "benchmark_return_pct": round(float(bt["benchmark"]["total_return_pct"]), 2),
-        "beat_benchmark": bool(bt["strategy"]["total_return_pct"] > bt["benchmark"]["total_return_pct"]),
-        "reason": sig.get("headline_rationale", ""),
-        "warnings": warnings[:3],
+    if candidate is None:
+        return None
+    scored = opportunity.score_candidate(candidate, regime=market)
+    return {
+        "id": scored["id"],
+        "kind": scored["kind"],
+        "symbol": scored["symbol"],
+        "name": scored["name"],
+        "source": scored["source"],
+        "action": scored["action"],
+        "score": scored["opportunity_score"],
+        "risk_score": scored["risk_score"],
+        "evidence_score": scored["evidence_score"],
+        "expected_return_pct": scored["expected_return_pct"],
+        "expected_vol_pct": scored["expected_vol_pct"],
+        "max_drawdown_pct": scored["max_drawdown_pct"],
+        "strategy_return_pct": scored["strategy_return_pct"],
+        "benchmark_return_pct": scored["benchmark_return_pct"],
+        "beat_benchmark": scored["beat_benchmark"],
+        "reason": scored["reason"],
+        "warnings": scored["warnings"][:3],
     }
-    analytics_cache.put("command_center_screen", cache_key, card)
-    return card
 
 
 def _command_center_payload() -> dict:
@@ -458,7 +431,7 @@ def _command_center_payload() -> dict:
     prov = provenance.universe(instruments)
     market = regime.market_regime(instruments)
     real_instruments = [inst for inst in instruments if provenance.is_real_source(inst.source)]
-    cards = [c for inst in real_instruments if (c := _quick_instrument_screen(inst))]
+    cards = [c for inst in real_instruments if (c := _quick_instrument_screen(inst, market))]
     ranked = sorted(cards, key=lambda c: c["score"], reverse=True)
     risks = sorted(cards, key=lambda c: (c["risk_score"], abs(c["max_drawdown_pct"])), reverse=True)
 
