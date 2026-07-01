@@ -5,7 +5,7 @@ bound to all interfaces so devices on your Wi-Fi / office network can reach it.
 The whole app stays behind the HTTP Basic Auth gate configured in app.py.
 
     python serve.py                       # http://0.0.0.0:5000
-    HELIOS_PASSWORD=hunter2 python serve.py
+    HELIOS_PASSWORD='use-a-long-unique-passphrase' python serve.py
     HELIOS_PORT=8080 python serve.py
     HELIOS_TLS=1 python serve.py          # self-signed HTTPS (encrypts the login)
 
@@ -17,12 +17,17 @@ LAN IP changes).
 """
 from __future__ import annotations
 
+import errno
 import os
 import subprocess
 import tempfile
 from pathlib import Path
 
 import app as helios
+from engine import persistence
+
+MIN_PASSWORD_LENGTH = 12
+
 
 def parse_port(value: str | None = None) -> int:
     raw = os.environ.get("HELIOS_PORT", "5000") if value is None else value
@@ -79,28 +84,74 @@ def _ensure_cert() -> None:
              "-keyout", str(KEY), "-out", str(CERT), "-days", "825", "-config", cfg_path],
             check=True, capture_output=True, text=True,
         )
+        KEY.chmod(0o600)
     finally:
         os.unlink(cfg_path)
 
 
-if __name__ == "__main__":
+def prepare_tls() -> None:
+    """HELIOS_TLS=1 fails closed: never fall back to plain HTTP on 0.0.0.0."""
+    try:
+        _ensure_cert()
+    except Exception as e:
+        raise SystemExit(
+            f"HELIOS_TLS=1 but the TLS certificate could not be created ({e}) — "
+            "install openssl (or delete the certs/ folder and retry), or unset HELIOS_TLS."
+        )
+
+
+def port_in_use_hint(port: int) -> str:
+    return (
+        f"Port {port} is already in use — pick another with HELIOS_PORT=<port> "
+        "(on macOS, AirPlay Receiver listens on port 5000 by default)."
+    )
+
+
+def print_startup_warnings() -> None:
+    """Operational hints printed after the main banner."""
+    password = os.environ.get("HELIOS_PASSWORD")
+    if password and len(password) < MIN_PASSWORD_LENGTH:
+        print(f"  ⚠  HELIOS_PASSWORD is shorter than {MIN_PASSWORD_LENGTH} characters — "
+              "use a longer unique passphrase.", flush=True)
+    print(f"  {encryption_status_line()}", flush=True)
+
+
+def encryption_status_line() -> str:
+    """One-line persistence encryption summary for the startup banner."""
+    try:
+        encryption = persistence.get_store().encryption
+    except Exception as exc:
+        return f"Persistence encryption: unavailable ({exc})"
+    state = "enabled" if encryption.get("enabled") else "disabled"
+    mode = encryption.get("mode") or "off"
+    key_source = encryption.get("key_source") or "none"
+    return f"Persistence encryption: {state} (mode={mode}, key source={key_source})"
+
+
+def main() -> None:
     use_tls = TLS
     if use_tls:
-        try:
-            _ensure_cert()
-        except Exception as e:
-            print(f"  ⚠  Could not create TLS cert ({e}); serving plain HTTP instead.", flush=True)
-            use_tls = False
+        prepare_tls()
 
     helios.print_banner(HOST, PORT, tls=use_tls)
+    print_startup_warnings()
 
-    if use_tls:
-        # Self-signed HTTPS via werkzeug — appropriate for a small trusted-LAN tool.
-        from werkzeug.serving import run_simple
+    try:
+        if use_tls:
+            # Self-signed HTTPS via werkzeug — appropriate for a small trusted-LAN tool.
+            from werkzeug.serving import run_simple
 
-        run_simple(HOST, PORT, helios.app, threaded=True,
-                   ssl_context=(str(CERT), str(KEY)))
-    else:
-        from waitress import serve
+            run_simple(HOST, PORT, helios.app, threaded=True,
+                       ssl_context=(str(CERT), str(KEY)))
+        else:
+            from waitress import serve
 
-        serve(helios.app, host=HOST, port=PORT, threads=8, ident="Helios", channel_timeout=60)
+            serve(helios.app, host=HOST, port=PORT, threads=8, ident="Helios", channel_timeout=60)
+    except OSError as e:
+        if e.errno == errno.EADDRINUSE:
+            raise SystemExit(port_in_use_hint(PORT))
+        raise
+
+
+if __name__ == "__main__":
+    main()

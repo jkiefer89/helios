@@ -78,7 +78,8 @@ def record_signal(
 
 
 def list_entries(limit: int = 100) -> list[dict[str, Any]]:
-    refresh_forward_results(limit=limit)
+    """Read-only journal view. Pending forward results are refreshed after
+    data refreshes (see data.ensure_live_symbols), never on the read path."""
     return persistence.get_store().signal_journal(limit=limit)
 
 

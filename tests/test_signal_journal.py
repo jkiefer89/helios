@@ -169,3 +169,34 @@ def test_signal_journal_endpoint_summarizes_paper_performance_evidence(monkeypat
     assert len(body["drift"]) == 3
     assert {"score", "forward_result_pct", "alpha_pct", "cumulative_measured_count"} <= set(body["drift"][-1])
     assert body["methodology"]["hit_rate_basis"]
+
+
+def test_journal_read_path_does_not_refresh_or_fetch(monkeypatch, tmp_path):
+    store = _use_db(monkeypatch, tmp_path)
+    pending = price_series(days=70, start=100.0, daily=0.001)
+    signal_journal.record_signal(
+        target_kind="instrument",
+        target_id="READONLY",
+        target_name="Read Only",
+        close=pending,
+        input_close=pending,
+        signal={"action": "HOLD", "score": 0.1},
+        horizon_days=21,
+        benchmark="",
+        source_counts={"upload": 1},
+        eligible_for_real_research=True,
+    )
+    refresh_calls: list[int] = []
+    write_calls: list[str] = []
+    monkeypatch.setattr(signal_journal, "refresh_forward_results",
+                        lambda *a, **k: refresh_calls.append(1))
+    monkeypatch.setattr(store, "update_signal_forward_result",
+                        lambda key, result: write_calls.append(key))
+
+    client = helios.app.test_client()
+    resp = client.get("/api/signal-journal")
+
+    assert resp.status_code == 200
+    assert resp.get_json()["entries"][0]["target_id"] == "READONLY"
+    assert refresh_calls == []
+    assert write_calls == []

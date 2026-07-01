@@ -10,9 +10,11 @@ import os
 import secrets
 import socket
 import threading
+import time
 from datetime import datetime, timezone
 from hmac import compare_digest
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import numpy as np
 import pandas as pd
@@ -98,13 +100,71 @@ def _auth_ok(username: str, password: str) -> bool:
     return u_ok and p_ok
 
 
+# Brute-force throttle: per-remote-IP failure counter with a temporary lockout,
+# plus a constant delay on every failed credential check.
+_AUTH_FAILURE_DELAY_SECONDS = 0.3
+_AUTH_LOCKOUT_THRESHOLD = 10
+_AUTH_LOCKOUT_SECONDS = 60.0
+_AUTH_FAILURES: dict[str, tuple[int, float]] = {}
+_AUTH_FAILURES_LOCK = threading.Lock()
+
+# Browser requests that mutate state must originate from our own origin.
+# curl / same-origin app fetches send no Sec-Fetch-Site header and pass.
+_CSRF_SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+def _is_cross_site_request() -> bool:
+    """CSRF heuristic using browser-set fetch metadata headers."""
+    sec_fetch_site = (request.headers.get("Sec-Fetch-Site") or "").strip().lower()
+    if sec_fetch_site and sec_fetch_site not in {"same-origin", "none"}:
+        return True
+    origin = (request.headers.get("Origin") or "").strip()
+    if origin:
+        origin_host = urlsplit(origin).netloc.lower()
+        if origin_host != (request.host or "").lower():
+            return True
+    return False
+
+
+def _auth_locked_out(remote: str) -> bool:
+    with _AUTH_FAILURES_LOCK:
+        count, last_failure = _AUTH_FAILURES.get(remote, (0, 0.0))
+        if count < _AUTH_LOCKOUT_THRESHOLD:
+            return False
+        if time.monotonic() - last_failure < _AUTH_LOCKOUT_SECONDS:
+            return True
+        del _AUTH_FAILURES[remote]
+        return False
+
+
+def _register_auth_failure(remote: str) -> None:
+    with _AUTH_FAILURES_LOCK:
+        count, _ = _AUTH_FAILURES.get(remote, (0, 0.0))
+        _AUTH_FAILURES[remote] = (count + 1, time.monotonic())
+    app.logger.warning("Failed Basic-auth attempt from %s", remote)
+    time.sleep(_AUTH_FAILURE_DELAY_SECONDS)
+
+
+def _clear_auth_failures(remote: str) -> None:
+    with _AUTH_FAILURES_LOCK:
+        _AUTH_FAILURES.pop(remote, None)
+
+
 @app.before_request
 def _require_auth():
+    if request.method not in _CSRF_SAFE_METHODS and _is_cross_site_request():
+        return Response("Forbidden.", 403)
     if not AUTH_ENABLED:
         return None
+    remote = request.remote_addr or "unknown"
+    if _auth_locked_out(remote):
+        return Response("Too many failed login attempts — try again shortly.", 429)
     auth = request.authorization
     if auth and auth.type == "basic" and _auth_ok(auth.username or "", auth.password or ""):
+        _clear_auth_failures(remote)
         return None
+    if auth is not None:
+        _register_auth_failure(remote)
     return Response(
         "Helios — authentication required.",
         401,
@@ -112,16 +172,24 @@ def _require_auth():
     )
 
 
+def _legacy_dashboard_request() -> bool:
+    """Only the legacy template pages load Chart.js from the CDN."""
+    if request.path == "/legacy":
+        return True
+    return request.path == "/" and not _react_frontend_ready()
+
+
 @app.after_request
 def _security_headers(resp: Response) -> Response:
-    """Defense-in-depth headers. The CSP restricts scripts to our own origin +
-    the Chart.js CDN, which also blunts any residual injection."""
+    """Defense-in-depth headers. The CSP restricts scripts to our own origin;
+    the legacy dashboard alone gets a Chart.js CDN script-src exception."""
+    script_src = "'self' https://cdn.jsdelivr.net" if _legacy_dashboard_request() else "'self'"
     resp.headers["X-Content-Type-Options"] = "nosniff"
     resp.headers["X-Frame-Options"] = "DENY"
     resp.headers["Referrer-Policy"] = "no-referrer"
     resp.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
-        "script-src 'self' https://cdn.jsdelivr.net; "
+        f"script-src {script_src}; "
         "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data:; "
         "connect-src 'self'; "
@@ -331,6 +399,8 @@ def err(message, code=400):
 
 
 def _safe_int_arg(name: str, default: int, min_value: int, max_value: int) -> tuple[int | None, str | None]:
+    """Parse an int query arg: unparseable values yield a 400 message,
+    out-of-range values are clamped into [min_value, max_value]."""
     raw = request.args.get(name, default)
     try:
         value = int(raw)
@@ -340,6 +410,8 @@ def _safe_int_arg(name: str, default: int, min_value: int, max_value: int) -> tu
 
 
 def _safe_float_arg(name: str, default: float, min_value: float, max_value: float) -> tuple[float | None, str | None]:
+    """Parse a float query arg: unparseable values yield a 400 message,
+    out-of-range values are clamped into [min_value, max_value]."""
     raw = request.args.get(name, default)
     try:
         value = float(raw)
@@ -732,7 +804,9 @@ def tickers():
 
 @app.route("/api/analyze")
 def analyze():
-    symbol = request.args.get("ticker", "").upper()
+    symbol = data.clean_symbol(request.args.get("ticker", ""), fallback="")
+    if not symbol:
+        return err("Provide a ticker symbol.", 400)
     horizon, error = _safe_int_arg("horizon", 21, 5, 90)
     if error:
         return err(error, 400)
@@ -980,6 +1054,8 @@ def upload():
     raw_symbol = request.form.get("symbol") or (f.filename or "").rsplit(".", 1)[0] or "CLIENT"
     symbol = data.clean_symbol(raw_symbol)
     name = data.clean_name(request.form.get("name"), fallback=symbol)
+    if not _UPLOAD_SEMAPHORE.acquire(blocking=False):
+        return err("Server busy parsing another upload — try again in a moment.", 429)
     try:
         inst = data.parse_csv(f.read(), symbol, name, source_filename=f.filename or "")
     except ValueError as e:
@@ -988,6 +1064,8 @@ def upload():
     except Exception:
         app.logger.exception("upload parse failed")
         return err("Could not read that file. Expected a CSV with date and price columns.", 400)
+    finally:
+        _UPLOAD_SEMAPHORE.release()
     p = provenance.instrument(inst.source, len(inst.df["close"].dropna()))
     return ok({
         "symbol": inst.symbol,

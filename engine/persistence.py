@@ -10,6 +10,7 @@ import json
 import os
 import re
 import sqlite3
+import sys
 import tempfile
 import threading
 from dataclasses import dataclass
@@ -190,8 +191,12 @@ def _configured_cipher(path: Path | None) -> tuple[_FieldCipher | None, dict[str
             cipher = _FieldCipher(raw_key, key_source="environment", required=required, mode=mode)
             return cipher, cipher.status, ""
         except Exception as exc:
-            warning = f"SQLite persistence encryption key is invalid: {exc}"
-            return None, _disabled_encryption_status(mode=mode, required=required, warning=warning), warning
+            # An explicitly configured key that cannot be used is fatal in every
+            # mode: silently continuing would write a plaintext database.
+            raise SystemExit(
+                f"HELIOS_DB_ENCRYPTION_KEY is malformed ({exc}) — set it to a Fernet key, e.g. "
+                "python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'"
+            )
 
     key_path = Path(os.environ.get("HELIOS_DB_ENCRYPTION_KEY_PATH") or "").expanduser() if os.environ.get("HELIOS_DB_ENCRYPTION_KEY_PATH") else None
     if key_path is None and path is not None:
@@ -202,8 +207,17 @@ def _configured_cipher(path: Path | None) -> tuple[_FieldCipher | None, dict[str
 
     try:
         if key_path.is_file():
-            key = key_path.read_text(encoding="utf-8").strip()
-            key_source = "local_key_file"
+            try:
+                key = key_path.read_text(encoding="utf-8").strip()
+                cipher = _FieldCipher(key, key_source="local_key_file", required=required, mode=mode)
+            except Exception as exc:
+                # An existing key file that cannot be read or parsed is fatal in
+                # every mode — never silently fall back to a plaintext database.
+                raise SystemExit(
+                    f"SQLite encryption key file {key_path} is unreadable or malformed ({exc}) — "
+                    "restore the original Fernet key (or fix file permissions) before starting Helios."
+                )
+            return cipher, cipher.status, ""
         elif required:
             warning = "SQLite persistence encryption is required but no key is configured."
             return None, _disabled_encryption_status(mode=mode, required=True, warning=warning), warning
@@ -221,6 +235,35 @@ def _configured_cipher(path: Path | None) -> tuple[_FieldCipher | None, dict[str
     except Exception as exc:
         warning = f"SQLite persistence encryption unavailable: {exc}"
         return None, _disabled_encryption_status(mode=mode, required=required, warning=warning), warning
+
+
+def plaintext_database_files(data_dir: Path) -> list[str]:
+    """Names of unencrypted SQLite files inside the data directory."""
+    names: list[str] = []
+    try:
+        candidates = sorted(data_dir.glob("*.sqlite")) + sorted(data_dir.glob("*.db"))
+    except OSError:
+        return names
+    for candidate in candidates:
+        try:
+            with open(candidate, "rb") as fh:
+                if fh.read(len(SQLITE_HEADER)) == SQLITE_HEADER:
+                    names.append(candidate.name)
+        except OSError:
+            continue
+    return names
+
+
+def _warn_plaintext_databases(data_dir: Path) -> list[str]:
+    names = plaintext_database_files(data_dir)
+    if names:
+        print(
+            f"  ⚠  Unencrypted database files in {data_dir}: {', '.join(names)} — "
+            "enable HELIOS_DB_ENCRYPTION to protect data at rest.",
+            file=sys.stderr,
+            flush=True,
+        )
+    return names
 
 
 def get_store() -> "SQLiteStore":
@@ -252,6 +295,8 @@ class SQLiteStore:
             self.warning = encryption_warning
             return
         self._ensure()
+        if self.path is not None:
+            _warn_plaintext_databases(self.path.parent)
 
     @classmethod
     def from_env(cls) -> "SQLiteStore":

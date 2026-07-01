@@ -465,3 +465,43 @@ def _ohlcv(days=90):
         "close": close.values,
         "volume": [1000] * len(close),
     }, index=close.index)
+
+
+def test_malformed_env_encryption_key_is_fatal_even_in_auto_mode(monkeypatch, tmp_path):
+    monkeypatch.setenv("HELIOS_DB_PATH", str(tmp_path / "helios.db"))
+    monkeypatch.delenv("HELIOS_DB_ENCRYPTION", raising=False)
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION_KEY", "not-a-valid-fernet-key")
+    persistence.reset_store_for_tests()
+
+    with pytest.raises(SystemExit, match="HELIOS_DB_ENCRYPTION_KEY"):
+        persistence.get_store()
+
+
+def test_malformed_key_file_is_fatal_instead_of_plaintext_fallback(monkeypatch, tmp_path):
+    key_file = tmp_path / "helios.key"
+    key_file.write_text("garbage-not-a-key\n", encoding="utf-8")
+    monkeypatch.setenv("HELIOS_DB_PATH", str(tmp_path / "helios.db"))
+    monkeypatch.delenv("HELIOS_DB_ENCRYPTION", raising=False)
+    monkeypatch.delenv("HELIOS_DB_ENCRYPTION_KEY", raising=False)
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION_KEY_PATH", str(key_file))
+    persistence.reset_store_for_tests()
+
+    with pytest.raises(SystemExit, match="key file"):
+        persistence.get_store()
+
+
+def test_startup_warns_about_unencrypted_database_files(monkeypatch, tmp_path, capsys):
+    plain = sqlite3.connect(str(tmp_path / "old-backup.sqlite"))
+    plain.execute("CREATE TABLE t (x INTEGER)")
+    plain.commit()
+    plain.close()
+    monkeypatch.setenv("HELIOS_DB_PATH", str(tmp_path / "helios.db"))
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION", "off")
+    persistence.reset_store_for_tests()
+
+    store = persistence.get_store()
+
+    assert store.available is True
+    err = capsys.readouterr().err
+    assert "Unencrypted database files" in err
+    assert "old-backup.sqlite" in err
