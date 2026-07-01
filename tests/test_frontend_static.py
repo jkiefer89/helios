@@ -88,6 +88,24 @@ def test_models_view_exposes_governed_model_library():
     assert "ModelGovernanceResponse" in type_source
 
 
+def test_models_view_exposes_native_model_editor():
+    source = (ROOT / "frontend" / "src" / "views" / "Models.tsx").read_text()
+    client_source = (ROOT / "frontend" / "src" / "api" / "client.ts").read_text()
+    type_source = (ROOT / "frontend" / "src" / "api" / "types.ts").read_text()
+
+    assert "Model Editor" in source
+    assert "Change holdings and target weights" in source
+    assert "Rebalance to target" in source
+    assert "Preview breaches" in source
+    assert "Change note" in source
+    assert "api.previewModelEdit" in source
+    assert "api.saveModelEdit" in source
+    assert "previewModelEdit:" in client_source
+    assert "saveModelEdit:" in client_source
+    assert "ModelEditPreviewResponse" in type_source
+    assert "ModelEditSaveResponse" in type_source
+
+
 def test_reports_view_exposes_signal_journal():
     source = (ROOT / "frontend" / "src" / "views" / "Reports.tsx").read_text()
 

@@ -92,3 +92,97 @@ def test_model_governance_is_unavailable_without_sqlite_persistence(monkeypatch)
     assert body["models"] == []
     assert body["summary"]["available"] is False
     assert "SQLite persistence" in body["warning"]
+
+
+def test_model_editor_previews_breaches_and_requires_change_note(monkeypatch, tmp_path):
+    _use_db(monkeypatch, tmp_path)
+    model = portfolio.parse_model_file(
+        b"Ticker,Weight\nAAPL,40\nMSFT,30\nGOOGL,30\n",
+        "editable.csv",
+        "Editable Model",
+        "balanced",
+        "Initial editable model.",
+    )
+    client = _client()
+
+    preview = client.post(
+        f"/api/models/{model.id}/editor/preview",
+        json={
+            "holdings": [
+                {"ticker": "AAPL", "weight_pct": 55},
+                {"ticker": "MSFT", "weight_pct": 25},
+                {"ticker": "GOOGL", "weight_pct": 20},
+            ]
+        },
+    )
+
+    assert preview.status_code == 200
+    body = preview.get_json()
+    assert body["model"]["id"] == model.id
+    assert body["risk_limit_state"] == "breach"
+    assert body["risk_limit_violations"][0]["field"] == "max_single_position_pct"
+    assert body["proposed_holdings"][0]["ticker"] == "AAPL"
+    assert body["proposed_holdings"][0]["weight_pct"] == 55.0
+    assert body["can_save"] is True
+
+    missing_note = client.post(
+        f"/api/models/{model.id}/editor",
+        json={
+            "holdings": [
+                {"ticker": "AAPL", "weight_pct": 34},
+                {"ticker": "MSFT", "weight_pct": 33},
+                {"ticker": "GOOGL", "weight_pct": 33},
+            ],
+            "change_note": "",
+        },
+    )
+
+    assert missing_note.status_code == 400
+    assert "change note" in missing_note.get_json()["error"].lower()
+
+
+def test_model_editor_saves_normalized_holdings_and_governance_snapshot(monkeypatch, tmp_path):
+    _use_db(monkeypatch, tmp_path)
+    model = portfolio.parse_model_file(
+        b"Ticker,Weight\nAAPL,40\nMSFT,30\nGOOGL,30\n",
+        "editable-save.csv",
+        "Editable Save Model",
+        "balanced",
+        "Initial editable save model.",
+    )
+    client = _client()
+
+    resp = client.post(
+        f"/api/models/{model.id}/editor",
+        json={
+            "actor": "Advisor Console",
+            "rebalance_to_target": True,
+            "change_note": "Reduced concentration and rebalanced target weights.",
+            "holdings": [
+                {"ticker": "AAPL", "weight_pct": 35},
+                {"ticker": "MSFT", "weight_pct": 35},
+                {"ticker": "GOOGL", "weight_pct": 20},
+                {"ticker": "AMZN", "weight_pct": 5},
+                {"ticker": "NVDA", "weight_pct": 5},
+            ],
+        },
+    )
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["saved"] is True
+    assert body["event"]["action"] == "model_edit"
+    assert body["event"]["note"] == "Reduced concentration and rebalanced target weights."
+    assert body["risk_limit_state"] == "within_limits"
+    assert round(sum(item["weight_pct"] for item in body["model"]["holdings"]), 6) == 100.0
+
+    updated = portfolio.get(model.id)
+    assert updated is not None
+    assert [holding.ticker for holding in updated.holdings] == ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA"]
+    assert round(sum(holding.weight for holding in updated.holdings), 6) == 1.0
+
+    governance = client.get("/api/model-governance").get_json()
+    governed = next(row for row in governance["models"] if row["id"] == model.id)
+    assert governed["latest_change_note"] == "Reduced concentration and rebalanced target weights."
+    assert governed["version"] == 2
+    assert governance["change_log"][0]["action"] == "model_edit"

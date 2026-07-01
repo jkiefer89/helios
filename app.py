@@ -1067,6 +1067,15 @@ def models():
             "mandate_label": mandate.get(mdl.mandate_key)["label"],
             "n_holdings": len(mdl.holdings),
             "top": mdl.holdings[0].ticker if mdl.holdings else None,
+            "holdings": [
+                {
+                    "ticker": holding.ticker,
+                    "weight": round(float(holding.weight), 6),
+                    "weight_pct": round(float(holding.weight) * 100, 2),
+                    "source": holding.source or "pending",
+                }
+                for holding in mdl.holdings
+            ],
             "real_coverage_count": coverage["real_coverage_count"],
             "missing_tickers": coverage["missing_tickers"],
             "coverage_state": coverage["coverage_state"],
@@ -1127,6 +1136,55 @@ def model_governance_event(model_id):
     if not result.get("recorded"):
         return err(result.get("warning") or "Could not record model governance event.", 503)
     return ok({"event": result["event"]})
+
+
+@app.route("/api/models/<model_id>/editor", methods=["GET"])
+def model_editor(model_id):
+    mdl = portfolio.get(model_id)
+    if mdl is None:
+        return err("Unknown model.", 404)
+    return ok(model_governance.preview_edit(mdl, holdings=[
+        {"ticker": holding.ticker, "weight_pct": float(holding.weight) * 100}
+        for holding in mdl.holdings
+    ]))
+
+
+@app.route("/api/models/<model_id>/editor/preview", methods=["POST"])
+def model_editor_preview(model_id):
+    mdl = portfolio.get(model_id)
+    if mdl is None:
+        return err("Unknown model.", 404)
+    payload = request.get_json(silent=True) or {}
+    try:
+        result = model_governance.preview_edit(
+            mdl,
+            holdings=payload.get("holdings") or [],
+            rebalance_to_target=bool(payload.get("rebalance_to_target")),
+        )
+    except ValueError as exc:
+        return err(str(exc), 400)
+    return ok(result)
+
+
+@app.route("/api/models/<model_id>/editor", methods=["POST"])
+def model_editor_save(model_id):
+    mdl = portfolio.get(model_id)
+    if mdl is None:
+        return err("Unknown model.", 404)
+    payload = request.get_json(silent=True) or {}
+    try:
+        result = model_governance.save_edit(
+            mdl,
+            holdings=payload.get("holdings") or [],
+            change_note=str(payload.get("change_note") or ""),
+            actor=str(payload.get("actor") or "Advisor Console"),
+            rebalance_to_target=bool(payload.get("rebalance_to_target")),
+        )
+    except ValueError as exc:
+        return err(str(exc), 400)
+    if not result.get("saved"):
+        return err(result.get("warning") or "Could not save model edits.", 400)
+    return ok(result)
 
 
 @app.route("/api/model/upload", methods=["POST"])

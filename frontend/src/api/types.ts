@@ -57,6 +57,7 @@ export interface ModelSummary {
   mandate_label: string;
   n_holdings: number;
   top?: string | null;
+  holdings: Array<{ ticker: string; weight: number; weight_pct: number; source?: string }>;
   real_coverage_count?: number;
   missing_tickers?: string[];
   coverage_state?: "real" | "mixed" | "blocked" | "empty" | string;
@@ -151,6 +152,35 @@ export interface ModelGovernanceEvent {
   action: string;
   note: string;
   approval_status: string;
+}
+
+export interface ModelEditHoldingInput {
+  ticker: string;
+  weight_pct: number;
+}
+
+export interface ModelEditPreviewResponse {
+  model: {
+    id: string;
+    name: string;
+    mandate: string;
+    mandate_label: string;
+    holdings: Array<{ ticker: string; weight: number; weight_pct: number; source?: string }>;
+  };
+  current_holdings: Array<{ ticker: string; weight: number; weight_pct: number; source?: string }>;
+  proposed_holdings: Array<{ ticker: string; weight: number; weight_pct: number; source?: string }>;
+  rebalance_to_target: boolean;
+  risk_limits: ModelTemplate["risk_limits"];
+  risk_limit_state: "within_limits" | "breach" | string;
+  risk_limit_violations: ModelGovernanceViolation[];
+  can_save: boolean;
+  requires_change_note: boolean;
+  disclaimer: string;
+}
+
+export interface ModelEditSaveResponse extends ModelEditPreviewResponse {
+  saved: boolean;
+  event: ModelGovernanceEvent & { snapshot?: Record<string, unknown> };
 }
 
 export interface ModelGovernanceSnapshot {

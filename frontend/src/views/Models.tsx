@@ -1,5 +1,6 @@
 import { useMemo, useState, type KeyboardEvent } from "react";
-import type { ModelGovernanceResponse, ModelGovernanceRow, ModelSummary, ModelTemplate } from "../api/types";
+import { api } from "../api/client";
+import type { ModelEditPreviewResponse, ModelGovernanceResponse, ModelGovernanceRow, ModelSummary, ModelTemplate } from "../api/types";
 import { Panel } from "../components/cards/Panel";
 import { EmptyState } from "../components/empty-states/EmptyState";
 import { fmtPct } from "../utils/format";
@@ -12,6 +13,7 @@ export function Models({
   templates,
   onImportTemplate,
   onRecordGovernance,
+  onModelEdited,
   onOpenModel,
   onOpenClinic,
 }: {
@@ -23,6 +25,7 @@ export function Models({
     id: string,
     payload: { actor?: string; action?: string; note?: string; approval_status?: string },
   ) => Promise<void>;
+  onModelEdited: () => Promise<void>;
   onOpenModel: (id: string) => void;
   onOpenClinic: (id: string) => void;
 }) {
@@ -30,6 +33,12 @@ export function Models({
   const [actor, setActor] = useState("Advisor Console");
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [recording, setRecording] = useState("");
+  const [editingId, setEditingId] = useState("");
+  const [editorRows, setEditorRows] = useState<Array<{ ticker: string; weight_pct: string }>>([]);
+  const [changeNote, setChangeNote] = useState("");
+  const [editorPreview, setEditorPreview] = useState<ModelEditPreviewResponse | null>(null);
+  const [editorNotice, setEditorNotice] = useState("");
+  const [editorBusy, setEditorBusy] = useState("");
   const governanceById = useMemo(() => {
     return new Map((governance?.models || []).map((row) => [row.id, row]));
   }, [governance]);
@@ -59,6 +68,73 @@ export function Models({
       setRecording("");
     }
   };
+  const startEdit = (model: ModelSummary) => {
+    setEditingId(model.id);
+    setEditorRows((model.holdings || []).map((holding) => ({
+      ticker: holding.ticker,
+      weight_pct: String(holding.weight_pct ?? Math.round((holding.weight || 0) * 10000) / 100),
+    })));
+    setChangeNote("");
+    setEditorPreview(null);
+    setEditorNotice("");
+  };
+  const updateEditorRow = (index: number, patch: Partial<{ ticker: string; weight_pct: string }>) => {
+    setEditorRows((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, ...patch } : row));
+  };
+  const addEditorRow = () => setEditorRows((rows) => [...rows, { ticker: "", weight_pct: "" }]);
+  const removeEditorRow = (index: number) => setEditorRows((rows) => rows.filter((_, rowIndex) => rowIndex !== index));
+  const editorPayload = (rows = editorRows) => rows
+    .map((row) => ({ ticker: row.ticker.trim().toUpperCase(), weight_pct: Number(row.weight_pct) || 0 }))
+    .filter((row) => row.ticker && row.weight_pct > 0);
+  const previewEdit = async (rebalanceToTarget = false, rows = editorRows) => {
+    if (!editingId) return;
+    setEditorBusy("preview");
+    setEditorNotice("");
+    try {
+      const result = await api.previewModelEdit(editingId, { holdings: editorPayload(rows), rebalance_to_target: rebalanceToTarget });
+      setEditorPreview(result);
+      setEditorNotice(result.risk_limit_state === "breach" ? "Preview found governance breaches before saving." : "Preview is within current governance limits.");
+    } catch (error) {
+      setEditorNotice(error instanceof Error ? error.message : "Preview failed.");
+    } finally {
+      setEditorBusy("");
+    }
+  };
+  const rebalanceToTarget = async () => {
+    const parsed = editorPayload();
+    const total = parsed.reduce((sum, row) => sum + row.weight_pct, 0);
+    if (!total) {
+      setEditorNotice("Add positive target weights before rebalancing.");
+      return;
+    }
+    const normalized = editorRows.map((row) => {
+      const weight = Number(row.weight_pct) || 0;
+      return { ...row, weight_pct: weight > 0 ? ((weight / total) * 100).toFixed(2) : row.weight_pct };
+    });
+    setEditorRows(normalized);
+    await previewEdit(true, normalized);
+  };
+  const saveEdit = async () => {
+    if (!editingId) return;
+    setEditorBusy("save");
+    setEditorNotice("");
+    try {
+      const result = await api.saveModelEdit(editingId, {
+        actor,
+        holdings: editorPayload(),
+        change_note: changeNote,
+        rebalance_to_target: false,
+      });
+      setEditorPreview(result);
+      setEditorNotice(`Saved model edit v${result.event.version}.`);
+      await onModelEdited();
+    } catch (error) {
+      setEditorNotice(error instanceof Error ? error.message : "Save failed.");
+    } finally {
+      setEditorBusy("");
+    }
+  };
+  const editingModel = models.find((model) => model.id === editingId) || null;
   return (
     <div className="view-stack">
       <header className="view-head">
@@ -115,11 +191,73 @@ export function Models({
                 <span>{model.real_coverage_count || 0}/{model.n_holdings}</span>
                 <span>{model.missing_tickers?.slice(0, 3).join(", ") || "None"}</span>
                 <span className="row-actions">
+                  <button type="button" onClick={() => startEdit(model)}>Edit</button>
                   <button type="button" onClick={() => onOpenModel(model.id)}>Analysis</button>
                   <button type="button" onClick={() => onOpenClinic(model.id)}>Clinic</button>
                 </span>
               </div>
             ))}
+          </div>
+        )}
+      </Panel>
+      <Panel title="Model Editor" meta={editingModel ? editingModel.name : "native editing"}>
+        {!editingModel ? (
+          <EmptyState title="Select a model to edit" body="Change holdings and target weights directly from Imported Models, then preview governance breaches before saving." />
+        ) : (
+          <div className="model-editor-workspace">
+            <div className="model-editor-head">
+              <div>
+                <strong>{editingModel.name}</strong>
+                <span>{editingModel.mandate_label} · {editingModel.n_holdings} current holdings</span>
+                <p>Change holdings and target weights, preview breaches, require change notes, and record a governance snapshot on save.</p>
+              </div>
+              <div className="model-editor-actions">
+                <button type="button" onClick={() => previewEdit(false)} disabled={Boolean(editorBusy)}>Preview breaches</button>
+                <button type="button" onClick={rebalanceToTarget} disabled={Boolean(editorBusy)}>Rebalance to target</button>
+              </div>
+            </div>
+            {editorNotice && <div className="form-feedback" role="status">{editorNotice}</div>}
+            <div className="terminal-table model-editor-table" tabIndex={0} aria-label="Model Editor holdings table">
+              <div className="terminal-table__head"><span>Ticker</span><span>Target Weight</span><span>Action</span></div>
+              {editorRows.map((row, index) => (
+                <div className="table-row" key={`${index}-${row.ticker}`}>
+                  <input aria-label={`Ticker ${index + 1}`} value={row.ticker} onChange={(event) => updateEditorRow(index, { ticker: event.target.value })} />
+                  <input aria-label={`Target weight ${index + 1}`} value={row.weight_pct} inputMode="decimal" onChange={(event) => updateEditorRow(index, { weight_pct: event.target.value })} />
+                  <button type="button" onClick={() => removeEditorRow(index)} disabled={editorRows.length <= 1}>Remove</button>
+                </div>
+              ))}
+            </div>
+            <button className="side-secondary-action" type="button" onClick={addEditorRow}>Add holding</button>
+            {editorPreview && (
+              <div className="model-editor-preview">
+                <div className="metric-grid">
+                  <div className="stat-tile"><span>Risk state</span><strong className={editorPreview.risk_limit_state === "breach" ? "tone-warning" : "tone-positive"}>{formatStatus(editorPreview.risk_limit_state)}</strong><small>Preview before save</small></div>
+                  <div className="stat-tile"><span>Holdings</span><strong>{editorPreview.proposed_holdings.length}</strong><small>Target rows</small></div>
+                  <div className="stat-tile"><span>Max single</span><strong>{fmtPct(editorPreview.risk_limits.max_single_position_pct)}</strong><small>Governance limit</small></div>
+                  <div className="stat-tile"><span>Min holdings</span><strong>{editorPreview.risk_limits.min_holdings}</strong><small>Governance limit</small></div>
+                </div>
+                {editorPreview.risk_limit_violations.length > 0 ? (
+                  <ul className="warning-list">
+                    {editorPreview.risk_limit_violations.map((violation) => <li key={`${violation.field}-${violation.ticker || "model"}`}>{violation.message}</li>)}
+                  </ul>
+                ) : <p className="muted">No governance breaches in the current preview.</p>}
+              </div>
+            )}
+            <label className="model-editor-note">
+              Change note
+              <textarea
+                value={changeNote}
+                onChange={(event) => setChangeNote(event.target.value)}
+                rows={3}
+                placeholder="Required: explain what changed and why."
+              />
+            </label>
+            <div className="model-editor-actions">
+              <button type="button" onClick={saveEdit} disabled={Boolean(editorBusy) || changeNote.trim().length < 5}>
+                {editorBusy === "save" ? "Saving..." : "Save model edit"}
+              </button>
+              <button type="button" onClick={() => startEdit(editingModel)} disabled={Boolean(editorBusy)}>Reset editor</button>
+            </div>
           </div>
         )}
       </Panel>

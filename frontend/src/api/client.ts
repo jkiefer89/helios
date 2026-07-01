@@ -9,6 +9,9 @@ import type {
   DataStatusResponse,
   EvidenceLabResponse,
   MandateSummary,
+  ModelEditHoldingInput,
+  ModelEditPreviewResponse,
+  ModelEditSaveResponse,
   ModelSummary,
   ModelGovernanceResponse,
   ModelTemplate,
@@ -68,6 +71,24 @@ export const api = {
         body: JSON.stringify(payload),
       },
     ),
+  previewModelEdit: (
+    id: string,
+    payload: { holdings: ModelEditHoldingInput[]; rebalance_to_target?: boolean },
+  ) =>
+    request<ModelEditPreviewResponse>(`/api/models/${encodeURIComponent(id)}/editor/preview`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
+  saveModelEdit: (
+    id: string,
+    payload: { holdings: ModelEditHoldingInput[]; change_note: string; actor?: string; rebalance_to_target?: boolean },
+  ) =>
+    request<ModelEditSaveResponse>(`/api/models/${encodeURIComponent(id)}/editor`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
   modelLibrary: () => request<{ templates: ModelTemplate[] }>("/api/model-library"),
   importModelTemplate: (slug: string) =>
     request<ModelTemplateImportResponse>("/api/model-library/import", {

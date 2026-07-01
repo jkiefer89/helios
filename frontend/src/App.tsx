@@ -147,6 +147,11 @@ export default function App() {
     }
   };
 
+  const onModelEdited = async () => {
+    await Promise.all([refreshLists(), refreshCommand()]);
+    setNotice("Model edited and governance snapshot recorded.");
+  };
+
   const onFetchLive = async (symbol: string) => {
     try {
       const result = await api.fetchLive(symbol);
@@ -207,6 +212,7 @@ export default function App() {
           templates={modelLibrary}
           onImportTemplate={onImportTemplate}
           onRecordGovernance={onRecordModelGovernance}
+          onModelEdited={onModelEdited}
           onOpenModel={openModel}
           onOpenClinic={(id) => { selectModelOnly(id); setActiveView("clinic"); }}
         />

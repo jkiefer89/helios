@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
-from . import mandate, model_library, persistence, portfolio
+from . import data, mandate, model_library, persistence, portfolio
 
 APPROVAL_STATUSES = {"draft", "pending_review", "approved", "rejected", "archived"}
 REBALANCE_ACTIONS = {"rebalance_recorded", "rebalance_reviewed"}
@@ -113,6 +113,60 @@ def record_event(
     return {"recorded": event is not None, "event": event, "warning": "" if event else store.warning}
 
 
+def preview_edit(
+    model: portfolio.Model,
+    *,
+    holdings: list[dict[str, Any]],
+    rebalance_to_target: bool = False,
+) -> dict[str, Any]:
+    """Return a save preview for proposed holdings without mutating the model."""
+    draft = _draft_model(model, holdings, rebalance_to_target=rebalance_to_target)
+    return _editor_payload(model, draft, rebalance_to_target=rebalance_to_target)
+
+
+def save_edit(
+    model: portfolio.Model,
+    *,
+    holdings: list[dict[str, Any]],
+    change_note: str,
+    actor: str = DEFAULT_ACTOR,
+    rebalance_to_target: bool = False,
+) -> dict[str, Any]:
+    """Persist edited holdings and record a governance snapshot."""
+    note = str(change_note or "").strip()
+    if len(note) < 5:
+        return {"saved": False, "warning": "A change note is required before saving model edits."}
+    draft = _draft_model(model, holdings, rebalance_to_target=rebalance_to_target)
+    source_by_ticker = {holding.ticker: holding.source for holding in model.holdings}
+    edited = portfolio.Model(
+        id=model.id,
+        name=model.name,
+        mandate_key=model.mandate_key,
+        mandate_context=model.mandate_context,
+        holdings=[
+            portfolio.Holding(holding.ticker, holding.weight, source_by_ticker.get(holding.ticker, "pending"))
+            for holding in draft.holdings
+        ],
+    )
+    portfolio.register(edited)
+    persisted = portfolio._persist_model(edited, source_filename="model-editor")
+    if not persisted.get("persisted"):
+        return {"saved": False, "warning": persisted.get("warning") or "Could not persist model edits."}
+    event_result = record_event(
+        edited,
+        actor=actor or DEFAULT_ACTOR,
+        action="model_edit",
+        note=note,
+    )
+    if not event_result.get("recorded"):
+        return {"saved": False, "warning": event_result.get("warning") or "Could not record model edit governance event."}
+    return {
+        **_editor_payload(model, edited, rebalance_to_target=rebalance_to_target),
+        "saved": True,
+        "event": event_result["event"],
+    }
+
+
 def _model_row(model: portfolio.Model, events: list[dict[str, Any]]) -> dict[str, Any]:
     latest_event = events[0] if events else None
     latest_status_event = next((event for event in events if event.get("approval_status")), None)
@@ -153,6 +207,7 @@ def _model_row(model: portfolio.Model, events: list[dict[str, Any]]) -> dict[str
         "holdings_count": len(model.holdings),
         "top_holding": model.holdings[0].ticker if model.holdings else "",
         "top_weight_pct": round(float(model.holdings[0].weight) * 100, 2) if model.holdings else 0.0,
+        "holdings": _holdings_payload(model.holdings),
         "source": _template_for_model(model).get("provenance", {}).get("source_type", "client_model"),
         "provenance": _template_for_model(model).get("provenance", {
             "source_type": "client_model",
@@ -161,6 +216,105 @@ def _model_row(model: portfolio.Model, events: list[dict[str, Any]]) -> dict[str
             "caveat": "Governance metadata is local workflow evidence, not investment advice.",
         }),
     }
+
+
+def _editor_payload(
+    current_model: portfolio.Model,
+    draft_model: portfolio.Model,
+    *,
+    rebalance_to_target: bool,
+) -> dict[str, Any]:
+    limits = _risk_limits(current_model)
+    violations = _risk_limit_violations(draft_model, limits)
+    return {
+        "model": {
+            "id": draft_model.id,
+            "name": draft_model.name,
+            "mandate": draft_model.mandate_key,
+            "mandate_label": mandate.get(draft_model.mandate_key)["label"],
+            "holdings": _holdings_payload(draft_model.holdings),
+        },
+        "current_holdings": _holdings_payload(current_model.holdings),
+        "proposed_holdings": _holdings_payload(draft_model.holdings),
+        "rebalance_to_target": bool(rebalance_to_target),
+        "risk_limits": limits,
+        "risk_limit_state": "breach" if violations else "within_limits",
+        "risk_limit_violations": violations,
+        "can_save": True,
+        "requires_change_note": True,
+        "disclaimer": _disclaimer(),
+    }
+
+
+def _draft_model(
+    model: portfolio.Model,
+    holdings: list[dict[str, Any]],
+    *,
+    rebalance_to_target: bool,
+) -> portfolio.Model:
+    proposed = _parse_editor_holdings(holdings, rebalance_to_target=rebalance_to_target)
+    return portfolio.Model(
+        id=model.id,
+        name=model.name,
+        mandate_key=model.mandate_key,
+        mandate_context=model.mandate_context,
+        holdings=proposed,
+    )
+
+
+def _parse_editor_holdings(raw_holdings: list[dict[str, Any]], *, rebalance_to_target: bool) -> list[portfolio.Holding]:
+    if not isinstance(raw_holdings, list) or not raw_holdings:
+        raise ValueError("Add at least one holding before previewing or saving model edits.")
+    merged: dict[str, float] = {}
+    order: list[str] = []
+    for raw in raw_holdings:
+        if not isinstance(raw, dict):
+            continue
+        ticker = data.clean_symbol(str(raw.get("ticker") or raw.get("symbol") or ""), fallback="")
+        if not ticker:
+            continue
+        weight_pct = _editor_weight_pct(raw)
+        if weight_pct <= 0:
+            continue
+        if ticker not in merged:
+            order.append(ticker)
+        merged[ticker] = merged.get(ticker, 0.0) + weight_pct
+    if not merged:
+        raise ValueError("Add at least one valid ticker with a positive target weight.")
+    if len(merged) > portfolio.MAX_HOLDINGS:
+        raise ValueError(f"Model editor supports up to {portfolio.MAX_HOLDINGS} holdings.")
+    total_pct = sum(merged.values())
+    if total_pct <= 0:
+        raise ValueError("Target weights must be positive.")
+    divisor = total_pct if rebalance_to_target else 100.0
+    holdings = [portfolio.Holding(ticker, round(merged[ticker] / divisor, 6)) for ticker in order]
+    return holdings
+
+
+def _editor_weight_pct(raw: dict[str, Any]) -> float:
+    value = raw.get("weight_pct")
+    if value is None:
+        value = raw.get("target_weight_pct")
+    if value is None:
+        value = raw.get("weight")
+        if isinstance(value, (int, float)) and 0 < float(value) <= 1:
+            return float(value) * 100
+    try:
+        return max(0.0, float(str(value).replace("%", "").strip()))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _holdings_payload(holdings: list[portfolio.Holding]) -> list[dict[str, Any]]:
+    return [
+        {
+            "ticker": holding.ticker,
+            "weight": round(float(holding.weight), 6),
+            "weight_pct": round(float(holding.weight) * 100, 2),
+            "source": holding.source or "pending",
+        }
+        for holding in holdings
+    ]
 
 
 def _snapshot(model: portfolio.Model, *, version: int, approval_status: str) -> dict[str, Any]:
@@ -291,7 +445,7 @@ def _normalise_status(value: Any) -> str:
 
 def _normalise_action(value: Any, has_status: bool) -> str:
     action = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
-    allowed = {"approval_update", "archive_snapshot", "change_note", *REBALANCE_ACTIONS}
+    allowed = {"approval_update", "archive_snapshot", "change_note", "model_edit", *REBALANCE_ACTIONS}
     if action in allowed:
         return action
     return "approval_update" if has_status else "change_note"
