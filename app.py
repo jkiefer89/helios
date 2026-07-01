@@ -141,6 +141,9 @@ _AUTO_LIVE_THREAD: threading.Thread | None = None
 _AUTO_LIVE_STOP = threading.Event()
 _AUTO_LIVE_LAST_RESULT: dict | None = None
 _AUTO_LIVE_LAST_RUN: str | None = None
+DATA_QUALITY_STALE_DAYS = 7
+DATA_QUALITY_MIN_RESEARCH_ROWS = 60
+DATA_QUALITY_MIN_INSTITUTIONAL_ROWS = 252
 
 
 def _env_int(name: str, default: int, min_value: int, max_value: int) -> int:
@@ -617,6 +620,11 @@ def command_center():
 @app.route("/api/data/status")
 def data_status():
     return ok(_data_status_payload())
+
+
+@app.route("/api/data-quality")
+def data_quality():
+    return ok(_data_quality_payload())
 
 
 @app.route("/api/signal-journal")
@@ -1546,6 +1554,184 @@ def _data_status_payload() -> dict:
             "blocked_model_count": sum(1 for row in model_rows if row["coverage_state"] != "real"),
         },
         "refresh_log": refresh_logs,
+    }
+
+
+def _data_quality_payload() -> dict:
+    instruments = data.all_instruments()
+    models = portfolio.all_models()
+    refresh_logs = persistence.get_store().refresh_log(limit=250)
+    refresh_by_symbol = {}
+    for row in refresh_logs:
+        refresh_by_symbol.setdefault(row["symbol"], row)
+    symbols = [_data_quality_symbol_row(inst, refresh_by_symbol.get(inst.symbol)) for inst in instruments]
+    model_rows = [_data_quality_model_row(mdl) for mdl in models]
+    issues = []
+    for row in symbols:
+        if row["is_stale"]:
+            issues.append(_quality_issue(
+                "stale_symbols",
+                "warning",
+                row["symbol"],
+                f"{row['symbol']} latest data is {row['days_stale']} calendar days old.",
+                "Refresh live data or verify the uploaded date range before current research use.",
+            ))
+        if row["source"] != "sample" and row["row_count"] < DATA_QUALITY_MIN_INSTITUTIONAL_ROWS:
+            severity = "blocker" if row["row_count"] < DATA_QUALITY_MIN_RESEARCH_ROWS else "warning"
+            issues.append(_quality_issue(
+                "short_histories",
+                severity,
+                row["symbol"],
+                f"{row['symbol']} has {row['row_count']} rows; institutional review target is {DATA_QUALITY_MIN_INSTITUTIONAL_ROWS}.",
+                "Fetch/upload a longer adjusted history before relying on model evidence.",
+            ))
+    for row in refresh_logs:
+        if str(row.get("status") or "").lower() == "error":
+            issues.append(_quality_issue(
+                "refresh_failures",
+                "warning",
+                row["symbol"],
+                f"{row['symbol']} refresh failed: {row.get('message') or 'provider error'}",
+                "Retry refresh and keep the prior stored history until the provider succeeds.",
+            ))
+    missing_rows = []
+    coverage_gaps = []
+    source_conflicts = []
+    for model_row in model_rows:
+        missing_rows.extend({"symbol": symbol, "model_id": model_row["id"], "model_name": model_row["name"]} for symbol in model_row["missing_tickers"])
+        if model_row["coverage_state"] != "real":
+            coverage_gaps.append({
+                "model_id": model_row["id"],
+                "model_name": model_row["name"],
+                "coverage_state": model_row["coverage_state"],
+                "real_coverage_count": model_row["real_coverage_count"],
+                "n_holdings": model_row["n_holdings"],
+                "missing_tickers": model_row["missing_tickers"],
+            })
+            issues.append(_quality_issue(
+                "coverage_gaps",
+                "blocker" if model_row["real_coverage_count"] == 0 else "warning",
+                model_row["name"],
+                f"{model_row['name']} has {model_row['real_coverage_count']}/{model_row['n_holdings']} holdings with real research coverage.",
+                "Fetch live histories for each uncovered holding before treating the model as research-ready.",
+            ))
+        nonzero_sources = {k: v for k, v in model_row["source_counts"].items() if v}
+        if len(nonzero_sources) > 1:
+            conflict = {
+                "model_id": model_row["id"],
+                "model_name": model_row["name"],
+                "source_counts": nonzero_sources,
+                "coverage_state": model_row["coverage_state"],
+            }
+            source_conflicts.append(conflict)
+            issues.append(_quality_issue(
+                "source_conflicts",
+                "warning",
+                model_row["name"],
+                f"{model_row['name']} mixes sources: " + ", ".join(f"{source}={count}" for source, count in sorted(nonzero_sources.items())),
+                "Resolve mixed/missing/sample coverage before presenting a unified model evidence pack.",
+            ))
+    for row in missing_rows:
+        issues.append(_quality_issue(
+            "missing_data",
+            "blocker",
+            row["symbol"],
+            f"{row['symbol']} is required by {row['model_name']} but has no eligible real history.",
+            "Fetch live data or upload an eligible adjusted price history.",
+        ))
+    blockers = sum(1 for issue in issues if issue["severity"] == "blocker")
+    warnings = sum(1 for issue in issues if issue["severity"] == "warning")
+    research_ready_symbols = [row for row in symbols if row["research_ready"]]
+    research_ready_models = [row for row in model_rows if row["research_ready"]]
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "research_ready": blockers == 0 and bool(research_ready_symbols or research_ready_models),
+        "thresholds": {
+            "stale_days": DATA_QUALITY_STALE_DAYS,
+            "min_research_rows": DATA_QUALITY_MIN_RESEARCH_ROWS,
+            "institutional_history_rows": DATA_QUALITY_MIN_INSTITUTIONAL_ROWS,
+        },
+        "summary": {
+            "symbol_count": len(symbols),
+            "model_count": len(model_rows),
+            "issue_count": len(issues),
+            "blocker_count": blockers,
+            "warning_count": warnings,
+            "research_ready_count": len(research_ready_symbols) + len(research_ready_models),
+            "stale_symbol_count": sum(1 for row in symbols if row["is_stale"]),
+            "missing_symbol_count": len({row["symbol"] for row in missing_rows}),
+            "refresh_failure_count": sum(1 for row in refresh_logs if str(row.get("status") or "").lower() == "error"),
+            "coverage_gap_count": len(coverage_gaps),
+        },
+        "symbols": symbols,
+        "models": model_rows,
+        "issues": issues,
+        "stale_symbols": [row for row in symbols if row["is_stale"]],
+        "short_histories": [row for row in symbols if row["source"] != "sample" and row["row_count"] < DATA_QUALITY_MIN_INSTITUTIONAL_ROWS],
+        "missing_data": missing_rows,
+        "refresh_failures": [row for row in refresh_logs if str(row.get("status") or "").lower() == "error"],
+        "coverage_gaps": coverage_gaps,
+        "source_conflicts": source_conflicts,
+        "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+    }
+
+
+def _data_quality_symbol_row(inst: data.Instrument, last_refresh: dict | None) -> dict:
+    close = inst.df["close"].dropna() if "close" in inst.df else pd.Series(dtype=float)
+    dates = pd.to_datetime(close.index, errors="coerce")
+    dates = dates[~pd.isna(dates)]
+    first_date = str(dates.min().date()) if len(dates) else None
+    last_date = str(dates.max().date()) if len(dates) else None
+    today = datetime.now(timezone.utc).date()
+    days_stale = (today - dates.max().date()).days if len(dates) else None
+    is_real_source = provenance.is_real_source(inst.source)
+    return {
+        "symbol": inst.symbol,
+        "name": inst.name,
+        "source": inst.source,
+        "row_count": int(len(close)),
+        "first_date": first_date,
+        "last_date": last_date,
+        "days_stale": days_stale,
+        "is_stale": bool(is_real_source and days_stale is not None and days_stale > DATA_QUALITY_STALE_DAYS),
+        "is_short": bool(is_real_source and len(close) < DATA_QUALITY_MIN_INSTITUTIONAL_ROWS),
+        "research_ready": bool(is_real_source and len(close) >= DATA_QUALITY_MIN_RESEARCH_ROWS),
+        "last_refresh": last_refresh,
+        "next_step": _data_quality_symbol_next_step(inst.source, len(close), days_stale),
+    }
+
+
+def _data_quality_model_row(mdl: portfolio.Model) -> dict:
+    coverage = _model_coverage(mdl)
+    return {
+        "id": mdl.id,
+        "name": mdl.name,
+        "mandate": mdl.mandate_key,
+        "n_holdings": len(mdl.holdings),
+        "research_ready": coverage["coverage_state"] == "real",
+        **coverage,
+    }
+
+
+def _data_quality_symbol_next_step(source: str, row_count: int, days_stale: int | None) -> str:
+    if not provenance.is_real_source(source):
+        return "Sample data is demo-only; fetch live or upload real history."
+    if row_count < DATA_QUALITY_MIN_RESEARCH_ROWS:
+        return "Fetch/upload at least 60 valid rows before real research."
+    if row_count < DATA_QUALITY_MIN_INSTITUTIONAL_ROWS:
+        return "Extend history toward a one-year institutional review window."
+    if days_stale is not None and days_stale > DATA_QUALITY_STALE_DAYS:
+        return "Refresh or verify the latest available provider date."
+    return "Research-ready, subject to analysis-only caveats."
+
+
+def _quality_issue(category: str, severity: str, target: str, detail: str, next_step: str) -> dict:
+    return {
+        "category": category,
+        "severity": severity,
+        "target": target,
+        "detail": detail,
+        "next_step": next_step,
     }
 
 

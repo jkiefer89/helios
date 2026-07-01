@@ -177,6 +177,82 @@ export interface DataRefreshResponse {
   data_status: DataStatusResponse;
 }
 
+export interface DataQualityIssue {
+  category: "stale_symbols" | "missing_data" | "short_histories" | "source_conflicts" | "refresh_failures" | "coverage_gaps" | string;
+  severity: "blocker" | "warning" | "info" | string;
+  target: string;
+  detail: string;
+  next_step: string;
+}
+
+export interface DataQualitySymbol {
+  symbol: string;
+  name: string;
+  source: string;
+  row_count: number;
+  first_date?: string | null;
+  last_date?: string | null;
+  days_stale?: number | null;
+  is_stale: boolean;
+  is_short: boolean;
+  research_ready: boolean;
+  last_refresh?: RefreshLogEntry | null;
+  next_step: string;
+}
+
+export interface DataQualityModel {
+  id: string;
+  name: string;
+  mandate: string;
+  n_holdings: number;
+  real_coverage_count: number;
+  missing_tickers: string[];
+  source_counts: Record<string, number>;
+  coverage_state: string;
+  research_ready: boolean;
+}
+
+export interface DataQualityCoverageGap {
+  model_id: string;
+  model_name: string;
+  coverage_state: string;
+  real_coverage_count: number;
+  n_holdings: number;
+  missing_tickers: string[];
+}
+
+export interface DataQualityResponse {
+  generated_at: string;
+  research_ready: boolean;
+  thresholds: {
+    stale_days: number;
+    min_research_rows: number;
+    institutional_history_rows: number;
+  };
+  summary: {
+    symbol_count: number;
+    model_count: number;
+    issue_count: number;
+    blocker_count: number;
+    warning_count: number;
+    research_ready_count: number;
+    stale_symbol_count: number;
+    missing_symbol_count: number;
+    refresh_failure_count: number;
+    coverage_gap_count: number;
+  };
+  symbols: DataQualitySymbol[];
+  models: DataQualityModel[];
+  issues: DataQualityIssue[];
+  stale_symbols: DataQualitySymbol[];
+  short_histories: DataQualitySymbol[];
+  missing_data: Array<{ symbol: string; model_id: string; model_name: string }>;
+  refresh_failures: RefreshLogEntry[];
+  coverage_gaps: DataQualityCoverageGap[];
+  source_conflicts: Array<{ model_id: string; model_name: string; source_counts: Record<string, number>; coverage_state: string }>;
+  disclaimer: string;
+}
+
 export interface AutoLiveStatus {
   enabled: boolean;
   live_available: boolean;

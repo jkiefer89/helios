@@ -1,10 +1,11 @@
 from io import BytesIO
 
+import pandas as pd
 import pytest
 
 import app as helios
-from engine import data, portfolio
-from tests.conftest import price_series
+from engine import data, persistence, portfolio
+from tests.conftest import price_csv, price_series
 
 
 @pytest.fixture()
@@ -113,6 +114,67 @@ def test_data_status_includes_auto_live_configuration(client, monkeypatch):
     assert auto_live["symbols"] == ["SPY", "QQQ"]
     assert auto_live["interval_seconds"] == 120
     assert auto_live["max_workers"] == 6
+
+
+def test_data_quality_dashboard_reports_institutional_issue_categories(client, monkeypatch, tmp_path):
+    monkeypatch.setenv("HELIOS_DB_PATH", str(tmp_path / "helios.db"))
+    persistence.reset_store_for_tests()
+    store = persistence.get_store()
+    assert store.available is True
+
+    short_live = pd.DataFrame({"close": price_series(days=45).values}, index=price_series(days=45).index)
+    data.register(data.Instrument("SHORTLIVE", "Short Live", short_live, "live", []))
+    store.record_refresh(
+        symbol="SHORTLIVE",
+        status="error",
+        rows_added=0,
+        message="upstream timeout during quality check",
+        source="live",
+    )
+    upload = client.post(
+        "/api/upload",
+        data={
+            "file": (BytesIO(price_csv(days=260)), "quality-upload.csv"),
+            "symbol": "QUALUP",
+            "name": "Quality Upload",
+        },
+        content_type="multipart/form-data",
+    )
+    assert upload.status_code == 200
+    model_upload = client.post(
+        "/api/model/upload",
+        data={
+            "file": (BytesIO(b"Ticker,Weight\nSHORTLIVE,35\nAAPL,35\nMISSINGQ,30\n"), "quality-model.csv"),
+            "name": "Quality Model",
+            "mandate": "balanced",
+        },
+        content_type="multipart/form-data",
+    )
+    assert model_upload.status_code == 200
+
+    resp = client.get("/api/data-quality")
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["research_ready"] is False
+    assert body["summary"]["issue_count"] >= 5
+    assert body["summary"]["research_ready_count"] >= 1
+    assert body["thresholds"]["min_research_rows"] == 60
+    categories = {issue["category"] for issue in body["issues"]}
+    assert {
+        "stale_symbols",
+        "short_histories",
+        "refresh_failures",
+        "missing_data",
+        "coverage_gaps",
+        "source_conflicts",
+    } <= categories
+    assert any(row["symbol"] == "SHORTLIVE" and row["is_stale"] for row in body["symbols"])
+    assert any(row["symbol"] == "SHORTLIVE" and not row["research_ready"] for row in body["symbols"])
+    assert any(row["symbol"] == "MISSINGQ" for row in body["missing_data"])
+    assert any(row["model_name"] == "Quality Model" for row in body["coverage_gaps"])
+    assert any(row["symbol"] == "SHORTLIVE" for row in body["refresh_failures"])
+    assert "Analysis only" in body["disclaimer"]
 
 
 def test_model_upload_and_analyze_smoke(client, monkeypatch):

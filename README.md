@@ -123,6 +123,7 @@ the backend's demo, mixed, or blocked provenance state.
 | **Conviction rationale** | Every signal explains itself: per-component clauses with the actual numbers, the mandate tilt, the vol penalty, and honesty caveats |
 | **Signal Journal** | Instrument/model analysis signals are logged locally with input date range, score, action, benchmark, provenance and paper forward result status |
 | **Report Export + History** | Advisor report snapshots are saved locally with branded HTML/PDF exports, source/date range/row counts, model metadata, caveats and optional AI narrative |
+| **Institutional Data Quality** | Dedicated research-readiness dashboard for stale symbols, missing data, short histories, source conflicts, refresh failures and model coverage gaps |
 | **Insights** | 12 rule-based suggestions per model — concentration, mandate fit, drawdown, correlation, forecast skill, data honesty — each with a concrete action |
 
 ### Data quality modes
@@ -164,6 +165,12 @@ instrument/model counts, date ranges, row counts, live-refresh status, model
 coverage, missing tickers, and copyable import templates. Refresh controls only
 refresh symbols already imported as `live`; bundled samples and uploaded CSVs
 are never silently promoted into live market data.
+
+The React **Data Quality** workspace adds an institutional readiness screen for
+stale symbols, short histories, missing model holdings, source conflicts,
+refresh failures, coverage gaps, and overall research-ready status. It is a
+diagnostic surface only; it does not change opportunity scoring, strategy
+evidence, or provenance gates.
 
 The **Reports** workspace can save an analysis-only snapshot of the current
 instrument or model report. Saved snapshots are local persistence records and
@@ -318,7 +325,7 @@ serve.py              production entrypoint — waitress on the local network
 app.py                Flask app + JSON API + Basic-Auth gate + payload sanitation
 frontend/            React + Vite + TypeScript research terminal
   src/api/           typed client for existing Flask APIs
-  src/views/         Command Center, Opportunity Radar, Strategy Lab, Clinic, Reports
+  src/views/         Command Center, Opportunity Radar, Strategy Lab, Clinic, Reports, Data Quality
 engine/
   data.py             data store, samples, CSV import, live fetch, holding resolution
   persistence.py      local SQLite schema, reload, refresh logs, provenance metadata
@@ -342,6 +349,7 @@ static/styles.css     legacy dashboard theme
 |----------|---------|
 | `GET /api/command-center` | Pro dashboard payload with regime, real-data opportunities, risks, model alerts and research queue |
 | `GET /api/data/status` | SQLite/database health, real-data counts, model coverage, missing tickers and refresh log |
+| `GET /api/data-quality` | institutional research-readiness dashboard: stale symbols, missing data, short histories, source conflicts, refresh failures and coverage gaps |
 | `GET /api/signal-journal` | local paper-performance journal of recorded analysis signals and measured/pending forward results |
 | `POST /api/data/refresh` | refresh existing live instruments (`{ "symbol": "AAPL" }` or `{ "all": true }`) |
 | `GET /api/opportunities` | Opportunity Radar rankings; returns no placeholder rows when real data is unavailable |

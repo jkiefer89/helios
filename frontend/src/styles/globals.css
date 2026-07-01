@@ -3800,6 +3800,83 @@ p {
   color: var(--muted);
 }
 
+.readiness-verdict {
+  display: grid;
+  gap: 0.18rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(7, 12, 20, 0.5);
+  padding: 0.78rem;
+  margin-bottom: 0.72rem;
+}
+
+.readiness-verdict strong {
+  color: var(--soft);
+  font-size: 1rem;
+}
+
+.readiness-verdict.ready {
+  border-color: rgba(74, 222, 128, 0.35);
+  background: rgba(34, 197, 94, 0.08);
+}
+
+.readiness-verdict.blocked {
+  border-color: rgba(244, 197, 66, 0.35);
+  background: rgba(244, 197, 66, 0.08);
+}
+
+.quality-issue-list {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.quality-issue-card {
+  display: grid;
+  gap: 0.26rem;
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  border-radius: 6px;
+  background: rgba(7, 12, 20, 0.42);
+  padding: 0.62rem 0.72rem;
+}
+
+.quality-issue-card strong,
+.quality-issue-card p,
+.quality-issue-card span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.quality-issue-card p {
+  margin: 0;
+  color: var(--soft);
+}
+
+.quality-issue-card span {
+  color: var(--muted);
+}
+
+.quality-issue-card.severity-blocker,
+.quality-severity.severity-blocker {
+  border-left-color: var(--red);
+  color: var(--red);
+}
+
+.quality-issue-card.severity-warning,
+.quality-severity.severity-warning {
+  border-left-color: var(--amber);
+  color: var(--amber);
+}
+
+.quality-table .table-row {
+  min-height: 54px;
+}
+
+.quality-severity {
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
 .up {
   color: var(--green);
 }

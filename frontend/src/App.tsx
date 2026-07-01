@@ -18,6 +18,7 @@ import { Reports } from "./views/Reports";
 import { Analysis } from "./views/Analysis";
 import { Instruments } from "./views/Instruments";
 import { Models } from "./views/Models";
+import { DataQuality } from "./views/DataQuality";
 
 export default function App() {
   const [activeView, setActiveView] = useState<ViewId>("command");
@@ -225,6 +226,9 @@ export default function App() {
           dataStatus={dataStatus}
         />
       );
+    }
+    if (activeView === "data-quality") {
+      return <DataQuality />;
     }
     return (
       <Analysis

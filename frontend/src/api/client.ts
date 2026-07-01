@@ -5,6 +5,7 @@ import type {
   ClinicResponse,
   CommandCenterResponse,
   DataRefreshResponse,
+  DataQualityResponse,
   DataStatusResponse,
   MandateSummary,
   ModelSummary,
@@ -41,6 +42,7 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
 export const api = {
   commandCenter: () => request<CommandCenterResponse>("/api/command-center"),
   dataStatus: () => request<DataStatusResponse>("/api/data/status"),
+  dataQuality: () => request<DataQualityResponse>("/api/data-quality"),
   refreshData: (params: { symbol?: string; all?: boolean } = {}) =>
     request<DataRefreshResponse>("/api/data/refresh", {
       method: "POST",

@@ -102,6 +102,27 @@ def test_reports_view_exposes_report_snapshot_exports():
     assert "ReportSnapshot" in type_source
 
 
+def test_data_quality_dashboard_view_is_dedicated_and_routed():
+    app_source = (ROOT / "frontend" / "src" / "App.tsx").read_text()
+    shell_source = (ROOT / "frontend" / "src" / "components" / "layout" / "AppShell.tsx").read_text()
+    view_source = (ROOT / "frontend" / "src" / "views" / "DataQuality.tsx").read_text()
+    client_source = (ROOT / "frontend" / "src" / "api" / "client.ts").read_text()
+    type_source = (ROOT / "frontend" / "src" / "api" / "types.ts").read_text()
+
+    assert '"data-quality"' in shell_source
+    assert "Data Quality" in shell_source
+    assert "DataQuality" in app_source
+    assert "api.dataQuality" in view_source
+    assert "dataQuality:" in client_source
+    assert "DataQualityResponse" in type_source
+    assert "Institutional Data Quality" in view_source
+    assert "Stale Symbols" in view_source
+    assert "Short Histories" in view_source
+    assert "Refresh Failures" in view_source
+    assert "Coverage Gaps" in view_source
+    assert "Research-ready" in view_source
+
+
 def test_flask_serves_react_build_when_present(tmp_path, monkeypatch):
     dist = tmp_path / "dist"
     assets = dist / "assets"
