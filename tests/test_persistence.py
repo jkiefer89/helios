@@ -297,6 +297,29 @@ def test_raw_upload_content_and_secret_tokens_are_not_stored(monkeypatch, tmp_pa
     assert "SECRET_TOKEN_SHOULD_NOT_STORE" not in text
 
 
+def test_data_quality_alert_tracking_redacts_secret_like_text(monkeypatch, tmp_path):
+    store = _use_db(monkeypatch, tmp_path)
+
+    result = store.sync_data_quality_alerts(
+        [{
+            "id": "data_quality:refresh_failures:SECRET1",
+            "category": "refresh_failures",
+            "severity": "warning",
+            "target": "SECRET1",
+            "detail": "Provider failed with api_key=SECRET_TOKEN_SHOULD_NOT_STORE",
+            "next_step": "Retry refresh after provider recovers.",
+        }],
+        generated_at="2026-07-01T12:00:00+00:00",
+    )
+
+    assert result["tracking_available"] is True
+    assert result["summary"]["active_count"] == 1
+    assert result["active"][0]["status"] == "active"
+    assert "SECRET_TOKEN_SHOULD_NOT_STORE" not in result["active"][0]["detail"]
+    assert "redacted" in result["active"][0]["detail"].lower()
+    assert "SECRET_TOKEN_SHOULD_NOT_STORE" not in store.path.read_bytes().decode("utf-8", errors="ignore")
+
+
 def test_local_persistence_encrypts_sensitive_payloads_when_key_configured(monkeypatch, tmp_path):
     monkeypatch.setenv("HELIOS_DB_ENCRYPTION", "required")
     monkeypatch.setenv("HELIOS_DB_ENCRYPTION_KEY", "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=")

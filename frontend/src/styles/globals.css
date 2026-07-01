@@ -4254,6 +4254,59 @@ p {
   background: rgba(244, 197, 66, 0.08);
 }
 
+.quality-alert-ledger {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 0.85rem;
+  margin-top: 0.85rem;
+}
+
+.quality-alert-feed {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(6, 12, 20, 0.38);
+  overflow: hidden;
+}
+
+.quality-alert-feed__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  border-bottom: 1px solid var(--line);
+  padding: 0.58rem 0.68rem;
+  color: var(--soft);
+  font-size: 0.72rem;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.quality-alert-feed .empty-state {
+  border: 0;
+  box-shadow: none;
+  margin: 0;
+}
+
+.quality-alert-feed .alert-terminal-row {
+  grid-template-columns: minmax(68px, 0.22fr) minmax(0, 1fr) minmax(94px, 0.24fr);
+  padding: 0.58rem 0.68rem;
+}
+
+.quality-alert-feed .alert-terminal-row > b {
+  align-self: start;
+  min-width: 0;
+}
+
+.quality-alert-feed .alert-terminal-row em small {
+  display: block;
+  margin-top: 0.18rem;
+  color: var(--muted);
+  font-size: 0.61rem;
+  font-weight: 700;
+  text-transform: none;
+}
+
 .quality-issue-list {
   display: grid;
   gap: 0.55rem;

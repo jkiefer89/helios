@@ -208,6 +208,11 @@ def test_data_quality_dashboard_view_is_dedicated_and_routed():
     assert "Observability Gaps" in view_source
     assert "Coverage Gaps" in view_source
     assert "Research-ready" in view_source
+    assert "Alert Center" in view_source
+    assert "Active Alerts" in view_source
+    assert "Resolved Alerts" in view_source
+    assert "notification_state" in type_source
+    assert "DataQualityAlert" in type_source
 
 
 def test_risk_analytics_view_is_dedicated_and_routed():

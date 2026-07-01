@@ -25,7 +25,7 @@ except Exception:  # pragma: no cover - exercised when dependency install is bro
     Fernet = None
     InvalidToken = Exception
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 REAL_SOURCES = {"live", "upload"}
 DISABLED_VALUES = {"", "0", "false", "off", "disabled", "none"}
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[1] / ".helios" / "helios.db"
@@ -396,6 +396,9 @@ class SQLiteStore:
     def _signal_row(self, row: sqlite3.Row) -> dict[str, Any]:
         return _signal_row(row, self)
 
+    def _data_quality_alert_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        return _data_quality_alert_row(row, self)
+
     def _normalise_existing_rows(self, conn: sqlite3.Connection) -> None:
         if not self._cipher:
             return
@@ -504,6 +507,28 @@ class SQLiteStore:
                     self._store_long_text(self._load_text(row["html"])),
                     self._store_json(self._load_json(row["metadata_json"])),
                     row["snapshot_id"],
+                ),
+            )
+        for row in conn.execute("SELECT * FROM data_quality_alerts").fetchall():
+            conn.execute(
+                """
+                UPDATE data_quality_alerts
+                SET category = ?, severity = ?, target = ?, detail = ?,
+                    next_step = ?, status = ?, resolved_at = ?,
+                    last_fingerprint = ?, metadata_json = ?
+                WHERE alert_id = ?
+                """,
+                (
+                    self._store_text(self._load_text(row["category"])),
+                    self._store_text(self._load_text(row["severity"])),
+                    self._store_text(self._load_text(row["target"])),
+                    self._store_text(self._load_text(row["detail"])),
+                    self._store_text(self._load_text(row["next_step"])),
+                    self._store_text(self._load_text(row["status"])),
+                    self._store_text(self._load_text(row["resolved_at"])),
+                    self._store_text(self._load_text(row["last_fingerprint"])),
+                    self._store_json(self._load_json(row["metadata_json"])),
+                    row["alert_id"],
                 ),
             )
 
@@ -915,6 +940,121 @@ class SQLiteStore:
         except Exception:
             return []
 
+    def sync_data_quality_alerts(self, alerts: list[dict[str, Any]], generated_at: str | None = None) -> dict[str, Any]:
+        if not self.available:
+            return _data_quality_alert_result([], tracking_available=False, warning=self.warning)
+        now = redact_secrets(str(generated_at or utc_now()))[:40]
+        incoming = _normalise_alerts(alerts)
+        incoming_ids = {alert["id"] for alert in incoming}
+        notification_states: dict[str, str] = {}
+        try:
+            with self._connect() as conn:
+                existing = {
+                    row["alert_id"]: row
+                    for row in conn.execute("SELECT * FROM data_quality_alerts").fetchall()
+                }
+                for alert in incoming:
+                    alert_id = alert["id"]
+                    fingerprint = _alert_fingerprint(alert)
+                    row = existing.get(alert_id)
+                    if row:
+                        prior_status = self._load_text(row["status"])
+                        prior_fingerprint = self._load_text(row["last_fingerprint"])
+                        occurrence_count = int(row["occurrence_count"] or 0) + 1
+                        if prior_status == "resolved":
+                            state = "reopened"
+                        elif prior_fingerprint != fingerprint:
+                            state = "changed"
+                        else:
+                            state = "active"
+                        notification_states[alert_id] = state
+                        conn.execute(
+                            """
+                            UPDATE data_quality_alerts
+                            SET category = ?, severity = ?, target = ?, detail = ?,
+                                next_step = ?, status = 'active',
+                                last_seen_at = ?, last_changed_at = ?,
+                                resolved_at = '', occurrence_count = ?,
+                                last_fingerprint = ?, metadata_json = ?
+                            WHERE alert_id = ?
+                            """,
+                            (
+                                self._store_text(alert["category"]),
+                                self._store_text(alert["severity"]),
+                                self._store_text(alert["target"]),
+                                self._store_text(alert["detail"]),
+                                self._store_text(alert["next_step"]),
+                                now,
+                                now if state in {"reopened", "changed"} else row["last_changed_at"],
+                                occurrence_count,
+                                self._store_text(fingerprint),
+                                self._store_json(alert.get("metadata") or {}),
+                                alert_id,
+                            ),
+                        )
+                    else:
+                        notification_states[alert_id] = "new"
+                        conn.execute(
+                            """
+                            INSERT INTO data_quality_alerts
+                              (alert_id, category, severity, target, detail, next_step,
+                               status, first_seen_at, last_seen_at, last_changed_at,
+                               resolved_at, occurrence_count, last_fingerprint, metadata_json)
+                            VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, '', 1, ?, ?)
+                            """,
+                            (
+                                alert_id,
+                                self._store_text(alert["category"]),
+                                self._store_text(alert["severity"]),
+                                self._store_text(alert["target"]),
+                                self._store_text(alert["detail"]),
+                                self._store_text(alert["next_step"]),
+                                now,
+                                now,
+                                now,
+                                self._store_text(fingerprint),
+                                self._store_json(alert.get("metadata") or {}),
+                            ),
+                        )
+
+                for row in existing.values():
+                    alert_id = row["alert_id"]
+                    if alert_id in incoming_ids or self._load_text(row["status"]) == "resolved":
+                        continue
+                    notification_states[alert_id] = "resolved"
+                    conn.execute(
+                        """
+                        UPDATE data_quality_alerts
+                        SET status = 'resolved',
+                            last_changed_at = ?,
+                            resolved_at = ?
+                        WHERE alert_id = ?
+                        """,
+                        (now, now, alert_id),
+                    )
+
+                rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM data_quality_alerts
+                    ORDER BY
+                      CASE status WHEN 'active' THEN 0 ELSE 1 END,
+                      CASE severity WHEN 'blocker' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
+                      last_changed_at DESC,
+                      target ASC
+                    """
+                ).fetchall()
+            out = []
+            for row in rows:
+                alert = self._data_quality_alert_row(row)
+                alert["notification_state"] = notification_states.get(alert["id"], "active" if alert["status"] == "active" else "resolved")
+                alert["should_notify"] = alert["notification_state"] in {"new", "reopened", "changed", "resolved"}
+                out.append(alert)
+            return _data_quality_alert_result(out, tracking_available=True)
+        except Exception as exc:
+            self.warning = f"Could not sync data quality alerts: {exc}"
+            return _data_quality_alert_result(incoming, tracking_available=False, warning=self.warning)
+
     def record_signal_event(self, event: dict[str, Any]) -> dict[str, Any]:
         if not self.available:
             return {"recorded": False, "warning": self.warning}
@@ -1264,6 +1404,26 @@ def _create_schema(conn: sqlite3.Connection) -> None:
         """
     )
     conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS data_quality_alerts (
+          alert_id TEXT PRIMARY KEY,
+          category TEXT NOT NULL,
+          severity TEXT NOT NULL,
+          target TEXT NOT NULL,
+          detail TEXT NOT NULL,
+          next_step TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'active',
+          first_seen_at TEXT NOT NULL,
+          last_seen_at TEXT NOT NULL,
+          last_changed_at TEXT NOT NULL,
+          resolved_at TEXT NOT NULL DEFAULT '',
+          occurrence_count INTEGER NOT NULL DEFAULT 1,
+          last_fingerprint TEXT NOT NULL DEFAULT '',
+          metadata_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    conn.execute(
         "INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES (?, ?)",
         (SCHEMA_VERSION, utc_now()),
     )
@@ -1272,6 +1432,7 @@ def _create_schema(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_signal_journal_target ON signal_journal(target_kind, target_id, input_end_date)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_report_snapshots_target ON report_snapshots(target_kind, target_id, created_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_model_governance_model ON model_governance_events(model_id, created_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_data_quality_alerts_status ON data_quality_alerts(status, category, severity)")
 
 
 def _normalise_price_frame(frame: pd.DataFrame) -> pd.DataFrame:
@@ -1428,6 +1589,30 @@ def _model_governance_event_row(row: sqlite3.Row, store: SQLiteStore | None = No
     }
 
 
+def _data_quality_alert_row(row: sqlite3.Row, store: SQLiteStore | None = None) -> dict[str, Any]:
+    def text(name: str) -> str:
+        return store._load_text(row[name]) if store else str(row[name] or "")
+
+    def object_json(name: str) -> dict[str, Any]:
+        return store._load_json(row[name]) if store else _json_loads(row[name])
+
+    return {
+        "id": row["alert_id"],
+        "category": text("category"),
+        "severity": text("severity"),
+        "target": text("target"),
+        "detail": text("detail"),
+        "next_step": text("next_step"),
+        "status": text("status"),
+        "first_seen_at": row["first_seen_at"],
+        "last_seen_at": row["last_seen_at"],
+        "last_changed_at": row["last_changed_at"],
+        "resolved_at": text("resolved_at") or None,
+        "occurrence_count": int(row["occurrence_count"] or 0),
+        "metadata": object_json("metadata_json"),
+    }
+
+
 def _report_snapshot_row(row: sqlite3.Row, store: SQLiteStore, *, include_report: bool) -> dict[str, Any]:
     warnings = store._load_json(row["warnings_json"]).get("warnings") or []
     metadata = store._load_json(row["metadata_json"])
@@ -1471,6 +1656,58 @@ def _report_snapshot_row(row: sqlite3.Row, store: SQLiteStore, *, include_report
         snapshot["report"] = store._load_json(row["report_json"])
         snapshot["html"] = store._load_text(row["html"])
     return snapshot
+
+
+def _normalise_alerts(alerts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for alert in alerts or []:
+        alert_id = redact_secrets(str(alert.get("id") or ""))[:160]
+        if not alert_id or alert_id in seen:
+            continue
+        seen.add(alert_id)
+        out.append({
+            "id": alert_id,
+            "category": redact_secrets(str(alert.get("category") or "data_quality"))[:80],
+            "severity": redact_secrets(str(alert.get("severity") or "info"))[:32],
+            "target": redact_secrets(str(alert.get("target") or "Workspace"))[:160],
+            "detail": redact_secrets(str(alert.get("detail") or ""))[:600],
+            "next_step": redact_secrets(str(alert.get("next_step") or ""))[:600],
+            "metadata": alert.get("metadata") if isinstance(alert.get("metadata"), dict) else {},
+        })
+    return out
+
+
+def _alert_fingerprint(alert: dict[str, Any]) -> str:
+    return _json_dumps({
+        "category": alert.get("category"),
+        "severity": alert.get("severity"),
+        "target": alert.get("target"),
+        "detail": alert.get("detail"),
+        "next_step": alert.get("next_step"),
+    })
+
+
+def _data_quality_alert_result(alerts: list[dict[str, Any]], *, tracking_available: bool, warning: str = "") -> dict[str, Any]:
+    active = [alert for alert in alerts if alert.get("status") == "active"]
+    resolved = [alert for alert in alerts if alert.get("status") == "resolved"]
+    notifications = [alert for alert in alerts if alert.get("should_notify")]
+    return {
+        "tracking_available": bool(tracking_available),
+        "warning": warning,
+        "active": active,
+        "resolved": resolved,
+        "notifications": notifications,
+        "summary": {
+            "active_count": len(active),
+            "resolved_count": len(resolved),
+            "notification_count": len(notifications),
+            "new_count": sum(1 for alert in alerts if alert.get("notification_state") in {"new", "reopened"}),
+            "changed_count": sum(1 for alert in alerts if alert.get("notification_state") == "changed"),
+            "blocker_count": sum(1 for alert in active if alert.get("severity") == "blocker"),
+            "warning_count": sum(1 for alert in active if alert.get("severity") == "warning"),
+        },
+    }
 
 
 def _scrub_json(value: Any) -> Any:

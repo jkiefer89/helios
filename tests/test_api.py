@@ -222,6 +222,66 @@ def test_data_quality_thresholds_are_configurable_and_refresh_observability_is_e
     assert body["refresh_observability"]["gap_count"] >= 1
 
 
+def test_data_quality_alerts_track_active_and_resolved_research_readiness(client, monkeypatch, tmp_path):
+    monkeypatch.setenv("HELIOS_DB_PATH", str(tmp_path / "helios.db"))
+    monkeypatch.setenv("HELIOS_DATA_QUALITY_STALE_DAYS", "999")
+    persistence.reset_store_for_tests()
+    store = persistence.get_store()
+    assert store.available is True
+
+    data.parse_csv(price_csv(days=260), "REAL1", "Real One", source_filename="real-one.csv")
+    model_upload = client.post(
+        "/api/model/upload",
+        data={
+            "file": (BytesIO(b"Ticker,Weight\nREAL1,60\nNEEDPRICE,40\n"), "alert-model.csv"),
+            "name": "Alert Model",
+            "mandate": "balanced",
+        },
+        content_type="multipart/form-data",
+    )
+    assert model_upload.status_code == 200
+
+    first = client.get("/api/data-quality")
+
+    assert first.status_code == 200
+    first_body = first.get_json()
+    first_alerts = first_body["alerts"]
+    assert first_alerts["tracking_available"] is True
+    assert first_alerts["summary"]["active_count"] >= 3
+    assert first_alerts["summary"]["new_count"] >= 3
+    active_categories = {alert["category"] for alert in first_alerts["active"]}
+    assert {"coverage_gaps", "missing_data", "research_readiness"} <= active_categories
+    readiness_alert = next(alert for alert in first_alerts["active"] if alert["category"] == "research_readiness")
+    assert readiness_alert["status"] == "active"
+    assert readiness_alert["first_seen_at"]
+    assert readiness_alert["last_seen_at"]
+    assert readiness_alert["occurrence_count"] == 1
+    assert "research-ready" in readiness_alert["detail"].lower()
+
+    second = client.get("/api/data-quality")
+
+    assert second.status_code == 200
+    second_alerts = second.get_json()["alerts"]
+    assert second_alerts["summary"]["new_count"] == 0
+    assert next(alert for alert in second_alerts["active"] if alert["id"] == readiness_alert["id"])["occurrence_count"] == 2
+
+    data.parse_csv(price_csv(days=260), "NEEDPRICE", "Need Price", source_filename="need-price.csv")
+
+    resolved = client.get("/api/data-quality")
+
+    assert resolved.status_code == 200
+    resolved_body = resolved.get_json()
+    assert resolved_body["research_ready"] is True
+    resolved_alerts = resolved_body["alerts"]
+    assert resolved_alerts["summary"]["resolved_count"] >= 3
+    resolved_categories = {alert["category"] for alert in resolved_alerts["resolved"]}
+    assert {"coverage_gaps", "missing_data", "research_readiness"} <= resolved_categories
+    resolved_readiness = next(alert for alert in resolved_alerts["resolved"] if alert["id"] == readiness_alert["id"])
+    assert resolved_readiness["status"] == "resolved"
+    assert resolved_readiness["resolved_at"]
+    assert resolved_alerts["summary"]["active_count"] == 0
+
+
 def test_model_upload_and_analyze_smoke(client, monkeypatch):
     monkeypatch.setattr(data, "HAS_YF", False)
     payload = {

@@ -1928,7 +1928,7 @@ def _data_quality_payload() -> dict:
         row for row in symbols
         if row["refresh_evidence"]["requires_refresh_log"] and row["refresh_evidence"]["has_refresh_log"]
     ]
-    return {
+    payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "research_ready": blockers == 0 and bool(research_ready_symbols or research_ready_models),
         "thresholds": thresholds,
@@ -1965,6 +1965,11 @@ def _data_quality_payload() -> dict:
         "source_conflicts": source_conflicts,
         "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
     }
+    payload["alerts"] = persistence.get_store().sync_data_quality_alerts(
+        _data_quality_alert_inputs(payload),
+        generated_at=payload["generated_at"],
+    )
+    return payload
 
 
 def _data_quality_symbol_row(inst: data.Instrument, last_refresh: dict | None, thresholds: dict[str, int]) -> dict:
@@ -2036,6 +2041,51 @@ def _quality_issue(category: str, severity: str, target: str, detail: str, next_
         "detail": detail,
         "next_step": next_step,
     }
+
+
+def _data_quality_alert_inputs(payload: dict) -> list[dict]:
+    alerts = []
+    for issue in payload.get("issues") or []:
+        alerts.append({
+            "id": _data_quality_alert_id(issue.get("category"), issue.get("target")),
+            "category": issue.get("category") or "data_quality",
+            "severity": issue.get("severity") or "info",
+            "target": issue.get("target") or "Workspace",
+            "detail": issue.get("detail") or "",
+            "next_step": issue.get("next_step") or "",
+            "metadata": {
+                "source": "data_quality_dashboard",
+                "research_ready": bool(payload.get("research_ready")),
+            },
+        })
+    summary = payload.get("summary") or {}
+    if not payload.get("research_ready"):
+        blockers = int(summary.get("blocker_count") or 0)
+        warnings = int(summary.get("warning_count") or 0)
+        alerts.append({
+            "id": "data_quality:research_readiness:workspace",
+            "category": "research_readiness",
+            "severity": "blocker" if blockers else "warning",
+            "target": "Workspace",
+            "detail": f"Workspace is not research-ready: {blockers} blockers and {warnings} warnings are active.",
+            "next_step": "Resolve blocker alerts before using Helios outputs as real research evidence.",
+            "metadata": {
+                "source": "data_quality_dashboard",
+                "blocker_count": blockers,
+                "warning_count": warnings,
+            },
+        })
+    return alerts
+
+
+def _data_quality_alert_id(category: str | None, target: str | None) -> str:
+    return f"data_quality:{_alert_id_part(category or 'data_quality')}:{_alert_id_part(target or 'workspace')}"
+
+
+def _alert_id_part(value: str) -> str:
+    cleaned = "".join(ch.lower() if ch.isalnum() else "-" for ch in str(value))
+    cleaned = "-".join(part for part in cleaned.split("-") if part)
+    return cleaned[:80] or "item"
 
 
 def _dedupe_strings(items: list[str]) -> list[str]:

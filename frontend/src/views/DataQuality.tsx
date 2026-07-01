@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
-import type { DataQualityIssue, DataQualityResponse } from "../api/types";
+import type { DataQualityAlert, DataQualityIssue, DataQualityResponse } from "../api/types";
 import { Panel, StatTile } from "../components/cards/Panel";
 import { EmptyState } from "../components/empty-states/EmptyState";
 import { fmtNumber, fmtTimestamp, titleCase } from "../utils/format";
@@ -76,6 +76,22 @@ export function DataQuality() {
               </div>
             </Panel>
           </section>
+
+          <Panel title="Alert Center" meta={payload.alerts.tracking_available ? `${payload.alerts.summary.notification_count} notifications` : "tracking unavailable"}>
+            {!payload.alerts.tracking_available && (
+              <div className="notice warning">{payload.alerts.warning || "SQLite alert tracking is unavailable; current checks are still shown below."}</div>
+            )}
+            <div className="metric-grid compact-metrics">
+              <StatTile label="Active Alerts" value={fmtNumber(payload.alerts.summary.active_count, 0)} tone={payload.alerts.summary.active_count ? "warning" : "positive"} />
+              <StatTile label="Blockers" value={fmtNumber(payload.alerts.summary.blocker_count, 0)} tone={payload.alerts.summary.blocker_count ? "negative" : "positive"} />
+              <StatTile label="New / Reopened" value={fmtNumber(payload.alerts.summary.new_count, 0)} tone={payload.alerts.summary.new_count ? "warning" : "neutral"} />
+              <StatTile label="Resolved Alerts" value={fmtNumber(payload.alerts.summary.resolved_count, 0)} tone={payload.alerts.summary.resolved_count ? "positive" : "neutral"} />
+            </div>
+            <section className="quality-alert-ledger">
+              <AlertFeed title="Active Alerts" alerts={payload.alerts.active} empty="No active data quality alerts." />
+              <AlertFeed title="Resolved Alerts" alerts={payload.alerts.resolved.slice(0, 6)} empty="No resolved alerts have been tracked yet." />
+            </section>
+          </Panel>
 
           <Panel title="Refresh Evidence" meta={`${payload.refresh_observability.observed_count} observed · ${payload.refresh_observability.gap_count} gaps`}>
             <dl className="report-dl">
@@ -181,6 +197,38 @@ export function DataQuality() {
         </>
       ) : (
         <EmptyState title="Data quality unavailable" body="The backend did not return a data quality payload." />
+      )}
+    </div>
+  );
+}
+
+function AlertFeed({ title, alerts, empty }: { title: string; alerts: DataQualityAlert[]; empty: string }) {
+  return (
+    <div className="quality-alert-feed">
+      <div className="quality-alert-feed__head">
+        <strong>{title}</strong>
+        <span>{fmtNumber(alerts.length, 0)}</span>
+      </div>
+      {alerts.length === 0 ? (
+        <EmptyState title={title} body={empty} />
+      ) : (
+        <div className="alert-terminal-list">
+          {alerts.map((alert) => (
+            <article key={alert.id} className={`alert-terminal-row severity-${alert.severity}`}>
+              <b className={`quality-severity severity-${alert.severity}`}>{alert.severity}</b>
+              <span>
+                <strong>{alert.target}</strong>
+                <small>{titleCase(alert.category)} · {alert.detail}</small>
+                <small>{alert.next_step}</small>
+              </span>
+              <em>
+                {titleCase(alert.notification_state)}
+                <small>{alert.status === "resolved" ? fmtTimestamp(alert.resolved_at || alert.last_changed_at) : fmtTimestamp(alert.last_seen_at)}</small>
+                <small>{fmtNumber(alert.occurrence_count, 0)} seen</small>
+              </em>
+            </article>
+          ))}
+        </div>
       )}
     </div>
   );

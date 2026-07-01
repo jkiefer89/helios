@@ -341,6 +341,24 @@ export interface DataQualityCoverageGap {
   missing_tickers: string[];
 }
 
+export interface DataQualityAlert {
+  id: string;
+  category: string;
+  severity: "blocker" | "warning" | "info" | string;
+  target: string;
+  detail: string;
+  next_step: string;
+  status: "active" | "resolved" | string;
+  first_seen_at: string;
+  last_seen_at: string;
+  last_changed_at: string;
+  resolved_at?: string | null;
+  occurrence_count: number;
+  notification_state: "new" | "reopened" | "changed" | "active" | "resolved" | string;
+  should_notify: boolean;
+  metadata?: Record<string, unknown>;
+}
+
 export interface DataQualityResponse {
   generated_at: string;
   research_ready: boolean;
@@ -384,6 +402,22 @@ export interface DataQualityResponse {
   refresh_observability_gaps: DataQualitySymbol[];
   coverage_gaps: DataQualityCoverageGap[];
   source_conflicts: Array<{ model_id: string; model_name: string; source_counts: Record<string, number>; coverage_state: string }>;
+  alerts: {
+    tracking_available: boolean;
+    warning: string;
+    active: DataQualityAlert[];
+    resolved: DataQualityAlert[];
+    notifications: DataQualityAlert[];
+    summary: {
+      active_count: number;
+      resolved_count: number;
+      notification_count: number;
+      new_count: number;
+      changed_count: number;
+      blocker_count: number;
+      warning_count: number;
+    };
+  };
   disclaimer: string;
 }
 
