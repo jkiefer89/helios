@@ -18,7 +18,7 @@ import numpy as np
 import openpyxl
 import pandas as pd
 
-from . import data
+from . import analytics_cache, data
 
 MAX_MODELS = 50
 MAX_HOLDINGS = 60
@@ -70,6 +70,8 @@ def register(model: Model) -> None:
         ids = list(_MODELS.keys())
         for stale in ids[:-MAX_MODELS] if len(ids) > MAX_MODELS else []:
             _MODELS.pop(stale, None)
+    # A new/changed model invalidates memoized model analytics.
+    analytics_cache.invalidate()
 
 
 # --------------------------------------------------------------------------- #

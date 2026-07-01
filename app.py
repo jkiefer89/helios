@@ -62,8 +62,9 @@ def _load_local_env_file(path: Path | None = None) -> dict:
 _LOCAL_ENV_STATUS = _load_local_env_file()
 
 from engine import (
-    ai_copilot, backtest, data, evidence_lab, forecast, indicators, insights, mandate, model_governance, model_library, model_validation, opportunity, portfolio,
-    portfolio_clinic, persistence, provenance, regime, report_exports, reporting, risk_exposure, sentiment, signal_journal, signals, strategy,
+    ai_copilot, analytics_cache, backtest, data, evidence_lab, forecast, indicators, insights, mandate, model_governance, model_library, model_validation,
+    opportunity, portfolio, portfolio_clinic, persistence, provenance, regime, report_exports, reporting, risk_exposure, sentiment, signal_journal, signals,
+    strategy,
 )
 
 app = Flask(__name__)
@@ -394,6 +395,11 @@ def _quick_instrument_screen(inst: data.Instrument) -> dict | None:
     close = inst.df["close"].dropna()
     if len(close) < 60:
         return None
+    key = ("command_center_card", inst.symbol, inst.source, analytics_cache.series_token(close))
+    return analytics_cache.memoize(key, lambda: _instrument_screen_card(inst, close))
+
+
+def _instrument_screen_card(inst: data.Instrument, close: pd.Series) -> dict | None:
     try:
         fc = forecast.forecast(close, horizon=21, n_paths=600)
         sent = sentiment.score_headlines(inst.headlines)
@@ -2185,7 +2191,7 @@ def _holdings_with_signals(ps: portfolio.PortfolioSeries, mdl: portfolio.Model) 
     for h in ps.holdings:
         try:
             psr = data.resolve_series(h["ticker"])
-            sc = signals.historical_signals(psr.close).iloc[-1]
+            sc = signals.latest_signal_score(psr.close)
             action = "BUY" if sc > 0.15 else "SELL" if sc < -0.05 else "HOLD"
         except Exception:
             action = "—"
