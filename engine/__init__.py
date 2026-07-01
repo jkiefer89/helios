@@ -23,6 +23,7 @@ Modules:
     model_governance - versioned approval, rebalance, and snapshot workflow
     risk_exposure - portfolio-level risk, exposure, stress, and benchmark analytics
     signal_journal - local signal audit log and paper-performance tracking
+    evidence_lab - rolling walk-forward out-of-sample signal evidence
 """
 
 __all__ = [
@@ -48,4 +49,5 @@ __all__ = [
     "model_governance",
     "risk_exposure",
     "signal_journal",
+    "evidence_lab",
 ]

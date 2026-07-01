@@ -177,6 +177,28 @@ def test_risk_analytics_view_is_dedicated_and_routed():
     assert "Benchmark-Relative Risk" in view_source
 
 
+def test_evidence_lab_view_is_dedicated_and_routed():
+    app_source = (ROOT / "frontend" / "src" / "App.tsx").read_text()
+    shell_source = (ROOT / "frontend" / "src" / "components" / "layout" / "AppShell.tsx").read_text()
+    view_source = (ROOT / "frontend" / "src" / "views" / "EvidenceLab.tsx").read_text()
+    client_source = (ROOT / "frontend" / "src" / "api" / "client.ts").read_text()
+    type_source = (ROOT / "frontend" / "src" / "api" / "types.ts").read_text()
+
+    assert '"evidence"' in shell_source
+    assert "Evidence Lab" in shell_source
+    assert "EvidenceLab" in app_source
+    assert "api.evidenceLab" in view_source
+    assert "evidenceLab:" in client_source
+    assert "EvidenceLabResponse" in type_source
+    assert "Walk-forward evidence" in view_source
+    assert "Hit Rate" in view_source
+    assert "Alpha vs Benchmark" in view_source
+    assert "False Positives" in view_source
+    assert "Regime Sensitivity" in view_source
+    assert "Signal Decay" in view_source
+    assert "Confidence Bands" in view_source
+
+
 def test_flask_serves_react_build_when_present(tmp_path, monkeypatch):
     dist = tmp_path / "dist"
     assets = dist / "assets"

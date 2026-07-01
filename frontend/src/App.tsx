@@ -22,6 +22,7 @@ import { Models } from "./views/Models";
 import { DataQuality } from "./views/DataQuality";
 import { SignalJournal } from "./views/SignalJournal";
 import { RiskAnalytics } from "./views/RiskAnalytics";
+import { EvidenceLab } from "./views/EvidenceLab";
 
 export default function App() {
   const [activeView, setActiveView] = useState<ViewId>("command");
@@ -238,6 +239,18 @@ export default function App() {
     }
     if (activeView === "risk") {
       return <RiskAnalytics models={models} selectedModel={selectedModel} onSelectModel={selectModelOnly} />;
+    }
+    if (activeView === "evidence") {
+      return (
+        <EvidenceLab
+          tickers={tickers}
+          models={models}
+          selectedInstrument={selectedInstrument}
+          selectedModel={selectedModel}
+          onSelectInstrument={selectInstrumentOnly}
+          onSelectModel={selectModelOnly}
+        />
+      );
     }
     if (activeView === "reports") {
       return (

@@ -62,7 +62,7 @@ def _load_local_env_file(path: Path | None = None) -> dict:
 _LOCAL_ENV_STATUS = _load_local_env_file()
 
 from engine import (
-    ai_copilot, backtest, data, forecast, indicators, insights, mandate, model_governance, model_library, opportunity, portfolio,
+    ai_copilot, backtest, data, evidence_lab, forecast, indicators, insights, mandate, model_governance, model_library, opportunity, portfolio,
     portfolio_clinic, persistence, provenance, regime, report_exports, reporting, risk_exposure, sentiment, signal_journal, signals, strategy,
 )
 
@@ -652,6 +652,41 @@ def signal_journal_endpoint():
         },
         "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
     })
+
+
+@app.route("/api/evidence-lab")
+def evidence_lab_endpoint():
+    kind = (request.args.get("kind") or "model").strip().lower()
+    target_id = (request.args.get("id") or request.args.get("ticker") or "").strip()
+    horizon, horizon_error = _safe_int_arg("horizon", 21, 5, 252)
+    if horizon_error:
+        return err(horizon_error, 400)
+    train_window, train_error = _safe_int_arg("train_window", 252, 90, 756)
+    if train_error:
+        return err(train_error, 400)
+    step, step_error = _safe_int_arg("step", 21, 5, 63)
+    if step_error:
+        return err(step_error, 400)
+    if kind == "model":
+        mdl = portfolio.get(target_id)
+        if mdl is None:
+            return err("Unknown model.", 404)
+        return ok({
+            **evidence_lab.analyze_model(mdl, horizon_days=horizon or 21, train_window=train_window or 252, step=step or 21),
+            "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+        })
+    if kind == "instrument":
+        symbol = data.clean_symbol(target_id, fallback="")
+        if not symbol:
+            return err("Provide an instrument symbol.", 400)
+        inst = data.get(symbol)
+        if inst is None:
+            return err(f"Unknown ticker '{symbol}'.", 404)
+        return ok({
+            **evidence_lab.analyze_instrument(inst, horizon_days=horizon or 21, train_window=train_window or 252, step=step or 21),
+            "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+        })
+    return err("kind must be instrument or model.", 400)
 
 
 @app.route("/api/data/refresh", methods=["POST"])

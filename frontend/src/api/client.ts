@@ -7,6 +7,7 @@ import type {
   DataRefreshResponse,
   DataQualityResponse,
   DataStatusResponse,
+  EvidenceLabResponse,
   MandateSummary,
   ModelSummary,
   ModelGovernanceResponse,
@@ -112,6 +113,16 @@ export const api = {
       body: JSON.stringify(payload),
     }),
   signalJournal: () => request<SignalJournalResponse>("/api/signal-journal"),
+  evidenceLab: (params: { kind: "instrument" | "model"; id: string; horizon?: number; trainWindow?: number; step?: number }) => {
+    const query = new URLSearchParams({
+      kind: params.kind,
+      id: params.id,
+      horizon: String(params.horizon ?? 21),
+      train_window: String(params.trainWindow ?? 252),
+      step: String(params.step ?? 21),
+    });
+    return request<EvidenceLabResponse>(`/api/evidence-lab?${query}`);
+  },
   analyzeInstrument: (symbol: string, horizon: number) =>
     request<AnalysisResponse>(`/api/analyze?ticker=${encodeURIComponent(symbol)}&horizon=${horizon}`),
   analyzeModel: (id: string, horizon: string | number) =>

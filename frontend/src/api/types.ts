@@ -570,6 +570,88 @@ export interface RiskAnalyticsResponse extends ProvenancePayload {
   methodology: Record<string, unknown>;
 }
 
+export interface EvidenceLabWindow {
+  signal_date: string;
+  forward_end_date: string;
+  input_start_date: string;
+  input_rows: number;
+  horizon_days: number;
+  signal_score: number;
+  action_label: string;
+  forward_result_pct?: number | null;
+  benchmark_result_pct?: number | null;
+  alpha_pct?: number | null;
+  paper_hit?: boolean | null;
+  false_positive: boolean;
+  regime: string;
+}
+
+export interface EvidenceLabSummary {
+  window_count: number;
+  measured_count: number;
+  hit_count: number;
+  hit_rate_pct?: number | null;
+  avg_score?: number | null;
+  avg_forward_result_pct?: number | null;
+  avg_benchmark_result_pct?: number | null;
+  avg_alpha_pct?: number | null;
+  positive_alpha_rate_pct?: number | null;
+  first_signal_date?: string | null;
+  last_signal_date?: string | null;
+}
+
+export interface EvidenceConfidenceBand {
+  count: number;
+  mean?: number | null;
+  p05?: number | null;
+  p25?: number | null;
+  p50?: number | null;
+  p75?: number | null;
+  p95?: number | null;
+  ci90_low?: number | null;
+  ci90_high?: number | null;
+}
+
+export interface EvidenceLabResponse extends ProvenancePayload {
+  target: { kind: "instrument" | "model" | string; id: string; name: string; mandate?: string; source?: string };
+  benchmark: { symbol: string; status: string };
+  parameters: { horizon_days?: number; train_window?: number; step?: number; decay_horizons?: number[] };
+  summary: EvidenceLabSummary;
+  false_positives: {
+    count: number;
+    rate_pct?: number | null;
+    directional_signal_count?: number;
+    basis: string;
+  };
+  confidence_bands: {
+    forward_result_pct: EvidenceConfidenceBand;
+    alpha_pct: EvidenceConfidenceBand;
+    hit_rate_pct: EvidenceConfidenceBand;
+  };
+  regime_sensitivity: Array<{
+    regime: string;
+    count: number;
+    hit_rate_pct?: number | null;
+    avg_alpha_pct?: number | null;
+    avg_forward_result_pct?: number | null;
+    false_positive_rate_pct?: number | null;
+  }>;
+  decay: Array<{
+    horizon_days: number;
+    measured_count: number;
+    hit_rate_pct?: number | null;
+    avg_forward_result_pct?: number | null;
+    avg_alpha_pct?: number | null;
+    false_positive_rate_pct?: number | null;
+    information_coefficient?: number | null;
+    confidence_bands: EvidenceConfidenceBand;
+  }>;
+  windows: EvidenceLabWindow[];
+  evidence_unavailable?: boolean;
+  missing_tickers?: string[];
+  methodology: Record<string, unknown>;
+}
+
 export interface ReportResponse extends ProvenancePayload {
   kind: "instrument" | "model" | string;
   title: string;

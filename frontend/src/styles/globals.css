@@ -3092,6 +3092,34 @@ p {
   grid-template-columns: 90px 90px 80px 150px minmax(170px, 1fr);
 }
 
+.evidence-window-table .terminal-table__head,
+.evidence-window-table .table-row {
+  grid-template-columns:
+    minmax(145px, 1.1fr)
+    minmax(74px, .55fr)
+    minmax(68px, .5fr)
+    minmax(86px, .65fr)
+    minmax(86px, .65fr)
+    minmax(80px, .6fr)
+    minmax(96px, .75fr)
+    minmax(64px, .5fr);
+}
+
+.evidence-decay-table .terminal-table__head,
+.evidence-decay-table .table-row {
+  grid-template-columns: minmax(90px, .8fr) repeat(4, minmax(86px, 1fr));
+}
+
+.evidence-regime-table .terminal-table__head,
+.evidence-regime-table .table-row {
+  grid-template-columns: minmax(120px, 1fr) repeat(4, minmax(86px, 1fr));
+}
+
+.evidence-confidence-table .terminal-table__head,
+.evidence-confidence-table .table-row {
+  grid-template-columns: minmax(120px, 1fr) repeat(5, minmax(84px, 1fr));
+}
+
 .risk-cluster-list {
   display: grid;
   gap: 0.55rem;
