@@ -342,6 +342,49 @@ export interface ReportResponse extends ProvenancePayload {
   sections: Record<string, unknown>;
 }
 
+export interface ReportSnapshot {
+  id: string;
+  created_at: string;
+  target_kind: "instrument" | "model" | string;
+  target_id: string;
+  target_name: string;
+  title: string;
+  data_mode: DataMode;
+  display_label: string;
+  eligible_for_real_research: boolean;
+  source: string;
+  row_count: number;
+  first_date?: string | null;
+  last_date?: string | null;
+  source_counts: Record<string, number>;
+  model_metadata: Record<string, unknown>;
+  warnings: string[];
+  ai_narrative_included: boolean;
+  html_url: string;
+  pdf_url: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface ReportSnapshotSaveRequest {
+  kind: "instrument" | "model" | string;
+  id: string;
+  ai_narrative?: string;
+}
+
+export interface ReportSnapshotSaveResponse {
+  snapshot: ReportSnapshot;
+  html_url: string;
+  pdf_url: string;
+  disclaimer: string;
+}
+
+export interface ReportSnapshotHistoryResponse {
+  snapshots: ReportSnapshot[];
+  count: number;
+  warning?: string;
+  disclaimer: string;
+}
+
 export interface SignalJournalEntry {
   id: number;
   created_at: string;

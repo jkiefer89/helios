@@ -63,7 +63,7 @@ _LOCAL_ENV_STATUS = _load_local_env_file()
 
 from engine import (
     ai_copilot, backtest, data, forecast, indicators, insights, mandate, model_library, opportunity, portfolio,
-    portfolio_clinic, persistence, provenance, regime, reporting, sentiment, signal_journal, signals, strategy,
+    portfolio_clinic, persistence, provenance, regime, report_exports, reporting, sentiment, signal_journal, signals, strategy,
 )
 
 app = Flask(__name__)
@@ -1275,6 +1275,97 @@ def report_model():
         return ok(reporting.model_report(mdl))
     except ValueError as e:
         return err(str(e), 400)
+
+
+@app.route("/api/report/snapshots", methods=["GET"])
+def report_snapshot_history():
+    store = persistence.get_store()
+    if not store.available:
+        return ok({
+            "snapshots": [],
+            "count": 0,
+            "warning": store.warning or "Report history requires SQLite persistence.",
+            "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+        })
+    limit, error = _safe_int_arg("limit", 50, 1, 200)
+    if error:
+        return err(error, 400)
+    snapshots = [report_exports.public_snapshot(row) for row in store.report_snapshots(limit=limit or 50)]
+    return ok({
+        "snapshots": snapshots,
+        "count": len(snapshots),
+        "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+    })
+
+
+@app.route("/api/report/snapshots", methods=["POST"])
+def save_report_snapshot():
+    store = persistence.get_store()
+    if not store.available:
+        return err(store.warning or "Report history requires SQLite persistence.", 503)
+    body = request.get_json(silent=True) or {}
+    kind = str(body.get("kind") or "").strip().lower()
+    target_id = str(body.get("id") or body.get("target_id") or "").strip()
+    ai_narrative = str(body.get("ai_narrative") or "").strip()
+    try:
+        report = _report_for_snapshot(kind, target_id)
+    except ValueError as exc:
+        return err(str(exc), 400)
+    snapshot = report_exports.build_snapshot(
+        target_kind=kind,
+        target_id=target_id,
+        report=report,
+        ai_narrative=ai_narrative,
+    )
+    result = store.save_report_snapshot(snapshot)
+    if not result.get("saved"):
+        return err(result.get("warning") or "Report snapshot could not be saved.", 500)
+    public = report_exports.public_snapshot(snapshot)
+    return ok({
+        "snapshot": public,
+        "html_url": public["html_url"],
+        "pdf_url": public["pdf_url"],
+        "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+    })
+
+
+@app.route("/api/report/snapshots/<snapshot_id>.html")
+def report_snapshot_html(snapshot_id: str):
+    snapshot = persistence.get_store().get_report_snapshot(snapshot_id)
+    if snapshot is None:
+        return err("Unknown report snapshot.", 404)
+    html_body = snapshot.get("html") or report_exports.render_html(snapshot)
+    return Response(str(html_body), mimetype="text/html")
+
+
+@app.route("/api/report/snapshots/<snapshot_id>.pdf")
+def report_snapshot_pdf(snapshot_id: str):
+    snapshot = persistence.get_store().get_report_snapshot(snapshot_id)
+    if snapshot is None:
+        return err("Unknown report snapshot.", 404)
+    filename = f"helios-report-{snapshot_id}.pdf"
+    return Response(
+        report_exports.render_pdf(snapshot),
+        mimetype="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def _report_for_snapshot(kind: str, target_id: str) -> dict:
+    if kind == "instrument":
+        symbol = data.clean_symbol(target_id, fallback="")
+        if not symbol:
+            raise ValueError("Provide a ticker symbol.")
+        inst = data.get(symbol)
+        if inst is None:
+            raise ValueError(f"Unknown ticker '{symbol}'.")
+        return reporting.instrument_report(inst)
+    if kind == "model":
+        mdl = portfolio.get(target_id)
+        if mdl is None:
+            raise ValueError("Unknown model.")
+        return reporting.model_report(mdl)
+    raise ValueError("Report snapshot kind must be 'instrument' or 'model'.")
 
 
 @app.route("/assets/<path:filename>")

@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
-import type { DataStatusResponse, ModelSummary, ReportResponse, SignalJournalEntry, TickerSummary } from "../api/types";
+import type { AIResult, DataStatusResponse, ModelSummary, ReportResponse, ReportSnapshot, SignalJournalEntry, TickerSummary } from "../api/types";
 import { AICopilotPanel, reportCopilotActions } from "../components/ai/AICopilotPanel";
 import { DataQualityBanner } from "../components/badges/DataModeBadge";
 import { Panel } from "../components/cards/Panel";
@@ -29,7 +29,11 @@ export function Reports({
   const [target, setTarget] = useState(defaultTarget);
   const [payload, setPayload] = useState<ReportResponse | null>(null);
   const [journalEntries, setJournalEntries] = useState<SignalJournalEntry[]>([]);
+  const [snapshots, setSnapshots] = useState<ReportSnapshot[]>([]);
   const [error, setError] = useState("");
+  const [snapshotError, setSnapshotError] = useState("");
+  const [savingSnapshot, setSavingSnapshot] = useState(false);
+  const [aiNarrative, setAiNarrative] = useState("");
   const requestSeq = useRef(0);
   const options = useMemo(() => [
     ...tickers.map((ticker) => ({ value: `instrument:${ticker.symbol}`, label: `${ticker.symbol} · ${ticker.name}` })),
@@ -43,6 +47,8 @@ export function Reports({
     requestSeq.current = requestId;
     try {
       setError("");
+      setSnapshotError("");
+      setAiNarrative("");
       setPayload(null);
       if (kind === "model") onSelectModel(id);
       else onSelectInstrument(id);
@@ -62,6 +68,21 @@ export function Reports({
     void build(defaultTarget);
   }, [defaultTarget]);
 
+  const loadSnapshots = useCallback(async () => {
+    try {
+      const history = await api.reportSnapshots();
+      setSnapshots(history.snapshots);
+      setSnapshotError(history.warning || "");
+    } catch (err) {
+      setSnapshots([]);
+      setSnapshotError(err instanceof Error ? err.message : "Report history unavailable.");
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadSnapshots();
+  }, [loadSnapshots]);
+
   useEffect(() => {
     let cancelled = false;
     api.signalJournal()
@@ -76,6 +97,25 @@ export function Reports({
     };
   }, [payload]);
 
+  const saveSnapshot = async () => {
+    const [kind, id] = target.split(":");
+    if (!payload || !kind || !id) return;
+    setSavingSnapshot(true);
+    setSnapshotError("");
+    try {
+      const saved = await api.saveReportSnapshot({
+        kind,
+        id,
+        ai_narrative: aiNarrative || undefined,
+      });
+      setSnapshots((current) => [saved.snapshot, ...current.filter((row) => row.id !== saved.snapshot.id)]);
+    } catch (err) {
+      setSnapshotError(err instanceof Error ? err.message : "Report snapshot could not be saved.");
+    } finally {
+      setSavingSnapshot(false);
+    }
+  };
+
   return (
     <div className="view-stack report-view">
       <header className="view-head no-print">
@@ -83,17 +123,51 @@ export function Reports({
         <form className="toolbar" onSubmit={(event) => { event.preventDefault(); void build(); }}>
           <label>Target<TerminalSelect ariaLabel="Report target" value={target} onChange={setTarget} options={options} /></label>
           <button type="submit">Build preview</button>
+          <button type="button" onClick={() => void saveSnapshot()} disabled={!payload || savingSnapshot}>
+            {savingSnapshot ? "Saving..." : "Save snapshot"}
+          </button>
           <button type="button" onClick={() => window.print()}>{payload?.eligible_for_real_research ? "Print evidence pack" : "Print preview"}</button>
         </form>
       </header>
       {error && <div className="notice danger">{error}</div>}
+      {snapshotError && <div className="notice warning no-print">{snapshotError}</div>}
       <SignalJournalPanel entries={journalEntries} />
+      <ReportHistoryPanel snapshots={snapshots} />
       {!payload ? (
         <EmptyState title="Select a report target" body="Choose an instrument or model to build an analysis-only report." />
       ) : (
-        <ReportSheet payload={payload} dataStatus={dataStatus} />
+        <ReportSheet payload={payload} dataStatus={dataStatus} onAiNarrative={setAiNarrative} />
       )}
     </div>
+  );
+}
+
+function ReportHistoryPanel({ snapshots }: { snapshots: ReportSnapshot[] }) {
+  return (
+    <Panel title="Report History" meta={`${snapshots.length} saved`} className="no-print report-history-panel">
+      {snapshots.length === 0 ? (
+        <EmptyState title="No saved report snapshots" body="Build a report and save a snapshot to preserve the evidence pack with provenance." />
+      ) : (
+        <div className="terminal-table report-history-table" tabIndex={0} aria-label="Saved report snapshots">
+          <div className="terminal-table__head">
+            <span>Saved</span><span>Report</span><span>Source</span><span>Input Range</span><span>AI</span><span>Exports</span>
+          </div>
+          {snapshots.slice(0, 12).map((snapshot) => (
+            <div className="table-row" key={snapshot.id}>
+              <span>{fmtTimestamp(snapshot.created_at)}</span>
+              <span><strong>{snapshot.title}</strong><small>{snapshot.target_kind} · {snapshot.target_id}</small></span>
+              <span>{snapshot.source || "unknown"}<small>{formatSourceCounts(snapshot.source_counts)}</small></span>
+              <span>{snapshot.first_date || "—"} → {snapshot.last_date || "—"}<small>{snapshot.row_count} rows</small></span>
+              <span>{snapshot.ai_narrative_included ? "Included" : "Not included"}</span>
+              <span className="report-export-links">
+                <a href={snapshot.html_url} target="_blank" rel="noreferrer">HTML Snapshot</a>
+                <a href={snapshot.pdf_url}>PDF Export</a>
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </Panel>
   );
 }
 
@@ -124,7 +198,7 @@ function SignalJournalPanel({ entries }: { entries: SignalJournalEntry[] }) {
   );
 }
 
-function ReportSheet({ payload, dataStatus }: { payload: ReportResponse; dataStatus: DataStatusResponse | null }) {
+function ReportSheet({ payload, dataStatus, onAiNarrative }: { payload: ReportResponse; dataStatus: DataStatusResponse | null; onAiNarrative: (value: string) => void }) {
   const previewLocked = !payload.eligible_for_real_research;
   const sections = previewLocked ? maskPreviewSections(payload.sections) : payload.sections;
   const title = reportTitle(payload);
@@ -147,6 +221,7 @@ function ReportSheet({ payload, dataStatus }: { payload: ReportResponse; dataSta
         payload={copilotPayload}
         dataMode={payload.data_mode}
         actions={reportCopilotActions}
+        onResult={(result) => onAiNarrative(aiResultToNarrative(result))}
       />
       {previewLocked && (
         <div className="report-watermark">{payload.display_label || "Research locked"} · preview only</div>
@@ -162,6 +237,24 @@ function ReportSheet({ payload, dataStatus }: { payload: ReportResponse; dataSta
       <p className="report-disclaimer">{payload.disclaimer}</p>
     </article>
   );
+}
+
+function aiResultToNarrative(result: AIResult) {
+  const parts = [
+    result.summary,
+    result.advisor_language,
+    result.data_quality_statement,
+    result.key_points.length ? `Key points:\n${result.key_points.map((row) => `- ${row}`).join("\n")}` : "",
+    result.risks.length ? `Risks:\n${result.risks.map((row) => `- ${row}`).join("\n")}` : "",
+    result.compliance_caveats.length ? `Compliance caveats:\n${result.compliance_caveats.map((row) => `- ${row}`).join("\n")}` : "",
+  ];
+  return parts.filter(Boolean).join("\n\n");
+}
+
+function formatSourceCounts(sourceCounts: Record<string, number>) {
+  const rows = Object.entries(sourceCounts || {});
+  if (!rows.length) return "";
+  return rows.map(([source, count]) => `${source}: ${count}`).join(" · ");
 }
 
 function PersistenceSnapshot({ dataStatus }: { dataStatus: DataStatusResponse | null }) {

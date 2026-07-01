@@ -11,6 +11,9 @@ import type {
   ModelTemplate,
   ModelTemplateImportResponse,
   OpportunitiesResponse,
+  ReportSnapshotHistoryResponse,
+  ReportSnapshotSaveRequest,
+  ReportSnapshotSaveResponse,
   ReportResponse,
   SignalJournalResponse,
   StrategyResponse,
@@ -83,6 +86,13 @@ export const api = {
   reportInstrument: (symbol: string) =>
     request<ReportResponse>(`/api/report/instrument?ticker=${encodeURIComponent(symbol)}`),
   reportModel: (id: string) => request<ReportResponse>(`/api/report/model?id=${encodeURIComponent(id)}`),
+  reportSnapshots: () => request<ReportSnapshotHistoryResponse>("/api/report/snapshots"),
+  saveReportSnapshot: (payload: ReportSnapshotSaveRequest) =>
+    request<ReportSnapshotSaveResponse>("/api/report/snapshots", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
   signalJournal: () => request<SignalJournalResponse>("/api/signal-journal"),
   analyzeInstrument: (symbol: string, horizon: number) =>
     request<AnalysisResponse>(`/api/analyze?ticker=${encodeURIComponent(symbol)}&horizon=${horizon}`),

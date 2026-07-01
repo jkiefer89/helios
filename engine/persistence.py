@@ -24,7 +24,7 @@ except Exception:  # pragma: no cover - exercised when dependency install is bro
     Fernet = None
     InvalidToken = Exception
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 REAL_SOURCES = {"live", "upload"}
 DISABLED_VALUES = {"", "0", "false", "off", "disabled", "none"}
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[1] / ".helios" / "helios.db"
@@ -66,6 +66,13 @@ def utc_now() -> str:
 
 def redact_secrets(value: str | None) -> str:
     text = _CTRL_RE.sub("", (value or "").strip())[:800]
+    text = _SECRET_RE.sub(lambda m: f"{m.group(1)}=[redacted]", text)
+    text = _OPENAI_KEY_RE.sub("[redacted-key]", text)
+    return text
+
+
+def redact_long_text(value: str | None, limit: int = 250_000) -> str:
+    text = _CTRL_RE.sub("", (value or "").strip())[:limit]
     text = _SECRET_RE.sub(lambda m: f"{m.group(1)}=[redacted]", text)
     text = _OPENAI_KEY_RE.sub("[redacted-key]", text)
     return text
@@ -335,6 +342,11 @@ class SQLiteStore:
         text = redact_secrets(str(value or ""))
         return text
 
+    def _store_long_text(self, value: Any, limit: int = 250_000) -> Any:
+        if self._cipher and isinstance(value, str) and value.startswith(ENCRYPTED_PREFIX):
+            value = self._cipher.decrypt(value)
+        return redact_long_text(str(value or ""), limit=limit)
+
     def _load_text(self, value: Any) -> str:
         if self._cipher is None and isinstance(value, str) and value.startswith(ENCRYPTED_PREFIX):
             raise RuntimeError("encrypted SQLite persistence requires the configured encryption key")
@@ -459,6 +471,34 @@ class SQLiteStore:
                     self._store_text(self._load_text(row["evaluated_at"])),
                     self._store_json(self._load_json(row["metadata_json"])),
                     row["id"],
+                ),
+            )
+        for row in conn.execute("SELECT * FROM report_snapshots").fetchall():
+            conn.execute(
+                """
+                UPDATE report_snapshots
+                SET target_name = ?, title = ?, data_mode = ?, display_label = ?,
+                    source = ?, first_date = ?, last_date = ?, source_counts_json = ?,
+                    model_metadata_json = ?, warnings_json = ?, report_json = ?,
+                    ai_narrative = ?, html = ?, metadata_json = ?
+                WHERE snapshot_id = ?
+                """,
+                (
+                    self._store_text(self._load_text(row["target_name"])),
+                    self._store_text(self._load_text(row["title"])),
+                    self._store_text(self._load_text(row["data_mode"])),
+                    self._store_text(self._load_text(row["display_label"])),
+                    self._store_text(self._load_text(row["source"])),
+                    self._store_text(self._load_text(row["first_date"])),
+                    self._store_text(self._load_text(row["last_date"])),
+                    self._store_json(self._load_json(row["source_counts_json"])),
+                    self._store_json(self._load_json(row["model_metadata_json"])),
+                    self._store_json(self._load_json(row["warnings_json"])),
+                    self._store_json(self._load_json(row["report_json"])),
+                    self._store_long_text(self._load_text(row["ai_narrative"]), limit=6000),
+                    self._store_long_text(self._load_text(row["html"])),
+                    self._store_json(self._load_json(row["metadata_json"])),
+                    row["snapshot_id"],
                 ),
             )
 
@@ -898,6 +938,80 @@ class SQLiteStore:
         except Exception:
             return []
 
+    def save_report_snapshot(self, snapshot: dict[str, Any]) -> dict[str, Any]:
+        if not self.available:
+            return {"saved": False, "warning": self.warning}
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO report_snapshots
+                      (snapshot_id, created_at, target_kind, target_id, target_name,
+                       title, data_mode, display_label, eligible_for_real_research,
+                       source, row_count, first_date, last_date, source_counts_json,
+                       model_metadata_json, warnings_json, report_json, ai_narrative,
+                       html, metadata_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        redact_secrets(str(snapshot["id"]))[:64],
+                        str(snapshot["created_at"]),
+                        redact_secrets(str(snapshot["target_kind"]))[:24],
+                        redact_secrets(str(snapshot["target_id"]))[:96],
+                        self._store_text(redact_secrets(str(snapshot.get("target_name") or ""))[:160]),
+                        self._store_text(redact_secrets(str(snapshot.get("title") or ""))[:220]),
+                        self._store_text(redact_secrets(str(snapshot.get("data_mode") or ""))[:32]),
+                        self._store_text(redact_secrets(str(snapshot.get("display_label") or ""))[:120]),
+                        int(bool(snapshot.get("eligible_for_real_research"))),
+                        self._store_text(redact_secrets(str(snapshot.get("source") or ""))[:32]),
+                        int(snapshot.get("row_count") or 0),
+                        self._store_text(str(snapshot.get("first_date") or "")),
+                        self._store_text(str(snapshot.get("last_date") or "")),
+                        self._store_json(snapshot.get("source_counts") or {}),
+                        self._store_json(snapshot.get("model_metadata") or {}),
+                        self._store_json({"warnings": snapshot.get("warnings") or []}),
+                        self._store_json(snapshot.get("report") or {}),
+                        self._store_long_text(redact_long_text(str(snapshot.get("ai_narrative") or ""), limit=6000), limit=6000),
+                        self._store_long_text(str(snapshot.get("html") or "")),
+                        self._store_json(snapshot.get("metadata") or {}),
+                    ),
+                )
+            return {"saved": True, "snapshot": snapshot}
+        except Exception as exc:
+            self.warning = f"Could not save report snapshot: {exc}"
+            return {"saved": False, "warning": self.warning}
+
+    def report_snapshots(self, limit: int = 50) -> list[dict[str, Any]]:
+        if not self.available:
+            return []
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM report_snapshots
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (max(1, min(int(limit), 200)),),
+                ).fetchall()
+                return [_report_snapshot_row(row, self, include_report=False) for row in rows]
+        except Exception:
+            return []
+
+    def get_report_snapshot(self, snapshot_id: str) -> dict[str, Any] | None:
+        if not self.available:
+            return None
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT * FROM report_snapshots WHERE snapshot_id = ?",
+                    (redact_secrets(str(snapshot_id))[:64],),
+                ).fetchone()
+                return _report_snapshot_row(row, self, include_report=True) if row else None
+        except Exception:
+            return None
+
 
 def _create_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
@@ -1011,12 +1125,39 @@ def _create_schema(conn: sqlite3.Connection) -> None:
         """
     )
     conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS report_snapshots (
+          snapshot_id TEXT PRIMARY KEY,
+          created_at TEXT NOT NULL,
+          target_kind TEXT NOT NULL,
+          target_id TEXT NOT NULL,
+          target_name TEXT NOT NULL DEFAULT '',
+          title TEXT NOT NULL,
+          data_mode TEXT NOT NULL DEFAULT '',
+          display_label TEXT NOT NULL DEFAULT '',
+          eligible_for_real_research INTEGER NOT NULL DEFAULT 0,
+          source TEXT NOT NULL DEFAULT '',
+          row_count INTEGER NOT NULL DEFAULT 0,
+          first_date TEXT NOT NULL DEFAULT '',
+          last_date TEXT NOT NULL DEFAULT '',
+          source_counts_json TEXT NOT NULL DEFAULT '{}',
+          model_metadata_json TEXT NOT NULL DEFAULT '{}',
+          warnings_json TEXT NOT NULL DEFAULT '{}',
+          report_json TEXT NOT NULL DEFAULT '{}',
+          ai_narrative TEXT NOT NULL DEFAULT '',
+          html TEXT NOT NULL DEFAULT '',
+          metadata_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    conn.execute(
         "INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES (?, ?)",
         (SCHEMA_VERSION, utc_now()),
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_price_history_symbol_date ON price_history(symbol, date)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_refresh_log_symbol_time ON refresh_log(symbol, attempted_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_signal_journal_target ON signal_journal(target_kind, target_id, input_end_date)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_report_snapshots_target ON report_snapshots(target_kind, target_id, created_at)")
 
 
 def _normalise_price_frame(frame: pd.DataFrame) -> pd.DataFrame:
@@ -1100,6 +1241,35 @@ def _signal_row(row: sqlite3.Row, store: SQLiteStore | None = None) -> dict[str,
         "evaluated_at": text("evaluated_at") or None,
         "metadata": object_json("metadata_json"),
     }
+
+
+def _report_snapshot_row(row: sqlite3.Row, store: SQLiteStore, *, include_report: bool) -> dict[str, Any]:
+    warnings = store._load_json(row["warnings_json"]).get("warnings") or []
+    snapshot = {
+        "id": row["snapshot_id"],
+        "created_at": row["created_at"],
+        "target_kind": row["target_kind"],
+        "target_id": row["target_id"],
+        "target_name": store._load_text(row["target_name"]),
+        "title": store._load_text(row["title"]),
+        "data_mode": store._load_text(row["data_mode"]),
+        "display_label": store._load_text(row["display_label"]),
+        "eligible_for_real_research": bool(row["eligible_for_real_research"]),
+        "source": store._load_text(row["source"]),
+        "row_count": int(row["row_count"] or 0),
+        "first_date": store._load_text(row["first_date"]) or None,
+        "last_date": store._load_text(row["last_date"]) or None,
+        "source_counts": store._load_json(row["source_counts_json"]),
+        "model_metadata": store._load_json(row["model_metadata_json"]),
+        "warnings": warnings if isinstance(warnings, list) else [],
+        "ai_narrative": store._load_text(row["ai_narrative"]),
+        "ai_narrative_included": bool(store._load_text(row["ai_narrative"])),
+        "metadata": store._load_json(row["metadata_json"]),
+    }
+    if include_report:
+        snapshot["report"] = store._load_json(row["report_json"])
+        snapshot["html"] = store._load_text(row["html"])
+    return snapshot
 
 
 def _scrub_json(value: Any) -> Any:

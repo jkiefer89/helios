@@ -15,6 +15,7 @@ Modules:
     opportunity - conservative review ranking for opportunity radar
     portfolio_clinic - model diagnostics and hypothetical rebalance suggestions
     reporting   - printable advisor report composition
+    report_exports - saved advisor report snapshots and export renderers
     provenance  - demo/real/mixed data eligibility gates
     persistence - local SQLite store for live/uploaded data
     ai_copilot  - optional narrative provider layer over sanitized Helios facts
@@ -37,6 +38,7 @@ __all__ = [
     "opportunity",
     "portfolio_clinic",
     "reporting",
+    "report_exports",
     "provenance",
     "persistence",
     "ai_copilot",

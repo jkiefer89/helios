@@ -115,3 +115,123 @@ def test_report_error_paths_return_json():
     assert resp.status_code == 404
     assert resp.is_json
     assert "error" in resp.get_json()
+
+
+def test_report_snapshot_history_exports_html_and_pdf_with_provenance(monkeypatch, tmp_path):
+    monkeypatch.setenv("HELIOS_DB_PATH", str(tmp_path / "helios.db"))
+    from engine import persistence
+
+    persistence.reset_store_for_tests()
+    client = _client()
+    upload = client.post(
+        "/api/upload",
+        data={
+            "file": (BytesIO(price_csv(days=260)), "snapshot.csv"),
+            "symbol": "SNAP",
+            "name": "Snapshot Upload",
+        },
+        content_type="multipart/form-data",
+    )
+    assert upload.status_code == 200
+
+    save = client.post(
+        "/api/report/snapshots",
+        json={
+            "kind": "instrument",
+            "id": "SNAP",
+            "ai_narrative": "Advisor reviewed AI narrative for the saved snapshot.",
+        },
+    )
+
+    assert save.status_code == 200
+    body = save.get_json()
+    snapshot = body["snapshot"]
+    assert snapshot["id"]
+    assert snapshot["target_kind"] == "instrument"
+    assert snapshot["target_id"] == "SNAP"
+    assert snapshot["source"] == "upload"
+    assert snapshot["row_count"] == 260
+    assert snapshot["first_date"]
+    assert snapshot["last_date"]
+    assert snapshot["html_url"].endswith(".html")
+    assert snapshot["pdf_url"].endswith(".pdf")
+    assert snapshot["ai_narrative_included"] is True
+
+    history = client.get("/api/report/snapshots")
+    assert history.status_code == 200
+    history_body = history.get_json()
+    assert history_body["count"] == 1
+    assert history_body["snapshots"][0]["id"] == snapshot["id"]
+    assert history_body["snapshots"][0]["row_count"] == 260
+    persistence.reset_store_for_tests()
+    reloaded = client.get("/api/report/snapshots").get_json()
+    assert reloaded["count"] == 1
+    assert reloaded["snapshots"][0]["id"] == snapshot["id"]
+
+    html = client.get(snapshot["html_url"])
+    assert html.status_code == 200
+    assert html.content_type.startswith("text/html")
+    html_text = html.get_data(as_text=True)
+    assert "Helios Report Snapshot" in html_text
+    assert "Analysis only" in html_text
+    assert "Snapshot Upload" in html_text
+    assert "Source" in html_text and "upload" in html_text
+    assert "Row Count" in html_text and "260" in html_text
+    assert "First Date" in html_text
+    assert "Last Date" in html_text
+    assert "Advisor reviewed AI narrative" in html_text
+    assert "investment advice" in html_text.lower()
+
+    pdf = client.get(snapshot["pdf_url"])
+    assert pdf.status_code == 200
+    assert pdf.content_type == "application/pdf"
+    assert pdf.data.startswith(b"%PDF-")
+    assert b"Helios Report Snapshot" in pdf.data
+
+
+def test_model_report_snapshot_includes_model_metadata_and_source_counts(monkeypatch, tmp_path):
+    monkeypatch.setenv("HELIOS_DB_PATH", str(tmp_path / "helios.db"))
+    from engine import persistence
+
+    persistence.reset_store_for_tests()
+    client = _client()
+    for symbol in ("MDA", "MDB"):
+        upload = client.post(
+            "/api/upload",
+            data={
+                "file": (BytesIO(price_csv(days=240)), f"{symbol}.csv"),
+                "symbol": symbol,
+                "name": f"{symbol} uploaded history",
+            },
+            content_type="multipart/form-data",
+        )
+        assert upload.status_code == 200
+    model_upload = client.post(
+        "/api/model/upload",
+        data={
+            "file": (BytesIO(b"Ticker,Weight\nMDA,55\nMDB,45\n"), "snapshot-model.csv"),
+            "name": "Snapshot Model",
+            "mandate": "pure_growth",
+        },
+        content_type="multipart/form-data",
+    )
+    assert model_upload.status_code == 200
+    model_id = model_upload.get_json()["id"]
+
+    save = client.post("/api/report/snapshots", json={"kind": "model", "id": model_id})
+
+    assert save.status_code == 200
+    snapshot = save.get_json()["snapshot"]
+    assert snapshot["target_kind"] == "model"
+    assert snapshot["target_id"] == model_id
+    assert snapshot["model_metadata"]["mandate"] == "pure_growth"
+    assert snapshot["source_counts"] == {"upload": 2}
+    assert snapshot["row_count"] >= 200
+
+    html_text = client.get(snapshot["html_url"]).get_data(as_text=True)
+    assert "Snapshot Model" in html_text
+    assert "Model Metadata" in html_text
+    assert "pure_growth" in html_text
+    assert "Source Counts" in html_text
+    assert "upload" in html_text
+    assert "No Return Guarantee" in html_text

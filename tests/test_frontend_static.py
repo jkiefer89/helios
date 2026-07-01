@@ -86,6 +86,20 @@ def test_reports_view_exposes_signal_journal():
     assert "Paper tracking only" in source
 
 
+def test_reports_view_exposes_report_snapshot_exports():
+    source = (ROOT / "frontend" / "src" / "views" / "Reports.tsx").read_text()
+    client_source = (ROOT / "frontend" / "src" / "api" / "client.ts").read_text()
+    type_source = (ROOT / "frontend" / "src" / "api" / "types.ts").read_text()
+
+    assert "Report History" in source
+    assert "Save snapshot" in source
+    assert "HTML Snapshot" in source
+    assert "PDF Export" in source
+    assert "api.saveReportSnapshot" in source
+    assert "reportSnapshots" in client_source
+    assert "ReportSnapshot" in type_source
+
+
 def test_flask_serves_react_build_when_present(tmp_path, monkeypatch):
     dist = tmp_path / "dist"
     assets = dist / "assets"

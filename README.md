@@ -122,6 +122,7 @@ the backend's demo, mixed, or blocked provenance state.
 | **Long-horizon projection** | 5–90 day tactical signal **plus** 6-month / 1-year / 3-year / 5-year strategic value cones (terminal value, CAGR bands, probability of meeting the mandate, drawdown-breach odds) |
 | **Conviction rationale** | Every signal explains itself: per-component clauses with the actual numbers, the mandate tilt, the vol penalty, and honesty caveats |
 | **Signal Journal** | Instrument/model analysis signals are logged locally with input date range, score, action, benchmark, provenance and paper forward result status |
+| **Report Export + History** | Advisor report snapshots are saved locally with HTML/PDF exports, source/date range/row counts, model metadata, caveats and any already-generated AI narrative |
 | **Insights** | 12 rule-based suggestions per model — concentration, mandate fit, drawdown, correlation, forecast skill, data honesty — each with a concrete action |
 
 ### Data quality modes
@@ -139,7 +140,8 @@ Helios separates interface demos from advisor-grade research:
 
 Helios creates a small SQLite database on first use. It stores parsed
 live/uploaded price history, instrument provenance, uploaded model metadata,
-holdings, and live-refresh logs. It does **not** store raw uploaded files, API
+holdings, live-refresh logs, Signal Journal entries, and saved advisor report
+snapshots. It does **not** store raw uploaded files, API
 keys, secrets, browser artifacts, generated builds, screenshots, or sample data
 as real research evidence. The database path is controlled by `HELIOS_DB_PATH`;
 set `HELIOS_DB_PATH=off` for an ephemeral session.
@@ -162,6 +164,15 @@ instrument/model counts, date ranges, row counts, live-refresh status, model
 coverage, missing tickers, and copyable import templates. Refresh controls only
 refresh symbols already imported as `live`; bundled samples and uploaded CSVs
 are never silently promoted into live market data.
+
+The **Reports** workspace can save an analysis-only snapshot of the current
+instrument or model report. Saved snapshots are local persistence records and
+can be reopened as an escaped HTML page or downloaded as a PDF evidence pack.
+Snapshots include the report source, input date range, row count, source counts,
+model metadata where applicable, warnings/caveats, and the analysis-only
+disclaimer. If the optional AI Copilot has already generated a narrative in the
+current report session, the saved snapshot can include that narrative; saving a
+snapshot never triggers an AI provider call.
 
 For a no-upload live workflow, enable automatic polling before startup:
 
@@ -334,6 +345,10 @@ static/styles.css     legacy dashboard theme
 | `GET /api/model/clinic` | Portfolio Clinic diagnostics and hypothetical, analysis-only suggestions |
 | `GET /api/report/instrument` | Analysis-only advisor report for an instrument |
 | `GET /api/report/model` | Analysis-only advisor report for a model |
+| `GET /api/report/snapshots` | list saved local report snapshots and export links |
+| `POST /api/report/snapshots` | save a deterministic report snapshot; optional AI narrative is included only when supplied by the current session |
+| `GET /api/report/snapshots/<id>.html` | escaped HTML export for a saved report snapshot |
+| `GET /api/report/snapshots/<id>.pdf` | PDF export for a saved report snapshot |
 | `GET /api/mandates` | list mandate presets for the model-import form |
 | `GET /api/models` | list imported portfolio models |
 | `GET /api/model-library` | governed starter model templates with mandate, benchmark, rebalance, risk-limit and provenance metadata |
