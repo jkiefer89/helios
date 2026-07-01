@@ -9,6 +9,7 @@ from __future__ import annotations
 import html
 import secrets
 import textwrap
+from io import BytesIO
 from datetime import datetime, timezone
 from typing import Any
 
@@ -93,6 +94,8 @@ def build_snapshot(
             "report_package": "institutional_advisor_report",
             "version": safe_version,
             "version_label": version_label,
+            "pdf_engine": "reportlab",
+            "pdf_layout": "designer_grade_institutional",
             "prepared_for": prepared_for,
             "prepared_by": prepared_by,
             "reviewer": reviewer,
@@ -209,202 +212,234 @@ def render_html(snapshot: dict[str, Any]) -> str:
 
 
 def render_pdf(snapshot: dict[str, Any]) -> bytes:
-    page_streams = _pdf_page_streams(snapshot)
-    objects: dict[int, bytes] = {
-        1: b"<< /Type /Catalog /Pages 2 0 R >>",
-        3: b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-        4: b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>",
-    }
-    page_refs = []
-    obj_id = 5
-    for stream_text in page_streams:
-        page_obj = obj_id
-        content_obj = obj_id + 1
-        obj_id += 2
-        page_refs.append(f"{page_obj} 0 R")
-        stream = stream_text.encode("latin-1", "replace")
-        objects[page_obj] = (
-            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
-            f"/Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents {content_obj} 0 R >>"
-        ).encode("ascii")
-        objects[content_obj] = b"<< /Length " + str(len(stream)).encode("ascii") + b" >>\nstream\n" + stream + b"\nendstream"
-    objects[2] = f"<< /Type /Pages /Kids [{' '.join(page_refs)}] /Count {len(page_refs)} >>".encode("ascii")
-    out = bytearray(b"%PDF-1.4\n")
-    offsets = {0: 0}
-    for index in sorted(objects):
-        obj = objects[index]
-        offsets[index] = len(out)
-        out.extend(f"{index} 0 obj\n".encode("ascii"))
-        out.extend(obj)
-        out.extend(b"\nendobj\n")
-    xref = len(out)
-    max_obj = max(objects)
-    out.extend(f"xref\n0 {max_obj + 1}\n".encode("ascii"))
-    out.extend(b"0000000000 65535 f \n")
-    for index in range(1, max_obj + 1):
-        offset = offsets.get(index, 0)
-        out.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
-    out.extend(
-        f"trailer << /Size {max_obj + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode("ascii")
-    )
-    return bytes(out)
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import letter
+        from reportlab.pdfgen import canvas
+    except ImportError as exc:  # pragma: no cover - dependency is verified in CI.
+        raise RuntimeError("ReportLab is required for institutional PDF exports.") from exc
+
+    buffer = BytesIO()
+    pdf = canvas.Canvas(buffer, pagesize=letter, pageCompression=0)
+    width, height = letter
+    pages = [
+        ("CLIENT-READY PDF PACKAGE", _rl_cover_page),
+        ("EXECUTIVE SUMMARY", _rl_summary_page),
+        ("PROVENANCE DASHBOARD", _rl_provenance_page),
+        ("EVIDENCE DETAIL", _rl_evidence_page),
+    ]
+    total = len(pages)
+    for page_no, (section, renderer) in enumerate(pages, start=1):
+        _rl_background(pdf, width, height, colors)
+        renderer(pdf, snapshot, width, height, page_no, total, section, colors)
+        _rl_footer(pdf, snapshot, width, page_no, total, section, colors)
+        pdf.showPage()
+    pdf.save()
+    return buffer.getvalue()
 
 
-def _pdf_page_streams(snapshot: dict[str, Any]) -> list[str]:
-    return [_pdf_cover_page(snapshot), _pdf_evidence_page(snapshot)]
+def _rl_background(pdf, width: float, height: float, colors) -> None:
+    pdf.setFillColor(colors.HexColor("#071019"))
+    pdf.rect(0, 0, width, height, stroke=0, fill=1)
+    pdf.setFillColor(colors.HexColor("#0d1622"))
+    pdf.rect(0, height - 82, width, 82, stroke=0, fill=1)
+    pdf.setStrokeColor(colors.HexColor("#263548"))
+    pdf.setLineWidth(1)
+    pdf.line(36, height - 82, width - 36, height - 82)
 
 
-def _pdf_cover_page(snapshot: dict[str, Any]) -> str:
-    cmds = [_pdf_rect(0, 0, 612, 792, (0.025, 0.055, 0.085))]
-    cmds.append(_pdf_rect(0, 724, 612, 68, (0.04, 0.075, 0.12)))
-    cmds.append(_pdf_text("HELIOS PRO", 42, 758, 18, bold=True))
-    cmds.append(_pdf_text("Advisor-Grade Research Terminal", 42, 740, 9, color=(0.70, 0.78, 0.88)))
-    cmds.append(_pdf_text("INSTITUTIONAL ADVISOR REPORT", 340, 754, 11, bold=True, color=(0.32, 0.65, 1.0)))
-    y = _pdf_wrapped(cmds, str(snapshot.get("title") or "Helios Report Snapshot"), 42, 682, 520, size=21, bold=True, max_lines=3)
-    y -= 18
-    cmds.append(_pdf_text("REPORT VERSION", 42, y, 11, bold=True, color=(0.32, 0.65, 1.0)))
-    cmds.append(_pdf_text(str(snapshot.get("version_label") or "v1"), 174, y, 11, bold=True))
-    y -= 24
-    cmds.append(_pdf_text("SOURCE AND PROVENANCE", 42, y, 11, bold=True, color=(1.0, 0.82, 0.24)))
-    y -= 18
+def _rl_header(pdf, width: float, height: float, section: str, colors) -> None:
+    _rl_text(pdf, "HELIOS PRO", 42, height - 42, 18, colors.HexColor("#e6edf7"), bold=True)
+    _rl_text(pdf, "Advisor-Grade Research Terminal", 42, height - 58, 8.5, colors.HexColor("#9fb2c8"), bold=True)
+    _rl_text(pdf, section, width - 260, height - 42, 10, colors.HexColor("#55a7ff"), bold=True)
+
+
+def _rl_cover_page(pdf, snapshot: dict[str, Any], width: float, height: float, page_no: int, total: int, section: str, colors) -> None:
+    _rl_header(pdf, width, height, section, colors)
+    _rl_text(pdf, "CLIENT-READY PDF PACKAGE", 42, 650, 10, colors.HexColor("#55a7ff"), bold=True)
+    _rl_text(pdf, "INSTITUTIONAL ADVISOR REPORT", 42, 632, 10, colors.HexColor("#ffd24a"), bold=True)
+    _rl_wrapped(pdf, str(snapshot.get("title") or "Helios Report Snapshot"), 42, 602, 520, 26, colors.HexColor("#f8fafc"), bold=True, max_lines=3)
+    _rl_text(pdf, f"REPORT VERSION {snapshot.get('version_label') or 'v1'}", 42, 528, 12, colors.HexColor("#ffd24a"), bold=True)
+    _rl_text(pdf, "Helios Report Snapshot", 42, 508, 10, colors.HexColor("#9fb2c8"))
+
     cards = [
         ("Prepared For", snapshot.get("prepared_for") or "Advisor review"),
         ("Prepared By", snapshot.get("prepared_by") or "Helios local workspace"),
+        ("Reviewer", snapshot.get("reviewer") or "Advisor review required"),
         ("Source", snapshot.get("source") or "Unknown"),
+        ("Input Range", f"{snapshot.get('first_date') or 'Unknown'} to {snapshot.get('last_date') or 'Unknown'}"),
         ("Rows", snapshot.get("row_count") or 0),
+    ]
+    _rl_card_grid(pdf, cards, 42, 438, 252, 62, colors)
+    _rl_panel(
+        pdf,
+        42,
+        120,
+        width - 84,
+        92,
+        "ADVISOR REVIEW REQUIRED",
+        "Analysis only. Helios provides evidence summaries and does not provide investment advice, order execution, brokerage services, or return guarantees.",
+        colors,
+        accent="#ffd24a",
+    )
+
+
+def _rl_summary_page(pdf, snapshot: dict[str, Any], width: float, height: float, page_no: int, total: int, section: str, colors) -> None:
+    _rl_header(pdf, width, height, section, colors)
+    report = snapshot.get("report") if isinstance(snapshot.get("report"), dict) else {}
+    sections = report.get("sections") if isinstance(report.get("sections"), dict) else {}
+    summary = sections.get("executive_summary") if isinstance(sections.get("executive_summary"), dict) else {}
+    action = sections.get("action") if isinstance(sections.get("action"), dict) else {}
+    evidence = sections.get("evidence") if isinstance(sections.get("evidence"), dict) else {}
+    risk = sections.get("risk") if isinstance(sections.get("risk"), dict) else {}
+    forecast = sections.get("forecast") if isinstance(sections.get("forecast"), dict) else {}
+
+    _rl_text(pdf, "EXECUTIVE SUMMARY", 42, 674, 18, colors.HexColor("#f8fafc"), bold=True)
+    y = _rl_wrapped(
+        pdf,
+        str(summary.get("summary") or summary.get("headline") or "Report summary is generated from deterministic Helios sections."),
+        42,
+        646,
+        522,
+        10.5,
+        colors.HexColor("#c8d3df"),
+        max_lines=7,
+    )
+    y -= 18
+    cards = [
+        ("Action", action.get("action") or "Review"),
+        ("Conviction", _fmt_pdf_value(action.get("conviction_pct"), suffix="%")),
+        ("Opportunity", _fmt_pdf_value(evidence.get("opportunity_score"))),
+        ("Risk", _fmt_pdf_value(evidence.get("risk_score") or risk.get("risk_score"))),
+        ("Expected Return", _fmt_pdf_value(forecast.get("expected_return_pct"), suffix="%")),
+        ("Expected Vol", _fmt_pdf_value(forecast.get("expected_vol_pct"), suffix="%")),
+    ]
+    _rl_card_grid(pdf, cards, 42, min(y - 34, 500), 252, 58, colors)
+    _rl_panel(
+        pdf,
+        42,
+        118,
+        width - 84,
+        100,
+        "REPORT GOVERNANCE",
+        "This page is a frozen advisor/client-ready summary. Calculations remain deterministic Helios outputs; any AI narrative is explanatory only and requires advisor review.",
+        colors,
+        accent="#55a7ff",
+    )
+
+
+def _rl_provenance_page(pdf, snapshot: dict[str, Any], width: float, height: float, page_no: int, total: int, section: str, colors) -> None:
+    _rl_header(pdf, width, height, section, colors)
+    _rl_text(pdf, "PROVENANCE DASHBOARD", 42, 674, 18, colors.HexColor("#f8fafc"), bold=True)
+    _rl_text(pdf, "SOURCE AND PROVENANCE", 42, 648, 10, colors.HexColor("#ffd24a"), bold=True)
+    cards = [
+        ("Source", snapshot.get("source") or "Unknown"),
+        ("Source Counts", snapshot.get("source_counts") or {}),
         ("First Date", snapshot.get("first_date") or "Unknown"),
         ("Last Date", snapshot.get("last_date") or "Unknown"),
+        ("Row Count", snapshot.get("row_count") or 0),
+        ("Research Eligible", "Yes" if snapshot.get("eligible_for_real_research") else "No"),
     ]
-    for index, (label, value) in enumerate(cards):
-        x = 42 + (index % 2) * 266
-        box_y = y - 66 - (index // 2) * 82
-        cmds.append(_pdf_rect(x, box_y, 246, 58, (0.055, 0.095, 0.145), stroke=(0.16, 0.25, 0.35)))
-        cmds.append(_pdf_text(label, x + 14, box_y + 36, 8, bold=True, color=(0.62, 0.70, 0.80)))
-        cmds.append(_pdf_text(str(value), x + 14, box_y + 16, 13, bold=True))
-    cmds.append(_pdf_rect(42, 198, 528, 76, (0.11, 0.10, 0.05), stroke=(0.56, 0.43, 0.09)))
-    cmds.append(_pdf_text("ADVISOR REVIEW REQUIRED", 58, 244, 12, bold=True, color=(1.0, 0.82, 0.24)))
-    _pdf_wrapped(
-        cmds,
-        "Analysis only. Helios provides evidence summaries and does not provide investment advice, order execution, or return guarantees.",
-        58,
-        224,
-        492,
-        size=9,
-        color=(0.86, 0.90, 0.96),
-        max_lines=3,
-    )
-    cmds.append(_pdf_text("Helios Report Snapshot", 42, 42, 9, color=(0.62, 0.70, 0.80)))
-    cmds.append(_pdf_text(str(snapshot.get("created_at") or ""), 430, 42, 9, color=(0.62, 0.70, 0.80)))
-    return "".join(cmds)
+    _rl_card_grid(pdf, cards, 42, 564, 252, 58, colors)
+
+    audit = snapshot.get("audit_trail") if isinstance(snapshot.get("audit_trail"), list) else []
+    y = 330
+    _rl_text(pdf, "AUDIT TRAIL", 42, y, 14, colors.HexColor("#f8fafc"), bold=True)
+    y -= 24
+    for row in audit[:4]:
+        text = f"{_label(row.get('event'))}: {row.get('at') or ''} - {row.get('summary') or ''}"
+        y = _rl_wrapped(pdf, text, 58, y, 490, 9, colors.HexColor("#c8d3df"), max_lines=3)
+        y -= 10
+    metadata = snapshot.get("model_metadata") if isinstance(snapshot.get("model_metadata"), dict) else {}
+    if metadata:
+        _rl_panel(pdf, 42, 118, width - 84, 88, "MODEL METADATA", str(metadata), colors, accent="#55a7ff")
 
 
-def _pdf_evidence_page(snapshot: dict[str, Any]) -> str:
-    cmds = [_pdf_rect(0, 0, 612, 792, (0.025, 0.055, 0.085))]
-    cmds.append(_pdf_text("HELIOS PRO", 42, 760, 13, bold=True))
-    cmds.append(_pdf_text("Institutional Report Details", 402, 760, 10, bold=True, color=(0.32, 0.65, 1.0)))
-    y = 718
-    y = _pdf_section(cmds, "AUDIT TRAIL", _audit_rows(snapshot), 42, y)
-    y = _pdf_section(cmds, "DISCLOSURE BLOCKS", _disclosure_rows(snapshot), 42, y)
-    y = _pdf_section(cmds, "MODEL METADATA", snapshot.get("model_metadata") or {}, 42, y)
-    y = _pdf_section(cmds, "SOURCE COUNTS", snapshot.get("source_counts") or {}, 42, y)
-    warnings = snapshot.get("warnings") or []
+def _rl_evidence_page(pdf, snapshot: dict[str, Any], width: float, height: float, page_no: int, total: int, section: str, colors) -> None:
+    _rl_header(pdf, width, height, section, colors)
+    _rl_text(pdf, "EVIDENCE DETAIL", 42, 674, 18, colors.HexColor("#f8fafc"), bold=True)
+    warnings = snapshot.get("warnings") if isinstance(snapshot.get("warnings"), list) else []
+    y = 640
     if warnings:
-        y = _pdf_section(cmds, "CAVEATS", {f"Caveat {i + 1}": warning for i, warning in enumerate(warnings[:6])}, 42, y)
+        _rl_text(pdf, "CAVEATS", 42, y, 12, colors.HexColor("#ffd24a"), bold=True)
+        y -= 20
+        for warning in warnings[:5]:
+            y = _rl_wrapped(pdf, f"- {warning}", 58, y, 490, 8.8, colors.HexColor("#c8d3df"), max_lines=2)
+            y -= 7
+    else:
+        y = _rl_wrapped(pdf, "No additional caveats beyond the required disclosure blocks.", 42, y, 500, 9, colors.HexColor("#c8d3df"), max_lines=2) - 12
     if snapshot.get("ai_narrative"):
-        cmds.append(_pdf_text("AI NARRATIVE", 42, y, 11, bold=True, color=(1.0, 0.82, 0.24)))
-        y -= 18
-        y = _pdf_wrapped(cmds, str(snapshot["ai_narrative"]), 42, y, 520, size=9, max_lines=12)
-        y -= 14
-    cmds.append(_pdf_rect(42, max(y - 86, 64), 528, 72, (0.055, 0.095, 0.145), stroke=(0.16, 0.25, 0.35)))
-    cmds.append(_pdf_text("EXPORT CONTROLS", 58, max(y - 42, 108), 10, bold=True, color=(0.32, 0.65, 1.0)))
-    _pdf_wrapped(
-        cmds,
-        "This PDF is a frozen local snapshot of deterministic Helios report facts. Review the matching HTML snapshot for expanded sections and caveats.",
-        58,
-        max(y - 60, 90),
-        492,
-        size=8,
-        color=(0.70, 0.78, 0.88),
-        max_lines=3,
-    )
-    cmds.append(_pdf_text("ADVISOR REVIEW REQUIRED", 42, 42, 9, bold=True, color=(1.0, 0.82, 0.24)))
-    return "".join(cmds)
+        _rl_text(pdf, "AI NARRATIVE", 42, y, 12, colors.HexColor("#ffd24a"), bold=True)
+        y = _rl_wrapped(pdf, str(snapshot.get("ai_narrative")), 58, y - 20, 490, 8.5, colors.HexColor("#c8d3df"), max_lines=8) - 12
+    _rl_text(pdf, "DISCLOSURE BLOCKS", 42, max(y, 310), 14, colors.HexColor("#f8fafc"), bold=True)
+    y = max(y, 310) - 26
+    for block in (snapshot.get("disclosure_blocks") or [])[:4]:
+        _rl_panel(pdf, 42, y - 78, width - 84, 72, str(block.get("title") or "Disclosure"), str(block.get("body") or ""), colors, accent="#ffd24a")
+        y -= 86
 
 
-def _pdf_section(cmds: list[str], title: str, rows: dict[str, Any], x: int, y: int) -> int:
-    if not rows:
-        return y
-    cmds.append(_pdf_text(title, x, y, 11, bold=True, color=(1.0, 0.82, 0.24)))
-    y -= 18
-    for key, value in list(rows.items())[:8]:
-        cmds.append(_pdf_text(_label(key), x, y, 8, bold=True, color=(0.62, 0.70, 0.80)))
-        y = _pdf_wrapped(cmds, str(value), x + 145, y, 375, size=8, max_lines=2)
-        y -= 6
-    return y - 12
+def _rl_footer(pdf, snapshot: dict[str, Any], width: float, page_no: int, total: int, section: str, colors) -> None:
+    pdf.setStrokeColor(colors.HexColor("#263548"))
+    pdf.line(42, 66, width - 42, 66)
+    _rl_text(pdf, "Analysis only - not investment advice, order execution, or a return guarantee.", 42, 46, 7.5, colors.HexColor("#9fb2c8"))
+    _rl_text(pdf, f"Page {page_no} of {total}", width - 104, 46, 8, colors.HexColor("#c8d3df"), bold=True)
+    _rl_text(pdf, str(snapshot.get("version_label") or "v1"), width - 104, 34, 7, colors.HexColor("#9fb2c8"))
 
 
-def _pdf_rect(x: int, y: int, width: int, height: int, fill: tuple[float, float, float], stroke: tuple[float, float, float] | None = None) -> str:
-    command = f"{fill[0]} {fill[1]} {fill[2]} rg {x} {y} {width} {height} re f\n"
-    if stroke:
-        command += f"{stroke[0]} {stroke[1]} {stroke[2]} RG {x} {y} {width} {height} re S\n"
-    return command
+def _rl_card_grid(pdf, cards: list[tuple[str, Any]], x: float, y: float, card_width: float, card_height: float, colors) -> None:
+    for index, (label, value) in enumerate(cards):
+        col = index % 2
+        row = index // 2
+        _rl_card(pdf, x + col * (card_width + 24), y - row * (card_height + 20), card_width, card_height, str(label), str(value), colors)
 
 
-def _pdf_text(text: str, x: int, y: int, size: int, *, bold: bool = False, color: tuple[float, float, float] = (0.90, 0.94, 0.98)) -> str:
-    font = "F2" if bold else "F1"
-    return f"BT /{font} {size} Tf {color[0]} {color[1]} {color[2]} rg {x} {y} Td ({_pdf_escape(str(text))}) Tj ET\n"
+def _rl_card(pdf, x: float, y: float, width: float, height: float, label: str, value: str, colors) -> None:
+    pdf.setFillColor(colors.HexColor("#0d1622"))
+    pdf.setStrokeColor(colors.HexColor("#263548"))
+    pdf.roundRect(x, y, width, height, 8, stroke=1, fill=1)
+    _rl_text(pdf, label.upper(), x + 14, y + height - 20, 7.5, colors.HexColor("#9fb2c8"), bold=True)
+    _rl_wrapped(pdf, value, x + 14, y + height - 38, width - 28, 10.5, colors.HexColor("#f8fafc"), bold=True, max_lines=2)
 
 
-def _pdf_wrapped(
-    cmds: list[str],
-    text: str,
-    x: int,
-    y: int,
-    width: int,
-    *,
-    size: int,
-    bold: bool = False,
-    color: tuple[float, float, float] = (0.90, 0.94, 0.98),
-    max_lines: int,
-) -> int:
-    chars = max(24, int(width / max(size * 0.52, 1)))
-    for line in textwrap.wrap(str(text), width=chars)[:max_lines]:
-        cmds.append(_pdf_text(line, x, y, size, bold=bold, color=color))
-        y -= int(size * 1.45)
+def _rl_panel(pdf, x: float, y: float, width: float, height: float, title: str, body: str, colors, *, accent: str) -> None:
+    pdf.setFillColor(colors.HexColor("#111827"))
+    pdf.setStrokeColor(colors.HexColor("#263548"))
+    pdf.roundRect(x, y, width, height, 8, stroke=1, fill=1)
+    pdf.setFillColor(colors.HexColor(accent))
+    pdf.rect(x, y, 4, height, stroke=0, fill=1)
+    _rl_text(pdf, title, x + 16, y + height - 22, 10.5, colors.HexColor(accent), bold=True)
+    max_lines = max(1, int((height - 42) / 12))
+    _rl_wrapped(pdf, body, x + 16, y + height - 42, width - 32, 8.8, colors.HexColor("#c8d3df"), max_lines=max_lines)
+
+
+def _rl_text(pdf, text: Any, x: float, y: float, size: float, color, *, bold: bool = False) -> None:
+    pdf.setFillColor(color)
+    pdf.setFont("Helvetica-Bold" if bold else "Helvetica", size)
+    pdf.drawString(x, y, _pdf_clean(text))
+
+
+def _rl_wrapped(pdf, text: Any, x: float, y: float, width: float, size: float, color, *, bold: bool = False, max_lines: int) -> float:
+    chars = max(24, int(width / max(size * 0.50, 1)))
+    lines = textwrap.wrap(_pdf_clean(text), width=chars)[:max_lines]
+    if not lines:
+        lines = [""]
+    leading = size * 1.38
+    for line in lines:
+        _rl_text(pdf, line, x, y, size, color, bold=bold)
+        y -= leading
     return y
 
 
-def _pdf_lines(snapshot: dict[str, Any]) -> list[str]:
-    report = snapshot.get("report") or {}
-    lines = [
-        "Helios Report Snapshot",
-        str(snapshot.get("title") or ""),
-        f"Saved: {snapshot.get('created_at') or ''}",
-        f"Target: {snapshot.get('target_kind') or ''}:{snapshot.get('target_id') or ''}",
-        f"Source: {snapshot.get('source') or 'Unknown'}",
-        f"Date Range: {snapshot.get('first_date') or 'Unknown'} to {snapshot.get('last_date') or 'Unknown'}",
-        f"Row Count: {snapshot.get('row_count') or 0}",
-        f"Source Counts: {snapshot.get('source_counts') or {}}",
-        f"Data Mode: {snapshot.get('data_mode') or ''}",
-        "Analysis only: no investment advice, no order execution, no return guarantee.",
-    ]
-    model_metadata = snapshot.get("model_metadata") or {}
-    if model_metadata:
-        lines.append(f"Model Metadata: {model_metadata}")
-    warnings = snapshot.get("warnings") or []
-    if warnings:
-        lines.append("Caveats:")
-        lines.extend(f"- {warning}" for warning in warnings[:8])
-    if snapshot.get("ai_narrative"):
-        lines.append("AI Narrative:")
-        lines.extend(textwrap.wrap(str(snapshot["ai_narrative"]), width=92)[:8])
-    sections = report.get("sections") if isinstance(report.get("sections"), dict) else {}
-    summary = sections.get("executive_summary") if isinstance(sections.get("executive_summary"), dict) else {}
-    if summary:
-        lines.append("Executive Summary:")
-        for value in summary.values():
-            lines.extend(textwrap.wrap(str(value), width=92)[:4])
-    return [part for line in lines for part in (textwrap.wrap(str(line), width=96) or [""])]
+def _fmt_pdf_value(value: Any, *, suffix: str = "") -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "Research locked" if value is None else str(value)
+    return f"{number:.1f}{suffix}"
+
+
+def _pdf_clean(value: Any) -> str:
+    return str(value or "").replace("\u2014", "-").replace("\u2013", "-").replace("\u2011", "-")
 
 
 def _model_metadata(report: dict[str, Any]) -> dict[str, Any]:
@@ -488,19 +523,6 @@ def _disclosures_html(snapshot: dict[str, Any]) -> str:
     return "<section><h2>Disclosure Blocks</h2><div class=\"disclosures\">" + "".join(cards) + "</div></section>"
 
 
-def _audit_rows(snapshot: dict[str, Any]) -> dict[str, str]:
-    rows = snapshot.get("audit_trail") or []
-    out = {}
-    for index, row in enumerate(rows[:4], start=1):
-        out[f"{index}. {_label(row.get('event'))}"] = f"{row.get('at') or ''} / {row.get('summary') or ''}"
-    return out
-
-
-def _disclosure_rows(snapshot: dict[str, Any]) -> dict[str, str]:
-    rows = snapshot.get("disclosure_blocks") or []
-    return {str(row.get("title") or f"Disclosure {index + 1}"): str(row.get("body") or "") for index, row in enumerate(rows[:4])}
-
-
 def _model_metadata_html(snapshot: dict[str, Any]) -> str:
     metadata = snapshot.get("model_metadata") or {}
     if not metadata:
@@ -582,7 +604,3 @@ def _int(value: Any) -> int:
         return int(value)
     except (TypeError, ValueError):
         return 0
-
-
-def _pdf_escape(value: str) -> str:
-    return value.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")

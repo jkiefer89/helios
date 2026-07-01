@@ -195,7 +195,7 @@ def test_report_snapshot_history_exports_html_and_pdf_with_provenance(monkeypatc
     assert b"Helios Report Snapshot" in pdf.data
     assert b"SOURCE AND PROVENANCE" in pdf.data
     assert b"ADVISOR REVIEW REQUIRED" in pdf.data
-    assert pdf.data.count(b"/Type /Page ") >= 2
+    assert pdf.data.count(b"/Type /Page") >= 2
 
 
 def test_institutional_report_snapshots_include_versions_audit_and_disclosures(monkeypatch, tmp_path):
@@ -271,6 +271,51 @@ def test_institutional_report_snapshots_include_versions_audit_and_disclosures(m
     assert b"REPORT VERSION" in pdf.data
     assert b"AUDIT TRAIL" in pdf.data
     assert b"DISCLOSURE BLOCKS" in pdf.data
+
+
+def test_institutional_pdf_export_is_full_designer_grade_package(monkeypatch, tmp_path):
+    monkeypatch.setenv("HELIOS_DB_PATH", str(tmp_path / "helios.db"))
+    from engine import persistence
+
+    persistence.reset_store_for_tests()
+    client = _client()
+    upload = client.post(
+        "/api/upload",
+        data={
+            "file": (BytesIO(price_csv(days=260)), "designer-grade.csv"),
+            "symbol": "DESIGN",
+            "name": "Designer Grade Upload",
+        },
+        content_type="multipart/form-data",
+    )
+    assert upload.status_code == 200
+
+    save = client.post(
+        "/api/report/snapshots",
+        json={
+            "kind": "instrument",
+            "id": "DESIGN",
+            "prepared_for": "Client Investment Committee",
+            "prepared_by": "Helios Advisory",
+            "reviewer": "Portfolio Oversight",
+        },
+    )
+    assert save.status_code == 200
+    snapshot = save.get_json()["snapshot"]
+    assert snapshot["metadata"]["pdf_engine"] == "reportlab"
+    assert snapshot["metadata"]["pdf_layout"] == "designer_grade_institutional"
+
+    pdf = client.get(snapshot["pdf_url"])
+    assert pdf.status_code == 200
+    assert pdf.data.startswith(b"%PDF-")
+    assert pdf.data.count(b"/Type /Page") >= 4
+    assert b"CLIENT-READY PDF PACKAGE" in pdf.data
+    assert b"EXECUTIVE SUMMARY" in pdf.data
+    assert b"PROVENANCE DASHBOARD" in pdf.data
+    assert b"EVIDENCE DETAIL" in pdf.data
+    assert b"DISCLOSURE BLOCKS" in pdf.data
+    assert b"Page 1 of" in pdf.data
+    assert b"Page 4 of" in pdf.data
 
 
 def test_report_snapshot_can_generate_ai_narrative_when_provider_enabled(monkeypatch, tmp_path):
