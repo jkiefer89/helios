@@ -1300,7 +1300,9 @@ def model_forward():
     roll = holdings.model_lookthrough(mdl)
     underlyings = roll["exposure"].get("underlyings", [])
     fmap = _fundamentals_map_for(underlyings)
+    fundamentals_sources = sorted({f.source for f in fmap.values() if getattr(f, "usable", False)})
     forward_return = cma.aggregate(underlyings, fmap, mdl.mandate_key)
+    forward_return["fundamentals_sources"] = fundamentals_sources
     forward_prov = provenance.forward_research(roll["coverage"])
     blended = mandate.blended_anchor(
         mdl.mandate_key,

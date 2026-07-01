@@ -45,6 +45,39 @@ def test_fundamentals_offline_returns_empty():
     assert f.source == "none" and f.usable is False
 
 
+def test_fmp_provider_derives_consensus_growth_and_forward_pe(monkeypatch):
+    # FMP is preferred when a key is set; growth is a CAGR across the forward
+    # estimate window (cleaner than yfinance's single noisy quarter).
+    fundamentals.set_default_provider(None)
+    monkeypatch.setenv("HELIOS_FMP_KEY", "testkey")
+
+    def fake_fmp(url):
+        if "/profile/" in url:
+            return [{"sector": "Technology", "price": 100.0, "lastDiv": 2.0}]
+        if "/ratios-ttm/" in url:
+            return [{"dividendYieldTTM": 0.02, "peRatioTTM": 25.0}]
+        if "/analyst-estimates/" in url:
+            return [{"date": "2099-12-31", "estimatedEpsAvg": 6.0},
+                    {"date": "2097-12-31", "estimatedEpsAvg": 4.0}]
+        return None
+
+    fundamentals.set_fmp_http(fake_fmp)
+    f = fundamentals.fetch("AAPL")
+    assert f.source == "fmp" and f.usable
+    assert f.dividend_yield == pytest.approx(0.02)
+    assert f.forward_pe == pytest.approx(25.0)        # price / nearest-year EPS = 100/4
+    assert f.earnings_growth == pytest.approx((6.0 / 4.0) ** 0.5 - 1.0, abs=1e-4)
+    assert f.sector == "Technology"
+
+
+def test_fetch_falls_back_when_no_fmp_key(monkeypatch):
+    fundamentals.set_default_provider(None)
+    monkeypatch.delenv("HELIOS_FMP_KEY", raising=False)
+    monkeypatch.setattr(fundamentals.data, "HAS_YF", False)  # keep the fallback offline
+    f = fundamentals.fetch("AAPL")
+    assert f.source == "none"  # yfinance offline -> empty, never fabricated
+
+
 # --------------------------------------------------------------------------- #
 # cma building blocks
 # --------------------------------------------------------------------------- #
@@ -174,6 +207,7 @@ def _inject_providers():
     yield
     holdings.set_default_client(None)
     fundamentals.set_default_provider(None)
+    fundamentals.set_fmp_http(None)
     figi.set_default_post(None)
 
 
