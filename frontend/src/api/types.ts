@@ -516,6 +516,60 @@ export interface ClinicResponse extends ProvenancePayload {
   explanation: string;
 }
 
+export interface RiskAnalyticsResponse extends ProvenancePayload {
+  id: string;
+  name: string;
+  risk_exposure_unavailable?: boolean;
+  mandate: { key: string; label: string; [key: string]: unknown };
+  benchmark?: { symbol: string; status: string };
+  sector_exposure: Array<{ name: string; weight_pct: number; tickers: string[] }>;
+  theme_exposure: Array<{ name: string; weight_pct: number; tickers: string[] }>;
+  factor_exposure: Record<string, number>;
+  single_name_concentration: {
+    hhi?: number;
+    effective_holdings?: number;
+    status?: string;
+    top_holding?: { ticker: string; weight_pct: number };
+    top_5_weight_pct?: number;
+  };
+  volatility_budget: {
+    annual_vol_pct?: number;
+    target_vol_pct?: number;
+    gap_pct?: number;
+    status?: string;
+  };
+  volatility_contribution: Array<{ ticker: string; weight_pct: number; mrc_pct: number; source: string }>;
+  correlation_clusters: Array<{
+    name: string;
+    type: string;
+    average_correlation?: number | null;
+    pairs: Array<{ tickers: string[]; correlation: number }>;
+  }>;
+  drawdown_stress: {
+    max_drawdown_pct?: number | null;
+    worst_21d_pct?: number | null;
+    worst_63d_pct?: number | null;
+    current_drawdown_pct?: number | null;
+  };
+  scenario_shocks: Array<{ scenario: string; portfolio_impact_pct: number; basis: string }>;
+  liquidity_flags: {
+    items: Array<{ ticker: string; weight_pct: number; liquidity_score: number; flag: string; estimated_adv_usd?: number | null }>;
+    summary: { flagged_count: number; basis?: string };
+  };
+  benchmark_relative: {
+    status: string;
+    benchmark_symbol?: string;
+    beta?: number;
+    correlation?: number;
+    active_vol_pct?: number;
+    tracking_error_pct?: number;
+    relative_drawdown_pct?: number;
+    overlap_days?: number;
+    message?: string;
+  };
+  methodology: Record<string, unknown>;
+}
+
 export interface ReportResponse extends ProvenancePayload {
   kind: "instrument" | "model" | string;
   title: string;

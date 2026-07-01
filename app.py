@@ -63,7 +63,7 @@ _LOCAL_ENV_STATUS = _load_local_env_file()
 
 from engine import (
     ai_copilot, backtest, data, forecast, indicators, insights, mandate, model_governance, model_library, opportunity, portfolio,
-    portfolio_clinic, persistence, provenance, regime, report_exports, reporting, sentiment, signal_journal, signals, strategy,
+    portfolio_clinic, persistence, provenance, regime, report_exports, reporting, risk_exposure, sentiment, signal_journal, signals, strategy,
 )
 
 app = Flask(__name__)
@@ -1293,6 +1293,14 @@ def model_clinic():
     except ValueError as e:
         return err(str(e), 400)
     return ok({**result, "disclaimer": ANALYSIS_ONLY_DISCLAIMER})
+
+
+@app.route("/api/model/risk")
+def model_risk():
+    mdl = portfolio.get(request.args.get("id", ""))
+    if mdl is None:
+        return err("Unknown model.", 404)
+    return ok({**risk_exposure.analyze_model_risk(mdl), "disclaimer": ANALYSIS_ONLY_DISCLAIMER})
 
 
 @app.route("/api/report/instrument")

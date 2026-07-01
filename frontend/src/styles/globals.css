@@ -3075,6 +3075,58 @@ p {
   grid-template-columns: minmax(130px, 1fr) 90px 80px minmax(180px, 1.2fr) minmax(150px, 1fr) minmax(150px, auto);
 }
 
+.risk-exposure-pair {
+  display: grid;
+  grid-template-columns: minmax(250px, 0.9fr) minmax(0, 1fr);
+  gap: 0.8rem;
+  align-items: center;
+}
+
+.risk-table .terminal-table__head,
+.risk-table .table-row {
+  grid-template-columns: minmax(190px, 1.1fr) 90px minmax(220px, 1.4fr);
+}
+
+.liquidity-table .terminal-table__head,
+.liquidity-table .table-row {
+  grid-template-columns: 90px 90px 80px 150px minmax(170px, 1fr);
+}
+
+.risk-cluster-list {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.risk-cluster-list article {
+  display: grid;
+  gap: 0.34rem;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 6px;
+  background: rgba(7, 12, 20, 0.48);
+  padding: 0.65rem;
+}
+
+.risk-cluster-list strong,
+.risk-cluster-list small,
+.risk-cluster-list span {
+  display: block;
+}
+
+.risk-cluster-list small {
+  color: var(--muted);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+}
+
+.risk-cluster-list span {
+  color: var(--soft);
+  font-size: 0.74rem;
+}
+
+.risk-cluster-list b {
+  color: var(--blue);
+}
+
 .row-actions {
   display: flex;
   flex-wrap: wrap;
@@ -4256,6 +4308,10 @@ p {
     grid-template-columns: 1fr;
   }
 
+  .risk-exposure-pair {
+    grid-template-columns: 1fr;
+  }
+
   .workspace-command .content {
     padding: 0.65rem;
   }
@@ -4390,7 +4446,11 @@ p {
   .models-table .terminal-table__head,
   .models-table .table-row,
   .real-data-table .terminal-table__head,
-  .real-data-table .table-row {
+  .real-data-table .table-row,
+  .risk-table .terminal-table__head,
+  .risk-table .table-row,
+  .liquidity-table .terminal-table__head,
+  .liquidity-table .table-row {
     min-width: 720px;
   }
 

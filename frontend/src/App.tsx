@@ -21,6 +21,7 @@ import { Instruments } from "./views/Instruments";
 import { Models } from "./views/Models";
 import { DataQuality } from "./views/DataQuality";
 import { SignalJournal } from "./views/SignalJournal";
+import { RiskAnalytics } from "./views/RiskAnalytics";
 
 export default function App() {
   const [activeView, setActiveView] = useState<ViewId>("command");
@@ -234,6 +235,9 @@ export default function App() {
     }
     if (activeView === "clinic") {
       return <PortfolioClinic models={models} selectedModel={selectedModel} onSelectModel={selectModelOnly} />;
+    }
+    if (activeView === "risk") {
+      return <RiskAnalytics models={models} selectedModel={selectedModel} onSelectModel={selectModelOnly} />;
     }
     if (activeView === "reports") {
       return (

@@ -17,6 +17,7 @@ import type {
   ReportSnapshotSaveRequest,
   ReportSnapshotSaveResponse,
   ReportResponse,
+  RiskAnalyticsResponse,
   SignalJournalResponse,
   StrategyResponse,
   TickersResponse,
@@ -99,6 +100,7 @@ export const api = {
       })}`,
     ),
   clinic: (id: string) => request<ClinicResponse>(`/api/model/clinic?id=${encodeURIComponent(id)}`),
+  modelRisk: (id: string) => request<RiskAnalyticsResponse>(`/api/model/risk?id=${encodeURIComponent(id)}`),
   reportInstrument: (symbol: string) =>
     request<ReportResponse>(`/api/report/instrument?ticker=${encodeURIComponent(symbol)}`),
   reportModel: (id: string) => request<ReportResponse>(`/api/report/model?id=${encodeURIComponent(id)}`),

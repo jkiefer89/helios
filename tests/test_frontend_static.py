@@ -156,6 +156,27 @@ def test_data_quality_dashboard_view_is_dedicated_and_routed():
     assert "Research-ready" in view_source
 
 
+def test_risk_analytics_view_is_dedicated_and_routed():
+    app_source = (ROOT / "frontend" / "src" / "App.tsx").read_text()
+    shell_source = (ROOT / "frontend" / "src" / "components" / "layout" / "AppShell.tsx").read_text()
+    view_source = (ROOT / "frontend" / "src" / "views" / "RiskAnalytics.tsx").read_text()
+    client_source = (ROOT / "frontend" / "src" / "api" / "client.ts").read_text()
+    type_source = (ROOT / "frontend" / "src" / "api" / "types.ts").read_text()
+
+    assert '"risk"' in shell_source
+    assert "Risk Analytics" in shell_source
+    assert "RiskAnalytics" in app_source
+    assert "api.modelRisk" in view_source
+    assert "modelRisk:" in client_source
+    assert "RiskAnalyticsResponse" in type_source
+    assert "Factor Exposure" in view_source
+    assert "Sector / Theme Exposure" in view_source
+    assert "Correlation Clusters" in view_source
+    assert "Scenario Shocks" in view_source
+    assert "Liquidity Flags" in view_source
+    assert "Benchmark-Relative Risk" in view_source
+
+
 def test_flask_serves_react_build_when_present(tmp_path, monkeypatch):
     dist = tmp_path / "dist"
     assets = dist / "assets"
