@@ -751,6 +751,7 @@ export interface ReportSnapshot {
   last_date?: string | null;
   source_counts: Record<string, number>;
   model_metadata: Record<string, unknown>;
+  signal_journal?: ReportSignalJournalEvidence;
   warnings: string[];
   ai_narrative_included: boolean;
   ai_narrative_status: string;
@@ -901,6 +902,19 @@ export interface SignalJournalResponse {
   benchmark_comparison: SignalJournalBenchmarkComparison[];
   model_evidence: SignalJournalModelEvidence[];
   drift: SignalJournalDriftPoint[];
+  methodology: Record<string, unknown>;
+  disclaimer: string;
+}
+
+export interface ReportSignalJournalEvidence {
+  scope: string;
+  target_kind: string;
+  target_id: string;
+  summary: SignalJournalSummary;
+  benchmark_comparison: SignalJournalBenchmarkComparison[];
+  model_credibility: SignalJournalModelEvidence[];
+  drift: SignalJournalDriftPoint[];
+  target_history: SignalJournalEntry[];
   methodology: Record<string, unknown>;
   disclaimer: string;
 }

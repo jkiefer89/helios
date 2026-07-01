@@ -21,6 +21,7 @@ def build_snapshot(
     target_kind: str,
     target_id: str,
     report: dict[str, Any],
+    signal_journal_evidence: dict[str, Any] | None = None,
     ai_narrative: str = "",
     ai_narrative_status: str = "",
     ai_provider: dict[str, Any] | None = None,
@@ -50,6 +51,7 @@ def build_snapshot(
     report_purpose = _text(report_purpose)[:80] or "advisor_review"
     output_formats = ["html", "pdf", "print"]
     disclosure_blocks = _disclosure_blocks(report)
+    signal_journal_payload = _dict(signal_journal_evidence)
     audit_trail = _audit_trail(
         report=report,
         created_at=created_at,
@@ -79,6 +81,7 @@ def build_snapshot(
         "last_date": last_date,
         "source_counts": source_counts,
         "model_metadata": _model_metadata(report) if target_kind == "model" else {},
+        "signal_journal": signal_journal_payload,
         "warnings": _list(report.get("warnings")),
         "report": report,
         "ai_narrative": _text(ai_narrative)[:6000],
@@ -107,6 +110,7 @@ def build_snapshot(
             "no_execution": True,
             "no_return_guarantee": True,
             "report_timestamp": _text(report.get("timestamp")),
+            "signal_journal": signal_journal_payload,
             "ai_narrative_status": ai_narrative_status or ("provided" if _text(ai_narrative) else "not_requested"),
             "ai_provider": ai_provider or {},
         },
@@ -171,6 +175,7 @@ def render_html(snapshot: dict[str, Any]) -> str:
         ".body{padding:26px 34px} section{border-top:1px solid #263548;margin-top:22px;padding-top:18px} dl{display:grid;grid-template-columns:230px 1fr;gap:8px 18px}",
         "dt{color:#9fb2c8;font-weight:700} dd{margin:0} .warn{color:#ffd24a}.muted{color:#9fb2c8}.caveat{border:1px solid #775f18;background:#17180f;padding:14px;border-radius:6px}",
         ".disclosures{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.disclosure{border:1px solid #263548;background:#0a111c;border-radius:6px;padding:14px}.audit{display:grid;gap:10px}.audit article{border:1px solid #263548;border-radius:6px;background:#09111b;padding:12px}",
+        "table{width:100%;border-collapse:collapse;margin:12px 0 0}th,td{border-bottom:1px solid #263548;padding:8px 10px;text-align:left;vertical-align:top}th{color:#9fb2c8;text-transform:uppercase;font-size:12px}",
         "pre{white-space:pre-wrap;font-family:inherit}.footer{font-size:13px;color:#9fb2c8}@media print{body{background:#fff;color:#111827;padding:0}main{border:0}section{break-inside:avoid}.cover{background:#f8fafc;color:#0f172a}.disclosures{grid-template-columns:1fr}}",
         "</style>",
         "</head>",
@@ -198,6 +203,7 @@ def render_html(snapshot: dict[str, Any]) -> str:
         _disclosures_html(snapshot),
         _model_metadata_html(snapshot),
         _warnings_html(snapshot),
+        _signal_journal_html(snapshot),
         _ai_html(snapshot),
         "<section>",
         "<h2>Report Sections</h2>",
@@ -226,6 +232,7 @@ def render_pdf(snapshot: dict[str, Any]) -> bytes:
         ("CLIENT-READY PDF PACKAGE", _rl_cover_page),
         ("EXECUTIVE SUMMARY", _rl_summary_page),
         ("PROVENANCE DASHBOARD", _rl_provenance_page),
+        ("SIGNAL JOURNAL EVIDENCE", _rl_signal_journal_page),
         ("EVIDENCE DETAIL", _rl_evidence_page),
     ]
     total = len(pages)
@@ -355,6 +362,85 @@ def _rl_provenance_page(pdf, snapshot: dict[str, Any], width: float, height: flo
         _rl_panel(pdf, 42, 118, width - 84, 88, "MODEL METADATA", str(metadata), colors, accent="#55a7ff")
 
 
+def _rl_signal_journal_page(pdf, snapshot: dict[str, Any], width: float, height: float, page_no: int, total: int, section: str, colors) -> None:
+    _rl_header(pdf, width, height, section, colors)
+    _rl_text(pdf, "SIGNAL JOURNAL EVIDENCE", 42, 674, 18, colors.HexColor("#f8fafc"), bold=True)
+    _rl_wrapped(
+        pdf,
+        "Paper-performance evidence record only. Forward results are pending until later persisted market data covers the signal horizon.",
+        42,
+        648,
+        520,
+        9.5,
+        colors.HexColor("#c8d3df"),
+        max_lines=2,
+    )
+    journal = snapshot.get("signal_journal") if isinstance(snapshot.get("signal_journal"), dict) else {}
+    summary = journal.get("summary") if isinstance(journal.get("summary"), dict) else {}
+    history = journal.get("target_history") if isinstance(journal.get("target_history"), list) else []
+    credibility = journal.get("model_credibility") if isinstance(journal.get("model_credibility"), list) else []
+    cards = [
+        ("Signal Count", summary.get("total_count") or 0),
+        ("Forward Results", f"{summary.get('measured_count') or 0} measured / {summary.get('pending_count') or 0} pending"),
+        ("Hit Rate", _fmt_optional_pdf_pct(summary.get("hit_rate_pct"))),
+        ("Alpha Vs Benchmark", _fmt_optional_pdf_pct(summary.get("avg_alpha_pct"))),
+    ]
+    _rl_card_grid(pdf, cards, 42, 568, 252, 58, colors)
+
+    y = 392
+    _rl_text(pdf, "FORWARD RESULTS", 42, y, 12, colors.HexColor("#ffd24a"), bold=True)
+    y -= 22
+    if history:
+        for row in history[:6]:
+            text = (
+                f"{row.get('input_end_date') or ''} / {row.get('target_name') or row.get('target_id') or ''} / "
+                f"{row.get('action_label') or 'Review'} / score {row.get('score') or 0} / "
+                f"{row.get('forward_status') or 'pending'} / forward {_fmt_optional_pdf_pct(row.get('forward_result_pct'))} / "
+                f"alpha vs benchmark {_fmt_optional_pdf_pct(row.get('alpha_pct'))}"
+            )
+            y = _rl_wrapped(pdf, text, 58, y, 490, 8.4, colors.HexColor("#c8d3df"), max_lines=2)
+            y -= 7
+    else:
+        _rl_panel(
+            pdf,
+            42,
+            y - 76,
+            width - 84,
+            68,
+            "NO SIGNAL JOURNAL ENTRIES",
+            "No deterministic Helios signal has been logged for this report target yet.",
+            colors,
+            accent="#ffd24a",
+        )
+        y -= 96
+
+    y = min(y, 206)
+    _rl_text(pdf, "MODEL-BY-MODEL CREDIBILITY", 42, y, 12, colors.HexColor("#ffd24a"), bold=True)
+    y -= 22
+    if credibility:
+        for row in credibility[:3]:
+            text = (
+                f"{row.get('target_name') or row.get('target_id') or ''}: "
+                f"{row.get('signal_count') or 0} signals, {row.get('measured_count') or 0} measured, "
+                f"hit rate {_fmt_optional_pdf_pct(row.get('hit_rate_pct'))}, "
+                f"alpha vs benchmark {_fmt_optional_pdf_pct(row.get('avg_alpha_pct'))}, "
+                f"latest {row.get('latest_action_label') or 'Review'} vs {row.get('benchmark') or 'benchmark'}."
+            )
+            y = _rl_wrapped(pdf, text, 58, y, 490, 8.4, colors.HexColor("#c8d3df"), max_lines=2)
+            y -= 8
+    else:
+        _rl_wrapped(
+            pdf,
+            "No model-level journal evidence is available for this report target.",
+            58,
+            y,
+            490,
+            8.4,
+            colors.HexColor("#c8d3df"),
+            max_lines=2,
+        )
+
+
 def _rl_evidence_page(pdf, snapshot: dict[str, Any], width: float, height: float, page_no: int, total: int, section: str, colors) -> None:
     _rl_header(pdf, width, height, section, colors)
     _rl_text(pdf, "EVIDENCE DETAIL", 42, 674, 18, colors.HexColor("#f8fafc"), bold=True)
@@ -436,6 +522,22 @@ def _fmt_pdf_value(value: Any, *, suffix: str = "") -> str:
     except (TypeError, ValueError):
         return "Research locked" if value is None else str(value)
     return f"{number:.1f}{suffix}"
+
+
+def _fmt_optional_pdf_pct(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "Pending"
+    return f"{number:.1f}%"
+
+
+def _fmt_html_pct(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "Pending"
+    return f"{number:.2f}%"
 
 
 def _pdf_clean(value: Any) -> str:
@@ -536,6 +638,109 @@ def _warnings_html(snapshot: dict[str, Any]) -> str:
         return ""
     items = "".join(f"<li class=\"warn\">{_esc(item)}</li>" for item in warnings)
     return f"<section><h2>Caveats</h2><ul>{items}</ul></section>"
+
+
+def _signal_journal_html(snapshot: dict[str, Any]) -> str:
+    journal = snapshot.get("signal_journal") if isinstance(snapshot.get("signal_journal"), dict) else {}
+    summary = journal.get("summary") if isinstance(journal.get("summary"), dict) else {}
+    history = journal.get("target_history") if isinstance(journal.get("target_history"), list) else []
+    benchmark_rows = journal.get("benchmark_comparison") if isinstance(journal.get("benchmark_comparison"), list) else []
+    credibility = journal.get("model_credibility") if isinstance(journal.get("model_credibility"), list) else []
+    summary_rows = {
+        "Signal Count": summary.get("total_count") or 0,
+        "Measured Forward Results": summary.get("measured_count") or 0,
+        "Pending Forward Results": summary.get("pending_count") or 0,
+        "Hit Rate": _fmt_html_pct(summary.get("hit_rate_pct")),
+        "Alpha Vs Benchmark": _fmt_html_pct(summary.get("avg_alpha_pct")),
+    }
+    html_parts = [
+        "<section>",
+        "<h2>Signal Journal Evidence</h2>",
+        "<p class=\"muted\">Paper performance tracking only. Forward results remain pending until later persisted market data covers the original signal horizon.</p>",
+        _render_dict(summary_rows),
+        "<h3>Forward Results</h3>",
+        _signal_history_table(history),
+        "<h3>Benchmark Comparison</h3>",
+        _benchmark_table(benchmark_rows),
+        "<h3>Model-By-Model Credibility</h3>",
+        _model_credibility_table(credibility),
+        "</section>",
+    ]
+    return "".join(html_parts)
+
+
+def _signal_history_table(rows: list[Any]) -> str:
+    if not rows:
+        return '<p class="muted">No signal journal entries are available for this report target.</p>'
+    body = []
+    for row in rows[:12]:
+        if not isinstance(row, dict):
+            continue
+        body.append(
+            "<tr>"
+            f"<td>{_esc(row.get('input_end_date'))}</td>"
+            f"<td>{_esc(row.get('target_name') or row.get('target_id'))}<br><span class=\"muted\">{_esc(row.get('target_kind'))}:{_esc(row.get('target_id'))}</span></td>"
+            f"<td>{_esc(row.get('action_label'))}<br><span class=\"muted\">Score {_esc(row.get('score'))}</span></td>"
+            f"<td>{_esc(row.get('benchmark') or 'Benchmark')}</td>"
+            f"<td>{_esc(row.get('forward_status') or 'pending')}<br><span class=\"muted\">{_esc(_fmt_html_pct(row.get('forward_result_pct')))}</span></td>"
+            f"<td>{_esc(_fmt_html_pct(row.get('alpha_pct')))}</td>"
+            "</tr>"
+        )
+    if not body:
+        return '<p class="muted">No signal journal entries are available for this report target.</p>'
+    return (
+        "<table><thead><tr><th>Signal Date</th><th>Target</th><th>Action</th><th>Benchmark</th>"
+        "<th>Forward Results</th><th>Alpha Vs Benchmark</th></tr></thead><tbody>"
+        + "".join(body) + "</tbody></table>"
+    )
+
+
+def _benchmark_table(rows: list[Any]) -> str:
+    if not rows:
+        return '<p class="muted">No measured benchmark comparison is available yet.</p>'
+    body = []
+    for row in rows[:6]:
+        if not isinstance(row, dict):
+            continue
+        body.append(
+            "<tr>"
+            f"<td>{_esc(row.get('benchmark'))}</td>"
+            f"<td>{_esc(row.get('measured_count') or 0)}</td>"
+            f"<td>{_esc(_fmt_html_pct(row.get('avg_forward_result_pct')))}</td>"
+            f"<td>{_esc(_fmt_html_pct(row.get('avg_benchmark_result_pct')))}</td>"
+            f"<td>{_esc(_fmt_html_pct(row.get('avg_alpha_pct')))}</td>"
+            f"<td>{_esc(_fmt_html_pct(row.get('hit_rate_pct')))}</td>"
+            "</tr>"
+        )
+    return (
+        "<table><thead><tr><th>Benchmark</th><th>Measured</th><th>Forward</th><th>Benchmark</th>"
+        "<th>Alpha Vs Benchmark</th><th>Hit Rate</th></tr></thead><tbody>"
+        + "".join(body) + "</tbody></table>"
+    )
+
+
+def _model_credibility_table(rows: list[Any]) -> str:
+    if not rows:
+        return '<p class="muted">No model-by-model credibility record is available for this report target.</p>'
+    body = []
+    for row in rows[:8]:
+        if not isinstance(row, dict):
+            continue
+        body.append(
+            "<tr>"
+            f"<td>{_esc(row.get('target_name') or row.get('target_id'))}<br><span class=\"muted\">{_esc(row.get('target_id'))}</span></td>"
+            f"<td>{_esc(row.get('signal_count') or 0)}</td>"
+            f"<td>{_esc(row.get('measured_count') or 0)} / {_esc(row.get('pending_count') or 0)}</td>"
+            f"<td>{_esc(_fmt_html_pct(row.get('hit_rate_pct')))}</td>"
+            f"<td>{_esc(_fmt_html_pct(row.get('avg_alpha_pct')))}</td>"
+            f"<td>{_esc(row.get('latest_action_label') or 'Review')}<br><span class=\"muted\">{_esc(row.get('benchmark') or 'Benchmark')}</span></td>"
+            "</tr>"
+        )
+    return (
+        "<table><thead><tr><th>Model</th><th>Signals</th><th>Measured / Pending</th>"
+        "<th>Hit Rate</th><th>Alpha Vs Benchmark</th><th>Latest</th></tr></thead><tbody>"
+        + "".join(body) + "</tbody></table>"
+    )
 
 
 def _ai_html(snapshot: dict[str, Any]) -> str:

@@ -1456,6 +1456,7 @@ def _report_snapshot_row(row: sqlite3.Row, store: SQLiteStore, *, include_report
         "last_date": store._load_text(row["last_date"]) or None,
         "source_counts": store._load_json(row["source_counts_json"]),
         "model_metadata": store._load_json(row["model_metadata_json"]),
+        "signal_journal": metadata.get("signal_journal") if isinstance(metadata.get("signal_journal"), dict) else {},
         "warnings": warnings if isinstance(warnings, list) else [],
         "ai_narrative": ai_narrative,
         "ai_narrative_included": bool(ai_narrative),

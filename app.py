@@ -1469,6 +1469,7 @@ def save_report_snapshot():
         target_kind=kind,
         target_id=target_id,
         report=report,
+        signal_journal_evidence=_report_signal_journal_evidence(kind, target_id),
         ai_narrative=ai_narrative,
         ai_narrative_status=ai_meta["status"],
         ai_provider=ai_meta["provider"],
@@ -1540,6 +1541,64 @@ def _next_report_snapshot_version(store, kind: str, target_id: str) -> int:
     except Exception:
         versions = []
     return (max(versions) if versions else 0) + 1
+
+
+def _report_signal_journal_evidence(kind: str, target_id: str) -> dict:
+    journal_target_id = data.clean_symbol(target_id, fallback="") if kind == "instrument" else target_id
+    try:
+        entries = signal_journal.list_entries(limit=250)
+    except Exception:
+        entries = []
+    target_entries = [
+        entry for entry in entries
+        if entry.get("target_kind") == kind and str(entry.get("target_id") or "") == journal_target_id
+    ]
+    dashboard = signal_journal.dashboard_payload(target_entries)
+    return {
+        "scope": "target",
+        "target_kind": kind,
+        "target_id": journal_target_id,
+        "summary": dashboard["summary"],
+        "benchmark_comparison": dashboard["benchmark_comparison"],
+        "model_credibility": dashboard["model_evidence"],
+        "drift": dashboard["drift"][-24:],
+        "target_history": [_compact_signal_journal_entry(entry) for entry in target_entries[:24]],
+        "methodology": {
+            "analysis_only": True,
+            "paper_tracking_only": True,
+            "raw_price_history_stored": False,
+            "forward_results": "Pending results resolve only after later live or persisted price history covers the original signal horizon.",
+            "hit_rate_basis": "Measured paper signals are scored against action intent and benchmark-relative alpha when available.",
+        },
+        "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+    }
+
+
+def _compact_signal_journal_entry(entry: dict) -> dict:
+    return {
+        "id": entry.get("id"),
+        "created_at": entry.get("created_at"),
+        "target_kind": entry.get("target_kind"),
+        "target_id": entry.get("target_id"),
+        "target_name": entry.get("target_name"),
+        "action_label": entry.get("action_label"),
+        "score": entry.get("score"),
+        "benchmark": entry.get("benchmark"),
+        "input_start_date": entry.get("input_start_date"),
+        "input_end_date": entry.get("input_end_date"),
+        "input_rows": entry.get("input_rows"),
+        "horizon_days": entry.get("horizon_days"),
+        "data_mode": entry.get("data_mode"),
+        "eligible_for_real_research": bool(entry.get("eligible_for_real_research")),
+        "source_counts": entry.get("source_counts") or {},
+        "forward_status": entry.get("forward_status"),
+        "forward_start_date": entry.get("forward_start_date"),
+        "forward_end_date": entry.get("forward_end_date"),
+        "forward_result_pct": entry.get("forward_result_pct"),
+        "benchmark_result_pct": entry.get("benchmark_result_pct"),
+        "alpha_pct": entry.get("alpha_pct"),
+        "evaluated_at": entry.get("evaluated_at"),
+    }
 
 
 def _report_snapshot_ai_narrative(

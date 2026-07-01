@@ -1,7 +1,7 @@
 from io import BytesIO
 
 import app as helios
-from conftest import price_csv
+from conftest import price_csv, price_series
 
 
 def _client():
@@ -422,3 +422,103 @@ def test_model_report_snapshot_includes_model_metadata_and_source_counts(monkeyp
     assert "Source Counts" in html_text
     assert "upload" in html_text
     assert "No Return Guarantee" in html_text
+
+
+def test_report_snapshot_embeds_signal_journal_evidence_record(monkeypatch, tmp_path):
+    monkeypatch.setenv("HELIOS_DB_PATH", str(tmp_path / "helios.db"))
+    from engine import data, persistence, portfolio, signal_journal
+
+    persistence.reset_store_for_tests()
+    client = _client()
+    for symbol in ("JNA", "JNB"):
+        upload = client.post(
+            "/api/upload",
+            data={
+                "file": (BytesIO(price_csv(days=260)), f"{symbol}.csv"),
+                "symbol": symbol,
+                "name": f"{symbol} journal history",
+            },
+            content_type="multipart/form-data",
+        )
+        assert upload.status_code == 200
+    model_upload = client.post(
+        "/api/model/upload",
+        data={
+            "file": (BytesIO(b"Ticker,Weight\nJNA,55\nJNB,45\n"), "journal-model.csv"),
+            "name": "Journal Evidence Model",
+            "mandate": "pure_growth",
+        },
+        content_type="multipart/form-data",
+    )
+    assert model_upload.status_code == 200
+    model_id = model_upload.get_json()["id"]
+
+    mdl = portfolio.get(model_id)
+    model_close = portfolio.build_series(mdl).close
+    benchmark_close = price_series(days=260, start=100.0, daily=0.0005)
+    data.register(data.Instrument("BENCHJ", "Benchmark Journal", benchmark_close.to_frame("close"), "live", []))
+    signal_journal.record_signal(
+        target_kind="model",
+        target_id=model_id,
+        target_name="Journal Evidence Model",
+        close=model_close,
+        input_close=model_close.iloc[:220],
+        signal={"action": "BUY", "score": 0.64},
+        horizon_days=10,
+        benchmark="BENCHJ",
+        source_counts={"upload": 2},
+        eligible_for_real_research=True,
+        data_mode="real",
+    )
+    signal_journal.record_signal(
+        target_kind="model",
+        target_id=model_id,
+        target_name="Journal Evidence Model",
+        close=model_close,
+        input_close=model_close,
+        signal={"action": "HOLD", "score": 0.22},
+        horizon_days=10,
+        benchmark="BENCHJ",
+        source_counts={"upload": 2},
+        eligible_for_real_research=True,
+        data_mode="real",
+    )
+
+    save = client.post("/api/report/snapshots", json={"kind": "model", "id": model_id})
+
+    assert save.status_code == 200
+    snapshot = save.get_json()["snapshot"]
+    evidence = snapshot["signal_journal"]
+    assert evidence["summary"]["total_count"] == 2
+    assert evidence["summary"]["measured_count"] == 1
+    assert evidence["summary"]["pending_count"] == 1
+    assert evidence["summary"]["hit_rate_pct"] is not None
+    assert evidence["summary"]["avg_alpha_pct"] is not None
+    assert {row["forward_status"] for row in evidence["target_history"]} == {"measured", "pending"}
+    assert evidence["benchmark_comparison"][0]["benchmark"] == "BENCHJ"
+    model_row = evidence["model_credibility"][0]
+    assert model_row["target_id"] == model_id
+    assert model_row["signal_count"] == 2
+    assert model_row["measured_count"] == 1
+    assert model_row["pending_count"] == 1
+    assert model_row["avg_alpha_pct"] is not None
+    assert evidence["methodology"]["paper_tracking_only"] is True
+
+    history = client.get("/api/report/snapshots").get_json()["snapshots"]
+    assert history[0]["signal_journal"]["summary"]["total_count"] == 2
+
+    html_text = client.get(snapshot["html_url"]).get_data(as_text=True)
+    assert "Signal Journal Evidence" in html_text
+    assert "Forward Results" in html_text
+    assert "Hit Rate" in html_text
+    assert "Alpha Vs Benchmark" in html_text
+    assert "Model-By-Model Credibility" in html_text
+    assert "Journal Evidence Model" in html_text
+
+    pdf = client.get(snapshot["pdf_url"])
+    assert pdf.status_code == 200
+    assert b"SIGNAL JOURNAL EVIDENCE" in pdf.data
+    assert b"FORWARD RESULTS" in pdf.data
+    assert b"HIT RATE" in pdf.data
+    assert b"ALPHA VS BENCHMARK" in pdf.data
+    assert b"MODEL-BY-MODEL CREDIBILITY" in pdf.data
