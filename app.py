@@ -638,13 +638,17 @@ def signal_journal_endpoint():
     if error:
         return err(error, 400)
     entries = signal_journal.list_entries(limit=limit)
+    dashboard = signal_journal.dashboard_payload(entries)
     return ok({
         "entries": entries,
         "count": len(entries),
+        **dashboard,
         "methodology": {
             "analysis_only": True,
             "paper_tracking_only": True,
             "raw_price_history_stored": False,
+            "hit_rate_basis": "Measured paper signals are scored against their action intent: BUY/ADD/OVERWEIGHT must beat the benchmark when alpha is available; SELL/REDUCE/UNDERWEIGHT must underperform; HOLD/REVIEW must avoid material benchmark lag.",
+            "forward_results": "Pending results resolve only after later live or persisted price history covers the original signal horizon.",
         },
         "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
     })

@@ -4,7 +4,7 @@ import { DataModeBadge, SourcePill } from "../badges/DataModeBadge";
 import { TerminalSelect } from "../forms/TerminalSelect";
 import { fmtMoney, fmtPct } from "../../utils/format";
 
-export type ViewId = "command" | "instruments" | "models" | "opportunities" | "strategy" | "clinic" | "reports" | "data-quality" | "analysis";
+export type ViewId = "command" | "instruments" | "models" | "opportunities" | "strategy" | "clinic" | "reports" | "journal" | "data-quality" | "analysis";
 
 interface ShellProps {
   activeView: ViewId;
@@ -35,6 +35,7 @@ const views: Array<{ id: ViewId; label: string }> = [
   { id: "strategy", label: "Strategy Lab" },
   { id: "clinic", label: "Portfolio Clinic" },
   { id: "reports", label: "Reports" },
+  { id: "journal", label: "Signal Journal" },
   { id: "data-quality", label: "Data Quality" },
   { id: "analysis", label: "Analysis" },
 ];
@@ -211,6 +212,7 @@ export function AppShell(props: ShellProps) {
                   <button type="button" role="menuitem" onClick={() => runAdvisorAction("command")}>Command Center</button>
                   <button type="button" role="menuitem" onClick={() => runAdvisorAction("instruments")}>Real Data Setup</button>
                   <button type="button" role="menuitem" onClick={() => runAdvisorAction("models")}>Client Models</button>
+                  <button type="button" role="menuitem" onClick={() => runAdvisorAction("journal")}>Signal Journal</button>
                   <button type="button" role="menuitem" onClick={() => runAdvisorAction("data-quality")}>Data Quality</button>
                   <button type="button" role="menuitem" onClick={() => runAdvisorAction("reports")}>Reports & Disclosures</button>
                 </div>
@@ -282,6 +284,7 @@ function ShellIcon({ id }: { id: ViewId }) {
         {id === "strategy" && <path {...common} d="M5 18 12 5l7 13M8.2 14h7.6M10 10h4" />}
         {id === "clinic" && <path {...common} d="M12 21s7-4.5 7-11V5l-7-3-7 3v5c0 6.5 7 11 7 11Z" />}
         {id === "reports" && <path {...common} d="M7 3h7l4 4v14H7zM14 3v5h5M10 12h6M10 16h6" />}
+        {id === "journal" && <path {...common} d="M5 19V5m4 14V9m4 10v-7m4 7v-4M4 19h16" />}
         {id === "data-quality" && <path {...common} d="M5 19V5m0 14h14M9 15l2-3 3 2 4-7M8 7h.01M8 11h.01" />}
         {id === "analysis" && <path {...common} d="M5 17l4-4 3 3 7-8M5 21h14" />}
       </svg>

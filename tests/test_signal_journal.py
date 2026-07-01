@@ -97,3 +97,75 @@ def test_live_refresh_resolves_pending_forward_results(monkeypatch, tmp_path):
     assert entry["forward_status"] == "measured"
     assert entry["forward_result_pct"] is not None
     assert entry["forward_end_date"] > entry["input_end_date"]
+
+
+def test_signal_journal_endpoint_summarizes_paper_performance_evidence(monkeypatch, tmp_path):
+    _use_db(monkeypatch, tmp_path)
+    client = helios.app.test_client()
+    benchmark = price_series(days=95, start=100.0, daily=0.0005)
+    data.register(data.Instrument("BENCHX", "Benchmark X", benchmark.to_frame("close"), "live", []))
+    buy_close = price_series(days=95, start=100.0, daily=0.003)
+    model_close = price_series(days=95, start=100.0, daily=0.002)
+    pending_close = price_series(days=70, start=100.0, daily=0.001)
+
+    signal_journal.record_signal(
+        target_kind="instrument",
+        target_id="BUYX",
+        target_name="Buy X",
+        close=buy_close,
+        input_close=buy_close.iloc[:70],
+        signal={"action": "BUY", "score": 0.62},
+        horizon_days=10,
+        benchmark="BENCHX",
+        source_counts={"live": 1},
+        eligible_for_real_research=True,
+        data_mode="real",
+    )
+    signal_journal.record_signal(
+        target_kind="model",
+        target_id="MODEL-A",
+        target_name="Model A",
+        close=model_close,
+        input_close=model_close.iloc[:70],
+        signal={"action": "BUY", "score": 0.47},
+        horizon_days=10,
+        benchmark="BENCHX",
+        source_counts={"live": 5},
+        eligible_for_real_research=True,
+        data_mode="real",
+    )
+    signal_journal.record_signal(
+        target_kind="model",
+        target_id="MODEL-A",
+        target_name="Model A",
+        close=pending_close,
+        input_close=pending_close,
+        signal={"action": "HOLD", "score": 0.12},
+        horizon_days=10,
+        benchmark="BENCHX",
+        source_counts={"live": 5},
+        eligible_for_real_research=True,
+        data_mode="real",
+    )
+
+    resp = client.get("/api/signal-journal")
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["count"] == 3
+    assert body["summary"]["total_count"] == 3
+    assert body["summary"]["measured_count"] == 2
+    assert body["summary"]["pending_count"] == 1
+    assert body["summary"]["hit_rate_pct"] is not None
+    assert body["summary"]["avg_alpha_pct"] is not None
+    assert body["benchmark_comparison"][0]["benchmark"] == "BENCHX"
+    assert body["benchmark_comparison"][0]["measured_count"] == 2
+    assert body["benchmark_comparison"][0]["avg_alpha_pct"] is not None
+    model_row = next(row for row in body["model_evidence"] if row["target_id"] == "MODEL-A")
+    assert model_row["signal_count"] == 2
+    assert model_row["measured_count"] == 1
+    assert model_row["pending_count"] == 1
+    assert model_row["latest_action_label"] in {"BUY", "HOLD"}
+    assert len(body["drift"]) == 3
+    assert {"score", "forward_result_pct", "alpha_pct", "cumulative_measured_count"} <= set(body["drift"][-1])
+    assert body["methodology"]["hit_rate_basis"]

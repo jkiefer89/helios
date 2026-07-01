@@ -525,9 +525,74 @@ export interface SignalJournalEntry {
   evaluated_at?: string | null;
 }
 
+export interface SignalJournalSummary {
+  total_count: number;
+  measured_count: number;
+  pending_count: number;
+  hit_count: number;
+  hit_rate_pct?: number | null;
+  avg_score?: number | null;
+  avg_forward_result_pct?: number | null;
+  avg_benchmark_result_pct?: number | null;
+  avg_alpha_pct?: number | null;
+  model_count: number;
+  instrument_count: number;
+  research_ready_count: number;
+}
+
+export interface SignalJournalBenchmarkComparison {
+  benchmark: string;
+  measured_count: number;
+  avg_forward_result_pct?: number | null;
+  avg_benchmark_result_pct?: number | null;
+  avg_alpha_pct?: number | null;
+  hit_rate_pct?: number | null;
+}
+
+export interface SignalJournalModelEvidence {
+  target_id: string;
+  target_name: string;
+  signal_count: number;
+  measured_count: number;
+  pending_count: number;
+  hit_rate_pct?: number | null;
+  avg_score?: number | null;
+  avg_alpha_pct?: number | null;
+  latest_action_label: string;
+  latest_score?: number | null;
+  latest_input_end_date: string;
+  benchmark: string;
+  data_modes: string[];
+  source_counts: Record<string, number>;
+  research_ready_count: number;
+}
+
+export interface SignalJournalDriftPoint {
+  index: number;
+  created_at?: string | null;
+  input_end_date?: string | null;
+  target_kind?: string | null;
+  target_id?: string | null;
+  target_name?: string | null;
+  action_label?: string | null;
+  score?: number | null;
+  forward_status?: string | null;
+  forward_result_pct?: number | null;
+  benchmark_result_pct?: number | null;
+  alpha_pct?: number | null;
+  paper_hit?: boolean | null;
+  cumulative_measured_count: number;
+  cumulative_hit_rate_pct?: number | null;
+  cumulative_avg_alpha_pct?: number | null;
+}
+
 export interface SignalJournalResponse {
   entries: SignalJournalEntry[];
   count: number;
+  summary: SignalJournalSummary;
+  benchmark_comparison: SignalJournalBenchmarkComparison[];
+  model_evidence: SignalJournalModelEvidence[];
+  drift: SignalJournalDriftPoint[];
   methodology: Record<string, unknown>;
   disclaimer: string;
 }

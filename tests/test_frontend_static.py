@@ -86,6 +86,26 @@ def test_reports_view_exposes_signal_journal():
     assert "Paper tracking only" in source
 
 
+def test_signal_journal_has_dedicated_workspace():
+    app_source = (ROOT / "frontend" / "src" / "App.tsx").read_text()
+    shell_source = (ROOT / "frontend" / "src" / "components" / "layout" / "AppShell.tsx").read_text()
+    view_source = (ROOT / "frontend" / "src" / "views" / "SignalJournal.tsx").read_text()
+    type_source = (ROOT / "frontend" / "src" / "api" / "types.ts").read_text()
+
+    assert '"journal"' in shell_source
+    assert "Signal Journal" in shell_source
+    assert "SignalJournal" in app_source
+    assert "api.signalJournal" in view_source
+    assert "Paper performance tracking" in view_source
+    assert "Hit Rate" in view_source
+    assert "Pending Forward Results" in view_source
+    assert "Benchmark Comparison" in view_source
+    assert "Model-by-Model Evidence" in view_source
+    assert "Drift Over Time" in view_source
+    assert "LineChart" in view_source
+    assert "SignalJournalSummary" in type_source
+
+
 def test_reports_view_exposes_report_snapshot_exports():
     source = (ROOT / "frontend" / "src" / "views" / "Reports.tsx").read_text()
     client_source = (ROOT / "frontend" / "src" / "api" / "client.ts").read_text()

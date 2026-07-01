@@ -2945,6 +2945,26 @@ p {
   grid-template-columns: minmax(120px, 0.8fr) minmax(190px, 1.25fr) 72px 70px minmax(190px, 1.15fr) 90px minmax(120px, 0.9fr);
 }
 
+.journal-benchmark-table .terminal-table__head,
+.journal-benchmark-table .table-row {
+  grid-template-columns: minmax(110px, 1fr) 86px 96px 96px 96px 96px;
+}
+
+.journal-model-table .terminal-table__head,
+.journal-model-table .table-row {
+  grid-template-columns: minmax(190px, 1.25fr) 92px minmax(150px, 1fr) 92px 90px minmax(140px, 1fr);
+}
+
+.journal-pending-table .terminal-table__head,
+.journal-pending-table .table-row {
+  grid-template-columns: minmax(190px, 1.3fr) 100px minmax(180px, 1.1fr) 80px 100px;
+}
+
+.journal-history-table .terminal-table__head,
+.journal-history-table .table-row {
+  grid-template-columns: minmax(120px, 0.9fr) minmax(190px, 1.25fr) 82px 70px 90px 110px 90px;
+}
+
 .real-data-table .terminal-table__head,
 .real-data-table .table-row {
   grid-template-columns: minmax(130px, 1fr) 90px 80px minmax(180px, 1.2fr) minmax(150px, 1fr) minmax(150px, auto);
