@@ -262,6 +262,8 @@ def _auto_live_worker(config: dict) -> None:
                 "max_workers": config["max_workers"],
                 "results": [{"symbol": symbol, "status": "error", "rows_added": 0, "message": str(exc)} for symbol in config["symbols"]],
             }
+        # Batch boundary: one encrypted snapshot write per refresh cycle.
+        persistence.get_store().flush()
         with _AUTO_LIVE_LOCK:
             _AUTO_LIVE_LAST_RUN = started
             _AUTO_LIVE_LAST_RESULT = result
@@ -758,6 +760,8 @@ def data_refresh():
         results = [data.refresh_live_symbol(symbol) for symbol in symbols]
     finally:
         _LIVE_SEMAPHORE.release()
+    # Batch boundary: one encrypted snapshot write for the whole refresh.
+    persistence.get_store().flush()
     refreshed = sum(1 for item in results if item["status"] == "ok")
     failed = sum(1 for item in results if item["status"] == "error")
     skipped = sum(1 for item in results if item["status"] == "skipped")

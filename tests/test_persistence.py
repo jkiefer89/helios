@@ -291,6 +291,7 @@ def test_raw_upload_content_and_secret_tokens_are_not_stored(monkeypatch, tmp_pa
         "api_key=SECRET_TOKEN_SHOULD_NOT_STORE",
     )
 
+    store.flush()
     text = store.path.read_bytes().decode("utf-8", errors="ignore")
 
     assert raw.decode("utf-8") not in text
@@ -317,6 +318,7 @@ def test_data_quality_alert_tracking_redacts_secret_like_text(monkeypatch, tmp_p
     assert result["active"][0]["status"] == "active"
     assert "SECRET_TOKEN_SHOULD_NOT_STORE" not in result["active"][0]["detail"]
     assert "redacted" in result["active"][0]["detail"].lower()
+    store.flush()
     assert "SECRET_TOKEN_SHOULD_NOT_STORE" not in store.path.read_bytes().decode("utf-8", errors="ignore")
 
 
@@ -334,6 +336,7 @@ def test_local_persistence_encrypts_sensitive_payloads_when_key_configured(monke
         "client context should be sealed",
     )
 
+    store.flush()
     raw_db = store.path.read_bytes()
     assert not raw_db.startswith(SQLITE_HEADER)
     assert b"schema_version" not in raw_db
@@ -488,6 +491,114 @@ def test_malformed_key_file_is_fatal_instead_of_plaintext_fallback(monkeypatch, 
 
     with pytest.raises(SystemExit, match="key file"):
         persistence.get_store()
+
+
+FERNET_TEST_KEY = "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="
+
+
+def _use_encrypted_db(monkeypatch, tmp_path):
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION", "required")
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION_KEY", FERNET_TEST_KEY)
+    return _use_db(monkeypatch, tmp_path)
+
+
+def test_encrypted_snapshot_writes_are_debounced_until_flush(monkeypatch, tmp_path):
+    store = _use_encrypted_db(monkeypatch, tmp_path)
+    calls = {"n": 0}
+    original = store._persist_encrypted_snapshot
+
+    def counting():
+        calls["n"] += 1
+        original()
+
+    monkeypatch.setattr(store, "_persist_encrypted_snapshot", counting)
+    for idx in range(3):
+        result = store.persist_instrument(
+            symbol=f"BATCH{idx}", name=f"Batch {idx}", source="live", frame=_ohlcv(days=90),
+        )
+        assert result["persisted"] is True
+
+    assert calls["n"] == 0
+    assert store._snapshot_dirty is True
+    stale = store.path.read_bytes()
+
+    store.flush()
+
+    assert calls["n"] == 1
+    assert store._snapshot_dirty is False
+    assert store.path.read_bytes() != stale
+    store.status()
+    assert store._snapshot_dirty is False  # read-only work does not re-dirty
+
+    persistence.reset_store_for_tests()
+    reloaded = persistence.get_store()
+    assert {inst.symbol for inst in reloaded.load_instruments()} == {"BATCH0", "BATCH1", "BATCH2"}
+
+
+def test_dirty_snapshot_flushes_after_max_age(monkeypatch, tmp_path):
+    monkeypatch.setattr(persistence, "SNAPSHOT_FLUSH_MAX_AGE_SECONDS", 0.05)
+    store = _use_encrypted_db(monkeypatch, tmp_path)
+    stale = store.path.read_bytes()
+
+    store.persist_instrument(symbol="AGED1", name="Aged One", source="live", frame=_ohlcv(days=90))
+
+    deadline = time.time() + 5
+    while time.time() < deadline and store.path.read_bytes() == stale:
+        time.sleep(0.02)
+    assert store.path.read_bytes() != stale
+    assert store._snapshot_dirty is False
+
+
+def test_pending_snapshot_is_flushed_by_registered_shutdown_hook(monkeypatch, tmp_path):
+    registered = []
+    real_register = persistence.atexit.register
+    monkeypatch.setattr(persistence.atexit, "register", lambda fn, *a, **kw: registered.append(fn) or fn)
+    store = _use_encrypted_db(monkeypatch, tmp_path)
+    assert any(getattr(fn, "__self__", None) is store and fn.__name__ == "flush" for fn in registered)
+
+    store.persist_instrument(symbol="EXIT1", name="Exit One", source="live", frame=_ohlcv(days=90))
+    stale = store.path.read_bytes()
+    for hook in registered:
+        hook()
+
+    assert store._snapshot_dirty is False
+    assert store.path.read_bytes() != stale
+    monkeypatch.setattr(persistence.atexit, "register", real_register)
+    persistence.reset_store_for_tests()
+    assert {inst.symbol for inst in persistence.get_store().load_instruments()} == {"EXIT1"}
+
+
+def test_startup_backup_is_created_pruned_and_reported(monkeypatch, tmp_path):
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION", "required")
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION_KEY", FERNET_TEST_KEY)
+    monkeypatch.setenv("HELIOS_DB_PATH", str(tmp_path / "helios.db"))
+    persistence.reset_store_for_tests()
+    first = persistence.get_store()
+    assert first.available is True
+    assert first.backup_status() == {"count": 0, "latest": None}  # nothing existed before first start
+
+    store = first
+    for _ in range(7):
+        persistence.reset_store_for_tests()
+        store = persistence.get_store()
+
+    backups = sorted((tmp_path / "backups").glob("helios-*.db"))
+    assert len(backups) == 5
+    assert all((path.stat().st_mode & 0o777) == 0o600 for path in backups)
+    assert all(path.read_bytes().startswith(persistence.ENCRYPTED_DB_MAGIC) for path in backups)
+    status = store.status()
+    assert status["backups"]["count"] == 5
+    assert status["backups"]["latest"] == backups[-1].name
+
+
+def test_backups_are_skipped_when_persistence_is_off(monkeypatch):
+    monkeypatch.setenv("HELIOS_DB_PATH", "off")
+    persistence.reset_store_for_tests()
+
+    store = persistence.get_store()
+
+    assert store.available is False
+    assert store.status()["backups"] == {"count": 0, "latest": None}
 
 
 def test_startup_warns_about_unencrypted_database_files(monkeypatch, tmp_path, capsys):

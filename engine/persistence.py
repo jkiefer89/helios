@@ -6,6 +6,7 @@ belong here.
 """
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import re
@@ -33,6 +34,9 @@ DEFAULT_DB_PATH = Path(__file__).resolve().parents[1] / ".helios" / "helios.db"
 ENCRYPTED_PREFIX = "enc:v1:"
 ENCRYPTED_DB_MAGIC = b"HELIOSDB1\n"
 SQLITE_HEADER = b"SQLite format 3\x00"
+SNAPSHOT_FLUSH_MAX_AGE_SECONDS = 3.0
+BACKUP_DIR_NAME = "backups"
+BACKUP_RETENTION = 5
 
 _STORE: "SQLiteStore | None" = None
 _CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
@@ -147,12 +151,14 @@ def _disabled_encryption_status(mode: str = "off", required: bool = False, warni
 class _EncryptedConnectionLease:
     def __init__(self, store: "SQLiteStore"):
         self.store = store
+        self._changes_before = 0
 
     def __enter__(self) -> sqlite3.Connection:
         self.store._conn_lock.acquire()
         if self.store._memory_conn is None:
             self.store._conn_lock.release()
             raise RuntimeError("encrypted SQLite persistence is not initialized")
+        self._changes_before = self.store._memory_conn.total_changes
         return self.store._memory_conn
 
     def __exit__(self, exc_type, exc, tb) -> bool:
@@ -160,7 +166,8 @@ class _EncryptedConnectionLease:
             if self.store._memory_conn is not None:
                 if exc_type is None:
                     self.store._memory_conn.commit()
-                    self.store._persist_encrypted_snapshot()
+                    if self.store._memory_conn.total_changes != self._changes_before:
+                        self.store._mark_snapshot_dirty()
                 else:
                     self.store._memory_conn.rollback()
         finally:
@@ -275,6 +282,8 @@ def get_store() -> "SQLiteStore":
 
 def reset_store_for_tests() -> None:
     global _STORE
+    if _STORE is not None:
+        _STORE.flush()
     _STORE = None
 
 
@@ -288,6 +297,8 @@ class SQLiteStore:
         self._cipher, self.encryption, encryption_warning = _configured_cipher(path)
         self._conn_lock = threading.RLock()
         self._memory_conn: sqlite3.Connection | None = None
+        self._snapshot_dirty = False
+        self._flush_timer: threading.Timer | None = None
         if disabled:
             self.warning = "SQLite persistence is disabled by HELIOS_DB_PATH."
             return
@@ -295,6 +306,8 @@ class SQLiteStore:
             self.warning = encryption_warning
             return
         self._ensure()
+        if self._memory_conn is not None:
+            atexit.register(self.flush)
         if self.path is not None:
             _warn_plaintext_databases(self.path.parent)
 
@@ -312,6 +325,7 @@ class SQLiteStore:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             if self._cipher:
+                self._backup_existing_snapshot()
                 self._ensure_encrypted_snapshot()
             else:
                 if self.path.is_file() and self.path.read_bytes()[:len(ENCRYPTED_DB_MAGIC)] == ENCRYPTED_DB_MAGIC:
@@ -352,6 +366,79 @@ class SQLiteStore:
         with self._connect() as active:
             _create_schema(active)
             self._normalise_existing_rows(active)
+        # Always materialise the on-disk snapshot at startup so a fresh process
+        # (and the startup backup on the next run) sees a valid encrypted file.
+        # An unwritable path must raise here so the store reports unavailable.
+        with self._conn_lock:
+            timer, self._flush_timer = self._flush_timer, None
+            if timer is not None:
+                timer.cancel()
+            self._persist_encrypted_snapshot()
+            self._snapshot_dirty = False
+
+    def _mark_snapshot_dirty(self) -> None:
+        """Debounce snapshot writes: serializing + Fernet-encrypting the whole
+        database after every transaction is too expensive for per-symbol live
+        polling. Instead, writes mark the snapshot dirty and it is flushed at
+        batch boundaries, after a short max-age, and at interpreter exit.
+        Trade-off: a hard crash can lose the last few seconds of live polling
+        writes, which the next refresh cycle re-fetches."""
+        with self._conn_lock:
+            self._snapshot_dirty = True
+            if self._flush_timer is None:
+                timer = threading.Timer(SNAPSHOT_FLUSH_MAX_AGE_SECONDS, self.flush)
+                timer.daemon = True
+                self._flush_timer = timer
+                timer.start()
+
+    def flush(self, force: bool = False) -> None:
+        """Write pending in-memory changes to the encrypted on-disk snapshot."""
+        with self._conn_lock:
+            timer, self._flush_timer = self._flush_timer, None
+            if timer is not None:
+                timer.cancel()
+            if self._memory_conn is None or not (self._snapshot_dirty or force):
+                self._snapshot_dirty = False
+                return
+            try:
+                self._persist_encrypted_snapshot()
+                self._snapshot_dirty = False
+            except Exception as exc:
+                self.warning = f"Could not persist encrypted snapshot: {exc}"
+
+    def _backup_existing_snapshot(self) -> None:
+        """Startup safety copy of the encrypted snapshot, keeping the newest few."""
+        if self.path is None or not self.path.is_file():
+            return
+        try:
+            raw = self.path.read_bytes()
+            if not raw.startswith(ENCRYPTED_DB_MAGIC):
+                return
+            backups = self.path.parent / BACKUP_DIR_NAME
+            backups.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+            target = backups / f"{self.path.stem}-{stamp}{self.path.suffix}"
+            target.write_bytes(raw)
+            try:
+                target.chmod(0o600)
+            except Exception:
+                pass
+            for stale in sorted(backups.glob(f"{self.path.stem}-*{self.path.suffix}"))[:-BACKUP_RETENTION]:
+                try:
+                    stale.unlink()
+                except OSError:
+                    pass
+        except Exception as exc:
+            print(f"  ⚠  Could not write persistence backup: {exc}", file=sys.stderr, flush=True)
+
+    def backup_status(self) -> dict[str, Any]:
+        if self.path is None:
+            return {"count": 0, "latest": None}
+        try:
+            files = sorted((self.path.parent / BACKUP_DIR_NAME).glob(f"{self.path.stem}-*{self.path.suffix}"))
+        except OSError:
+            files = []
+        return {"count": len(files), "latest": files[-1].name if files else None}
 
     def _persist_encrypted_snapshot(self) -> None:
         if self.path is None or self._cipher is None or self._memory_conn is None:
@@ -585,6 +672,7 @@ class SQLiteStore:
             "warning": self.warning,
             "schema_version": SCHEMA_VERSION if self.available else None,
             "encryption": dict(self.encryption),
+            "backups": self.backup_status(),
             "real_instrument_count": 0,
             "persisted_model_count": 0,
             "last_refresh": None,
