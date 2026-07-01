@@ -16,6 +16,7 @@ import type {
   ModelGovernanceResponse,
   ModelTemplate,
   ModelTemplateImportResponse,
+  ModelValidationResponse,
   OpportunitiesResponse,
   ReportSnapshotHistoryResponse,
   ReportSnapshotSaveRequest,
@@ -59,6 +60,7 @@ export const api = {
   mandates: () => request<{ mandates: MandateSummary[] }>("/api/mandates"),
   models: () => request<{ models: ModelSummary[] }>("/api/models"),
   modelGovernance: () => request<ModelGovernanceResponse>("/api/model-governance"),
+  modelValidation: () => request<ModelValidationResponse>("/api/model-validation"),
   recordModelGovernanceEvent: (
     id: string,
     payload: { actor?: string; action?: string; note?: string; approval_status?: string },

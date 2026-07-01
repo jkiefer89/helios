@@ -1,9 +1,9 @@
-import { useMemo, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import { api } from "../api/client";
-import type { ModelEditPreviewResponse, ModelGovernanceResponse, ModelGovernanceRow, ModelSummary, ModelTemplate } from "../api/types";
+import type { ModelEditPreviewResponse, ModelGovernanceResponse, ModelGovernanceRow, ModelSummary, ModelTemplate, ModelValidationResponse, ModelValidationRow } from "../api/types";
 import { Panel } from "../components/cards/Panel";
 import { EmptyState } from "../components/empty-states/EmptyState";
-import { fmtPct } from "../utils/format";
+import { fmtNumber, fmtPct } from "../utils/format";
 
 const GOVERNANCE_SOURCE_LABEL = "api.modelGovernance";
 
@@ -39,12 +39,39 @@ export function Models({
   const [editorPreview, setEditorPreview] = useState<ModelEditPreviewResponse | null>(null);
   const [editorNotice, setEditorNotice] = useState("");
   const [editorBusy, setEditorBusy] = useState("");
+  const [validation, setValidation] = useState<ModelValidationResponse | null>(null);
+  const [validationError, setValidationError] = useState("");
+  const [validationLoading, setValidationLoading] = useState(false);
   const governanceById = useMemo(() => {
     return new Map((governance?.models || []).map((row) => [row.id, row]));
   }, [governance]);
   const governanceRows = models
     .map((model) => governanceById.get(model.id))
     .filter((row): row is ModelGovernanceRow => Boolean(row));
+  const modelSignature = useMemo(() => models.map((model) => `${model.id}:${model.n_holdings}:${model.real_coverage_count || 0}`).join("|"), [models]);
+
+  const loadValidation = useCallback(async () => {
+    if (!models.length) {
+      setValidation(null);
+      setValidationError("");
+      return;
+    }
+    setValidationLoading(true);
+    setValidationError("");
+    try {
+      const payload = await api.modelValidation();
+      setValidation(payload);
+    } catch (error) {
+      setValidation(null);
+      setValidationError(error instanceof Error ? error.message : "Model validation unavailable.");
+    } finally {
+      setValidationLoading(false);
+    }
+  }, [models.length]);
+
+  useEffect(() => {
+    void loadValidation();
+  }, [loadValidation, modelSignature]);
 
   const importTemplate = async (slug: string) => {
     setImporting(slug);
@@ -200,6 +227,13 @@ export function Models({
           </div>
         )}
       </Panel>
+      <ModelValidationDashboard
+        validation={validation}
+        loading={validationLoading}
+        error={validationError}
+        modelCount={models.length}
+        onRefresh={loadValidation}
+      />
       <Panel title="Model Editor" meta={editingModel ? editingModel.name : "native editing"}>
         {!editingModel ? (
           <EmptyState title="Select a model to edit" body="Change holdings and target weights directly from Imported Models, then preview governance breaches before saving." />
@@ -349,6 +383,104 @@ export function Models({
       </Panel>
     </div>
   );
+}
+
+function ModelValidationDashboard({
+  validation,
+  loading,
+  error,
+  modelCount,
+  onRefresh,
+}: {
+  validation: ModelValidationResponse | null;
+  loading: boolean;
+  error: string;
+  modelCount: number;
+  onRefresh: () => Promise<void>;
+}) {
+  const rows = validation?.models || [];
+  const champion = validation?.champion || null;
+  return (
+    <Panel title="Model Validation Dashboard" meta={validation ? `${validation.summary.eligible_count} evidence-ready / ${validation.summary.alert_count} alerts` : "Champion / Challenger"}>
+      <div className="model-validation-head">
+        <div>
+          <strong>Champion / Challenger</strong>
+          <span>Walk-forward evidence, decay, false positives, regime sensitivity, and drift alerts in one governance screen.</span>
+        </div>
+        <button type="button" onClick={() => void onRefresh()} disabled={loading || modelCount === 0}>
+          {loading ? "Refreshing..." : "Refresh validation"}
+        </button>
+      </div>
+      {error && <div className="notice warning">{error}</div>}
+      {modelCount === 0 ? (
+        <EmptyState title="No models to validate" body="Import or upload a model before running champion/challenger validation." />
+      ) : loading && !validation ? (
+        <EmptyState title="Validation loading" body="Running deterministic walk-forward evidence across available models." />
+      ) : !validation ? (
+        <EmptyState title="Model validation unavailable" body="The backend did not return a model validation payload." />
+      ) : (
+        <div className="model-validation-workspace">
+          <div className="metric-grid validation-summary" aria-label="Model validation summary">
+            <div className="stat-tile"><span>Champion</span><strong>{champion?.model_name || "None"}</strong><small>{champion ? `Score ${fmtNumber(champion.validation_score, 1)} / grade ${champion.validation_grade}` : "No eligible model"}</small></div>
+            <div className="stat-tile"><span>Challengers</span><strong>{validation.summary.challenger_count}</strong><small>{validation.summary.eligible_count} evidence-ready</small></div>
+            <div className="stat-tile"><span>Drift Alerts</span><strong className={validation.summary.alert_count ? "tone-warning" : "tone-positive"}>{validation.summary.alert_count}</strong><small>Blocked, high, and medium</small></div>
+            <div className="stat-tile"><span>Governance</span><strong>{validation.summary.governance_available ? "Available" : "Unavailable"}</strong><small>Versions and approvals</small></div>
+          </div>
+          <div className="terminal-table model-validation-table" tabIndex={0} aria-label="Model Validation Dashboard table" onKeyDown={scrollTableByKey}>
+            <div className="terminal-table__head">
+              <span>Model</span><span>Champion / Challenger</span><span>Walk-Forward Evidence</span><span>False Positives</span><span>Regime Sensitivity</span><span>Signal Decay</span><span>Drift Alerts</span>
+            </div>
+            {rows.map((row) => (
+              <div className="table-row validation-row" key={row.model_id}>
+                <span><strong>{row.model_name}</strong><small>{row.model_id} · {formatStatus(row.mandate)}</small></span>
+                <span><b className={row.role === "champion" ? "tone-positive" : row.validation_state === "blocked" ? "tone-warning" : ""}>{formatStatus(row.role)}</b><small>Score {fmtNumber(row.validation_score, 1)} · Grade {row.validation_grade}</small></span>
+                <span>{fmtPct(row.walk_forward.hit_rate_pct)} hit rate<small>{row.walk_forward.window_count || 0} windows · alpha {fmtPct(row.walk_forward.avg_alpha_pct)}</small></span>
+                <span>{row.false_positives.count || 0} flagged<small>{fmtPct(row.false_positives.rate_pct)} FP rate</small></span>
+                <span>{bestRegime(row) || "No regime bucket"}<small>{row.regime_sensitivity.length} buckets</small></span>
+                <span>{decaySummary(row)}<small>{row.decay.length} horizons</small></span>
+                <span>{row.drift_alerts[0]?.title || "No drift alert"}<small>{row.drift_alerts[0]?.detail || row.required_action}</small></span>
+              </div>
+            ))}
+          </div>
+          <div className="governance-log-grid validation-detail-grid">
+            <section>
+              <h2>Walk-Forward Evidence</h2>
+              {rows.slice(0, 4).map((row) => (
+                <article key={`${row.model_id}-walk`}><strong>{row.model_name}</strong><span>{fmtPct(row.walk_forward.hit_rate_pct)} hit rate / {fmtPct(row.walk_forward.avg_alpha_pct)} alpha vs benchmark</span><p>{row.evidence_unavailable ? row.required_action : `${row.walk_forward.first_signal_date || "start"} to ${row.walk_forward.last_signal_date || "latest"}`}</p></article>
+              ))}
+            </section>
+            <section>
+              <h2>Regime Sensitivity</h2>
+              {rows.slice(0, 4).map((row) => (
+                <article key={`${row.model_id}-regime`}><strong>{row.model_name}</strong><span>{bestRegime(row) || "No regime sensitivity"}</span><p>{row.regime_sensitivity.map((item) => `${formatStatus(item.regime)} ${fmtPct(item.hit_rate_pct)}`).join(" · ") || "Awaiting eligible walk-forward windows."}</p></article>
+              ))}
+            </section>
+            <section>
+              <h2>Drift Alerts</h2>
+              {validation.alerts.length === 0 ? (
+                <p className="muted">No blocked, high, or medium validation alerts.</p>
+              ) : validation.alerts.slice(0, 6).map((alert, index) => (
+                <article key={`${alert.model_id}-${index}`}><strong>{alert.title}</strong><span>{alert.model_name || alert.model_id} · {formatStatus(alert.severity)}</span><p>{alert.detail}</p></article>
+              ))}
+            </section>
+          </div>
+          <p className="muted">{validation.disclaimer}</p>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+function bestRegime(row: ModelValidationRow) {
+  const sorted = [...row.regime_sensitivity].sort((a, b) => (b.hit_rate_pct || 0) - (a.hit_rate_pct || 0));
+  const best = sorted[0];
+  return best ? `${formatStatus(best.regime)} · ${fmtPct(best.hit_rate_pct)}` : "";
+}
+
+function decaySummary(row: ModelValidationRow) {
+  if (!row.decay.length) return "No decay";
+  const last = row.decay[row.decay.length - 1];
+  return `${last.horizon_days}d · ${fmtPct(last.avg_alpha_pct)}`;
 }
 
 function formatStatus(value: string) {

@@ -721,6 +721,65 @@ export interface EvidenceLabResponse extends ProvenancePayload {
   methodology: Record<string, unknown>;
 }
 
+export interface ModelValidationAlert {
+  severity: string;
+  title: string;
+  detail: string;
+  model_id?: string;
+  model_name?: string;
+}
+
+export interface ModelValidationRow {
+  model_id: string;
+  model_name: string;
+  mandate: string;
+  role: string;
+  validation_state: string;
+  validation_score: number;
+  validation_grade: string;
+  evidence_unavailable: boolean;
+  reason: string;
+  required_action: string;
+  walk_forward: EvidenceLabSummary;
+  false_positives: EvidenceLabResponse["false_positives"];
+  regime_sensitivity: EvidenceLabResponse["regime_sensitivity"];
+  decay: EvidenceLabResponse["decay"];
+  confidence_bands: EvidenceLabResponse["confidence_bands"];
+  prospective_validation: EvidenceProspectiveValidation;
+  governance: {
+    version: number;
+    approval_status: string;
+    risk_limit_state: string;
+    risk_limit_violations: Array<Record<string, unknown>>;
+    rebalance_status: string;
+    snapshot_count: number;
+    latest_change_note: string;
+    updated_by: string;
+  };
+  drift_alerts: ModelValidationAlert[];
+  methodology: Record<string, unknown>;
+  disclaimer: string;
+}
+
+export interface ModelValidationResponse {
+  models: ModelValidationRow[];
+  champion?: ModelValidationRow | null;
+  challengers: ModelValidationRow[];
+  alerts: ModelValidationAlert[];
+  summary: {
+    model_count: number;
+    eligible_count: number;
+    blocked_count: number;
+    champion_model_id?: string | null;
+    challenger_count: number;
+    alert_count: number;
+    governance_available: boolean;
+  };
+  parameters: { horizon_days: number; train_window: number; step: number };
+  methodology: Record<string, unknown>;
+  disclaimer: string;
+}
+
 export interface ReportResponse extends ProvenancePayload {
   kind: "instrument" | "model" | string;
   title: string;

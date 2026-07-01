@@ -2952,17 +2952,48 @@ p {
   align-items: start;
 }
 
+.model-validation-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.8rem;
+  align-items: start;
+  margin-bottom: 0.8rem;
+}
+
+.model-validation-head strong,
 .model-editor-head strong {
   display: block;
   color: var(--text);
   text-transform: uppercase;
 }
 
+.model-validation-head span,
 .model-editor-head span,
 .model-editor-head p {
   color: var(--muted);
   font-size: 0.76rem;
   line-height: 1.45;
+}
+
+.model-validation-workspace {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.model-validation-table .terminal-table__head,
+.model-validation-table .table-row {
+  grid-template-columns:
+    minmax(180px, 1.05fr)
+    minmax(140px, 0.8fr)
+    minmax(180px, 1fr)
+    minmax(130px, 0.75fr)
+    minmax(160px, 0.95fr)
+    minmax(140px, 0.8fr)
+    minmax(220px, 1.25fr);
+}
+
+.validation-row {
+  align-items: start;
 }
 
 .model-editor-actions {

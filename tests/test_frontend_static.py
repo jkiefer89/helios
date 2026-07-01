@@ -106,6 +106,23 @@ def test_models_view_exposes_native_model_editor():
     assert "ModelEditSaveResponse" in type_source
 
 
+def test_models_view_exposes_model_validation_dashboard():
+    source = (ROOT / "frontend" / "src" / "views" / "Models.tsx").read_text()
+    client_source = (ROOT / "frontend" / "src" / "api" / "client.ts").read_text()
+    type_source = (ROOT / "frontend" / "src" / "api" / "types.ts").read_text()
+
+    assert "Model Validation Dashboard" in source
+    assert "Champion / Challenger" in source
+    assert "Walk-Forward Evidence" in source
+    assert "False Positives" in source
+    assert "Regime Sensitivity" in source
+    assert "Signal Decay" in source
+    assert "Drift Alerts" in source
+    assert "api.modelValidation" in source
+    assert "modelValidation:" in client_source
+    assert "ModelValidationResponse" in type_source
+
+
 def test_reports_view_exposes_signal_journal():
     source = (ROOT / "frontend" / "src" / "views" / "Reports.tsx").read_text()
 

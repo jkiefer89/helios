@@ -62,7 +62,7 @@ def _load_local_env_file(path: Path | None = None) -> dict:
 _LOCAL_ENV_STATUS = _load_local_env_file()
 
 from engine import (
-    ai_copilot, backtest, data, evidence_lab, forecast, indicators, insights, mandate, model_governance, model_library, opportunity, portfolio,
+    ai_copilot, backtest, data, evidence_lab, forecast, indicators, insights, mandate, model_governance, model_library, model_validation, opportunity, portfolio,
     portfolio_clinic, persistence, provenance, regime, report_exports, reporting, risk_exposure, sentiment, signal_journal, signals, strategy,
 )
 
@@ -1118,6 +1118,24 @@ def model_library_import():
 @app.route("/api/model-governance")
 def model_governance_workspace():
     return ok(model_governance.payload())
+
+
+@app.route("/api/model-validation")
+def model_validation_dashboard():
+    horizon, horizon_error = _safe_int_arg("horizon", 21, 5, 252)
+    if horizon_error:
+        return err(horizon_error, 400)
+    train_window, train_error = _safe_int_arg("train_window", 252, 90, 756)
+    if train_error:
+        return err(train_error, 400)
+    step, step_error = _safe_int_arg("step", 21, 5, 63)
+    if step_error:
+        return err(step_error, 400)
+    return ok(model_validation.dashboard(
+        horizon_days=horizon or 21,
+        train_window=train_window or 252,
+        step=step or 21,
+    ))
 
 
 @app.route("/api/model-governance/<model_id>/events", methods=["POST"])

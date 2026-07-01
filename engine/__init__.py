@@ -21,6 +21,7 @@ Modules:
     ai_copilot  - optional narrative provider layer over sanitized Helios facts
     model_library - governed starter model templates/workspaces
     model_governance - versioned approval, rebalance, and snapshot workflow
+    model_validation - champion/challenger model validation dashboard
     risk_exposure - portfolio-level risk, exposure, stress, and benchmark analytics
     signal_journal - local signal audit log and paper-performance tracking
     evidence_lab - rolling walk-forward out-of-sample signal evidence
@@ -47,6 +48,7 @@ __all__ = [
     "ai_copilot",
     "model_library",
     "model_governance",
+    "model_validation",
     "risk_exposure",
     "signal_journal",
     "evidence_lab",
