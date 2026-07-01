@@ -10,6 +10,7 @@ import json
 import os
 import re
 import sqlite3
+import sys
 import tempfile
 import threading
 from dataclasses import dataclass
@@ -245,13 +246,15 @@ class SQLiteStore:
         self._cipher, self.encryption, encryption_warning = _configured_cipher(path)
         self._conn_lock = threading.RLock()
         self._memory_conn: sqlite3.Connection | None = None
+        self.plaintext_artifacts: list[str] = []
         if disabled:
             self.warning = "SQLite persistence is disabled by HELIOS_DB_PATH."
             return
         if encryption_warning and self.encryption.get("required"):
             self.warning = encryption_warning
-            return
-        self._ensure()
+        else:
+            self._ensure()
+        self._warn_on_plaintext_artifacts()
 
     @classmethod
     def from_env(cls) -> "SQLiteStore":
@@ -329,6 +332,24 @@ class SQLiteStore:
                 self.path.with_name(f"{self.path.name}{suffix}").unlink()
             except FileNotFoundError:
                 pass
+
+    def _warn_on_plaintext_artifacts(self) -> None:
+        if self.path is None:
+            return
+        expected: set[Path] = set()
+        if self._cipher is None:
+            expected = {self.path, self.path.with_name(f"{self.path.name}.tmp")}
+        artifacts = _plaintext_sqlite_artifacts(self.path.parent, ignore=expected)
+        self.plaintext_artifacts = [str(p) for p in artifacts]
+        if not artifacts:
+            return
+        listed = ", ".join(self.plaintext_artifacts)
+        print(
+            f"[helios] WARNING: unencrypted SQLite file(s) found in {self.path.parent}: {listed}. "
+            "Helios does not read these files, but they may expose client data at rest. "
+            "Delete them or re-encrypt them with the configured database key.",
+            file=sys.stderr,
+        )
 
     def _connect(self):
         if self.path is None:
@@ -540,6 +561,7 @@ class SQLiteStore:
             "warning": self.warning,
             "schema_version": SCHEMA_VERSION if self.available else None,
             "encryption": dict(self.encryption),
+            "plaintext_artifacts": list(self.plaintext_artifacts),
             "real_instrument_count": 0,
             "persisted_model_count": 0,
             "last_refresh": None,
@@ -1454,6 +1476,23 @@ def _normalise_price_frame(frame: pd.DataFrame) -> pd.DataFrame:
     keep = [col for col in ("open", "high", "low", "close", "volume") if col in out]
     out = out[keep]
     return out[~out["close"].isna()]
+
+
+def _plaintext_sqlite_artifacts(directory: Path, *, ignore: set[Path]) -> list[Path]:
+    if not directory.is_dir():
+        return []
+    found: list[Path] = []
+    for candidate in sorted(directory.rglob("*")):
+        if not candidate.is_file() or candidate in ignore:
+            continue
+        try:
+            with candidate.open("rb") as handle:
+                header = handle.read(len(SQLITE_HEADER))
+        except OSError:
+            continue
+        if header == SQLITE_HEADER:
+            found.append(candidate)
+    return found
 
 
 def _deserialize_sqlite_payload(conn: sqlite3.Connection, payload: bytes) -> None:
