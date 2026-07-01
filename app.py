@@ -62,8 +62,9 @@ def _load_local_env_file(path: Path | None = None) -> dict:
 _LOCAL_ENV_STATUS = _load_local_env_file()
 
 from engine import (
-    ai_copilot, backtest, cma, data, forecast, figi, fundamentals, holdings, indicators, insights, mandate,
-    opportunity, portfolio, portfolio_clinic, persistence, provenance, regime, reporting, sentiment,
+    ai_copilot, backtest, cma, data, evidence_lab, figi, forecast, fundamentals, holdings, indicators, insights,
+    mandate, model_governance, model_library, model_validation, opportunity, portfolio, portfolio_clinic,
+    persistence, provenance, regime, report_exports, reporting, risk_exposure, sentiment, signal_journal,
     signals, strategy,
 )
 
@@ -142,6 +143,10 @@ _AUTO_LIVE_THREAD: threading.Thread | None = None
 _AUTO_LIVE_STOP = threading.Event()
 _AUTO_LIVE_LAST_RESULT: dict | None = None
 _AUTO_LIVE_LAST_RUN: str | None = None
+DEFAULT_AUTO_LIVE_SYMBOLS = "core"
+DATA_QUALITY_DEFAULT_STALE_DAYS = 7
+DATA_QUALITY_DEFAULT_MIN_RESEARCH_ROWS = 60
+DATA_QUALITY_DEFAULT_INSTITUTIONAL_ROWS = 252
 
 
 def _env_int(name: str, default: int, min_value: int, max_value: int) -> int:
@@ -153,13 +158,23 @@ def _env_int(name: str, default: int, min_value: int, max_value: int) -> int:
 
 
 def _auto_live_config() -> dict:
-    symbols = data.expand_live_symbols(os.environ.get("HELIOS_AUTO_LIVE_SYMBOLS"))
+    raw_symbols = os.environ.get("HELIOS_AUTO_LIVE_SYMBOLS")
+    if raw_symbols is None or not raw_symbols.strip():
+        raw_symbols = "" if os.environ.get("HELIOS_DB_PATH") == "off" else DEFAULT_AUTO_LIVE_SYMBOLS
+    symbols = data.expand_live_symbols(raw_symbols)
     return {
         "enabled": bool(symbols),
         "live_available": data.HAS_YF,
         "symbols": symbols,
+        "source": raw_symbols,
         "period": (os.environ.get("HELIOS_AUTO_LIVE_PERIOD") or "2y").strip() or "2y",
         "interval_seconds": _env_int("HELIOS_AUTO_LIVE_REFRESH_SECONDS", 300, 60, 86_400),
+        "max_workers": _env_int(
+            "HELIOS_AUTO_LIVE_MAX_WORKERS",
+            data.DEFAULT_LIVE_REFRESH_WORKERS,
+            1,
+            data.MAX_LIVE_REFRESH_WORKERS,
+        ),
     }
 
 
@@ -168,12 +183,17 @@ def _auto_live_worker(config: dict) -> None:
     while not _AUTO_LIVE_STOP.is_set():
         started = datetime.now(timezone.utc).isoformat(timespec="seconds")
         try:
-            result = data.ensure_live_symbols(config["symbols"], period=config["period"])
+            result = data.ensure_live_symbols(
+                config["symbols"],
+                period=config["period"],
+                max_workers=config["max_workers"],
+            )
         except Exception as exc:
             result = {
                 "requested": config["symbols"],
                 "refreshed": 0,
                 "failed": len(config["symbols"]),
+                "max_workers": config["max_workers"],
                 "results": [{"symbol": symbol, "status": "error", "rows_added": 0, "message": str(exc)} for symbol in config["symbols"]],
             }
         with _AUTO_LIVE_LOCK:
@@ -195,6 +215,7 @@ def _start_auto_live_refresh() -> dict:
                 "requested": config["symbols"],
                 "refreshed": 0,
                 "failed": len(config["symbols"]),
+                "max_workers": config["max_workers"],
                 "results": [
                     {
                         "symbol": symbol,
@@ -608,6 +629,68 @@ def data_status():
     return ok(_data_status_payload())
 
 
+@app.route("/api/data-quality")
+def data_quality():
+    return ok(_data_quality_payload())
+
+
+@app.route("/api/signal-journal")
+def signal_journal_endpoint():
+    limit, error = _safe_int_arg("limit", 100, 1, 500)
+    if error:
+        return err(error, 400)
+    entries = signal_journal.list_entries(limit=limit)
+    dashboard = signal_journal.dashboard_payload(entries)
+    return ok({
+        "entries": entries,
+        "count": len(entries),
+        **dashboard,
+        "methodology": {
+            "analysis_only": True,
+            "paper_tracking_only": True,
+            "raw_price_history_stored": False,
+            "hit_rate_basis": "Measured paper signals are scored against their action intent: BUY/ADD/OVERWEIGHT must beat the benchmark when alpha is available; SELL/REDUCE/UNDERWEIGHT must underperform; HOLD/REVIEW must avoid material benchmark lag.",
+            "forward_results": "Pending results resolve only after later live or persisted price history covers the original signal horizon.",
+        },
+        "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+    })
+
+
+@app.route("/api/evidence-lab")
+def evidence_lab_endpoint():
+    kind = (request.args.get("kind") or "model").strip().lower()
+    target_id = (request.args.get("id") or request.args.get("ticker") or "").strip()
+    horizon, horizon_error = _safe_int_arg("horizon", 21, 5, 252)
+    if horizon_error:
+        return err(horizon_error, 400)
+    train_window, train_error = _safe_int_arg("train_window", 252, 90, 756)
+    if train_error:
+        return err(train_error, 400)
+    step, step_error = _safe_int_arg("step", 21, 5, 63)
+    if step_error:
+        return err(step_error, 400)
+    if kind == "model":
+        mdl = portfolio.get(target_id)
+        if mdl is None:
+            return err("Unknown model.", 404)
+        return ok({
+            **evidence_lab.analyze_model(mdl, horizon_days=horizon or 21, train_window=train_window or 252, step=step or 21),
+            "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+        })
+    if kind == "instrument":
+        symbol = data.clean_symbol(target_id, fallback="")
+        if not symbol:
+            return err("Provide an instrument symbol.", 400)
+        inst = data.get(symbol)
+        if inst is None:
+            return err(f"Unknown ticker '{symbol}'.", 404)
+        return ok({
+            **evidence_lab.analyze_instrument(inst, horizon_days=horizon or 21, train_window=train_window or 252, step=step or 21),
+            "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+        })
+    return err("kind must be instrument or model.", 400)
+
+
 @app.route("/api/data/refresh", methods=["POST"])
 def data_refresh():
     payload = request.get_json(silent=True) or {}
@@ -689,6 +772,7 @@ def analyze():
     sig = signals.evaluate(close, fc, sent)
     bt = backtest.run(close)
     metrics = indicators.metrics_summary(close)
+    journal_entry = _record_instrument_signal(inst, close, sig, horizon)
 
     return ok({
         "symbol": inst.symbol,
@@ -699,6 +783,7 @@ def analyze():
         "forecast": fc,
         "sentiment": sent,
         "signal": sig,
+        "signal_journal_entry": journal_entry,
         "backtest": bt,
     })
 
@@ -984,12 +1069,184 @@ def models():
             "mandate_label": mandate.get(mdl.mandate_key)["label"],
             "n_holdings": len(mdl.holdings),
             "top": mdl.holdings[0].ticker if mdl.holdings else None,
+            "holdings": [
+                {
+                    "ticker": holding.ticker,
+                    "weight": round(float(holding.weight), 6),
+                    "weight_pct": round(float(holding.weight) * 100, 2),
+                    "source": holding.source or "pending",
+                }
+                for holding in mdl.holdings
+            ],
             "real_coverage_count": coverage["real_coverage_count"],
             "missing_tickers": coverage["missing_tickers"],
             "coverage_state": coverage["coverage_state"],
         })
     out.sort(key=lambda d: d["name"])
     return ok({"models": out})
+
+
+@app.route("/api/model-library")
+def model_library_list():
+    return ok({"templates": model_library.public_list()})
+
+
+@app.route("/api/model-library/import", methods=["POST"])
+def model_library_import():
+    payload = request.get_json(silent=True) or {}
+    slug = str(payload.get("slug") or "")
+    template = model_library.get(slug)
+    if not template:
+        return err("Unknown model library template.", 404)
+    mdl = model_library.import_template(slug)
+    if not mdl:
+        return err("Unknown model library template.", 404)
+    coverage = _model_coverage(mdl)
+    return ok({
+        "id": mdl.id,
+        "name": mdl.name,
+        "mandate": mdl.mandate_key,
+        "n_holdings": len(mdl.holdings),
+        "coverage_state": coverage["coverage_state"],
+        "missing_tickers": coverage["missing_tickers"],
+        "template_only": template["template_only"],
+        "benchmark": template["benchmark"],
+        "rebalance_rules": template["rebalance_rules"],
+        "risk_limits": template["risk_limits"],
+        "provenance": template["provenance"],
+    })
+
+
+@app.route("/api/model-governance")
+def model_governance_workspace():
+    return ok(model_governance.payload())
+
+
+@app.route("/api/model-validation")
+def model_validation_dashboard():
+    horizon, horizon_error = _safe_int_arg("horizon", 21, 5, 252)
+    if horizon_error:
+        return err(horizon_error, 400)
+    train_window, train_error = _safe_int_arg("train_window", 252, 90, 756)
+    if train_error:
+        return err(train_error, 400)
+    step, step_error = _safe_int_arg("step", 21, 5, 63)
+    if step_error:
+        return err(step_error, 400)
+    return ok(model_validation.dashboard(
+        horizon_days=horizon or 21,
+        train_window=train_window or 252,
+        step=step or 21,
+    ))
+
+
+@app.route("/api/model-governance/<model_id>/events", methods=["POST"])
+def model_governance_event(model_id):
+    mdl = portfolio.get(model_id)
+    if mdl is None:
+        return err("Unknown model.", 404)
+    payload = request.get_json(silent=True) or {}
+    result = model_governance.record_event(
+        mdl,
+        actor=str(payload.get("actor") or "Advisor Console"),
+        action=str(payload.get("action") or ""),
+        note=str(payload.get("note") or ""),
+        approval_status=str(payload.get("approval_status") or ""),
+        committee_identity=payload.get("committee_identity") if isinstance(payload.get("committee_identity"), dict) else None,
+    )
+    if not result.get("recorded"):
+        return err(result.get("warning") or "Could not record model governance event.", int(result.get("status_code") or 503))
+    return ok({"event": result["event"]})
+
+
+@app.route("/api/model-governance/<model_id>/approval-packet")
+def model_governance_approval_packet(model_id):
+    mdl = portfolio.get(model_id)
+    if mdl is None:
+        return err("Unknown model.", 404)
+    packet = model_governance.approval_packet(mdl)
+    if not packet.get("available", True):
+        return err(packet.get("warning") or "Model approval packet unavailable.", 503)
+    return ok({"packet": packet})
+
+
+@app.route("/api/model-governance/<model_id>/approval-packet.html")
+def model_governance_approval_packet_html(model_id):
+    mdl = portfolio.get(model_id)
+    if mdl is None:
+        return err("Unknown model.", 404)
+    packet = model_governance.approval_packet(mdl)
+    if not packet.get("available", True):
+        return err(packet.get("warning") or "Model approval packet unavailable.", 503)
+    return Response(
+        model_governance.render_approval_packet_html(packet),
+        mimetype="text/html",
+        headers={"Content-Disposition": f'inline; filename="helios-model-approval-{model_id}.html"'},
+    )
+
+
+@app.route("/api/model-governance/<model_id>/approval-packet.pdf")
+def model_governance_approval_packet_pdf(model_id):
+    mdl = portfolio.get(model_id)
+    if mdl is None:
+        return err("Unknown model.", 404)
+    packet = model_governance.approval_packet(mdl)
+    if not packet.get("available", True):
+        return err(packet.get("warning") or "Model approval packet unavailable.", 503)
+    return Response(
+        model_governance.render_approval_packet_pdf(packet),
+        mimetype="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="helios-model-approval-{model_id}.pdf"'},
+    )
+
+
+@app.route("/api/models/<model_id>/editor", methods=["GET"])
+def model_editor(model_id):
+    mdl = portfolio.get(model_id)
+    if mdl is None:
+        return err("Unknown model.", 404)
+    return ok(model_governance.preview_edit(mdl, holdings=[
+        {"ticker": holding.ticker, "weight_pct": float(holding.weight) * 100}
+        for holding in mdl.holdings
+    ]))
+
+
+@app.route("/api/models/<model_id>/editor/preview", methods=["POST"])
+def model_editor_preview(model_id):
+    mdl = portfolio.get(model_id)
+    if mdl is None:
+        return err("Unknown model.", 404)
+    payload = request.get_json(silent=True) or {}
+    try:
+        result = model_governance.preview_edit(
+            mdl,
+            holdings=payload.get("holdings") or [],
+            rebalance_to_target=bool(payload.get("rebalance_to_target")),
+        )
+    except ValueError as exc:
+        return err(str(exc), 400)
+    return ok(result)
+
+
+@app.route("/api/models/<model_id>/editor", methods=["POST"])
+def model_editor_save(model_id):
+    mdl = portfolio.get(model_id)
+    if mdl is None:
+        return err("Unknown model.", 404)
+    payload = request.get_json(silent=True) or {}
+    try:
+        result = model_governance.save_edit(
+            mdl,
+            holdings=payload.get("holdings") or [],
+            change_note=str(payload.get("change_note") or ""),
+            actor=str(payload.get("actor") or "Advisor Console"),
+            rebalance_to_target=bool(payload.get("rebalance_to_target")),
+        )
+    except ValueError as exc:
+        return err(str(exc), 400)
+    if not result.get("saved"):
+        return err(result.get("warning") or "Could not save model edits.", 400)
+    return ok(result)
 
 
 @app.route("/api/model/upload", methods=["POST"])
@@ -1084,6 +1341,7 @@ def model_analyze():
     sig = signals.evaluate(close, fc_short, sent, mandate_key=mdl.mandate_key,
                            portfolio_meta=pmeta, history_days=ps.n_days, data_honesty=ps.provenance)
     bt = backtest.run(close)
+    journal_entry = _record_model_signal(mdl, ps, close, sig, signal_horizon)
 
     # 1Y projection always computed for the drawdown-breach insight; reuse if displayed.
     fc_long_1y = forecast.forecast_long(close, 252, mdl.mandate_key) if ps.n_days >= 126 else None
@@ -1110,6 +1368,7 @@ def model_analyze():
         "forecast": forecast_panel,
         "forecast_short": fc_short,
         "signal": sig,
+        "signal_journal_entry": journal_entry,
         "backtest": bt,
         "insights": ins,
         "warnings": ps.warnings,
@@ -1325,6 +1584,14 @@ def model_forward():
     })
 
 
+@app.route("/api/model/risk")
+def model_risk():
+    mdl = portfolio.get(request.args.get("id", ""))
+    if mdl is None:
+        return err("Unknown model.", 404)
+    return ok({**risk_exposure.analyze_model_risk(mdl), "disclaimer": ANALYSIS_ONLY_DISCLAIMER})
+
+
 @app.route("/api/report/instrument")
 def report_instrument():
     symbol = data.clean_symbol(request.args.get("ticker", ""), fallback="")
@@ -1345,6 +1612,255 @@ def report_model():
         return ok(reporting.model_report(mdl))
     except ValueError as e:
         return err(str(e), 400)
+
+
+@app.route("/api/report/snapshots", methods=["GET"])
+def report_snapshot_history():
+    store = persistence.get_store()
+    storage = _report_snapshot_storage(store)
+    if not store.available:
+        return ok({
+            "snapshots": [],
+            "count": 0,
+            "warning": store.warning or "Report history requires SQLite persistence.",
+            "storage": storage,
+            "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+        })
+    limit, error = _safe_int_arg("limit", 50, 1, 200)
+    if error:
+        return err(error, 400)
+    snapshots = [report_exports.public_snapshot(row) for row in store.report_snapshots(limit=limit or 50)]
+    return ok({
+        "snapshots": snapshots,
+        "count": len(snapshots),
+        "storage": storage,
+        "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+    })
+
+
+@app.route("/api/report/snapshots", methods=["POST"])
+def save_report_snapshot():
+    store = persistence.get_store()
+    if not store.available:
+        return err(store.warning or "Report history requires SQLite persistence.", 503)
+    body = request.get_json(silent=True) or {}
+    kind = str(body.get("kind") or "").strip().lower()
+    target_id = str(body.get("id") or body.get("target_id") or "").strip()
+    ai_narrative = str(body.get("ai_narrative") or "").strip()
+    include_ai_narrative = bool(body.get("include_ai_narrative"))
+    prepared_for = str(body.get("prepared_for") or "").strip()
+    prepared_by = str(body.get("prepared_by") or "").strip()
+    reviewer = str(body.get("reviewer") or "").strip()
+    report_purpose = str(body.get("report_purpose") or "").strip()
+    try:
+        report = _report_for_snapshot(kind, target_id)
+    except ValueError as exc:
+        return err(str(exc), 400)
+    ai_narrative, ai_meta = _report_snapshot_ai_narrative(
+        report,
+        provided_narrative=ai_narrative,
+        include_ai_narrative=include_ai_narrative,
+    )
+    snapshot = report_exports.build_snapshot(
+        target_kind=kind,
+        target_id=target_id,
+        report=report,
+        signal_journal_evidence=_report_signal_journal_evidence(kind, target_id),
+        ai_narrative=ai_narrative,
+        ai_narrative_status=ai_meta["status"],
+        ai_provider=ai_meta["provider"],
+        version=_next_report_snapshot_version(store, kind, target_id),
+        prepared_for=prepared_for,
+        prepared_by=prepared_by,
+        reviewer=reviewer,
+        report_purpose=report_purpose,
+    )
+    result = store.save_report_snapshot(snapshot)
+    if not result.get("saved"):
+        return err(result.get("warning") or "Report snapshot could not be saved.", 500)
+    public = report_exports.public_snapshot(snapshot)
+    return ok({
+        "snapshot": public,
+        "html_url": public["html_url"],
+        "pdf_url": public["pdf_url"],
+        "storage": _report_snapshot_storage(store),
+        "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+    })
+
+
+@app.route("/api/report/snapshots/<snapshot_id>.html")
+def report_snapshot_html(snapshot_id: str):
+    snapshot = persistence.get_store().get_report_snapshot(snapshot_id)
+    if snapshot is None:
+        return err("Unknown report snapshot.", 404)
+    html_body = snapshot.get("html") or report_exports.render_html(snapshot)
+    return Response(str(html_body), mimetype="text/html")
+
+
+@app.route("/api/report/snapshots/<snapshot_id>.pdf")
+def report_snapshot_pdf(snapshot_id: str):
+    snapshot = persistence.get_store().get_report_snapshot(snapshot_id)
+    if snapshot is None:
+        return err("Unknown report snapshot.", 404)
+    filename = f"helios-report-{snapshot_id}.pdf"
+    return Response(
+        report_exports.render_pdf(snapshot),
+        mimetype="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def _report_for_snapshot(kind: str, target_id: str) -> dict:
+    if kind == "instrument":
+        symbol = data.clean_symbol(target_id, fallback="")
+        if not symbol:
+            raise ValueError("Provide a ticker symbol.")
+        inst = data.get(symbol)
+        if inst is None:
+            raise ValueError(f"Unknown ticker '{symbol}'.")
+        return reporting.instrument_report(inst)
+    if kind == "model":
+        mdl = portfolio.get(target_id)
+        if mdl is None:
+            raise ValueError("Unknown model.")
+        return reporting.model_report(mdl)
+    raise ValueError("Report snapshot kind must be 'instrument' or 'model'.")
+
+
+def _next_report_snapshot_version(store, kind: str, target_id: str) -> int:
+    try:
+        versions = [
+            int(row.get("version") or row.get("metadata", {}).get("version") or 1)
+            for row in store.report_snapshots(limit=200)
+            if row.get("target_kind") == kind and row.get("target_id") == target_id
+        ]
+    except Exception:
+        versions = []
+    return (max(versions) if versions else 0) + 1
+
+
+def _report_signal_journal_evidence(kind: str, target_id: str) -> dict:
+    journal_target_id = data.clean_symbol(target_id, fallback="") if kind == "instrument" else target_id
+    try:
+        entries = signal_journal.list_entries(limit=250)
+    except Exception:
+        entries = []
+    target_entries = [
+        entry for entry in entries
+        if entry.get("target_kind") == kind and str(entry.get("target_id") or "") == journal_target_id
+    ]
+    dashboard = signal_journal.dashboard_payload(target_entries)
+    return {
+        "scope": "target",
+        "target_kind": kind,
+        "target_id": journal_target_id,
+        "summary": dashboard["summary"],
+        "benchmark_comparison": dashboard["benchmark_comparison"],
+        "model_credibility": dashboard["model_evidence"],
+        "drift": dashboard["drift"][-24:],
+        "target_history": [_compact_signal_journal_entry(entry) for entry in target_entries[:24]],
+        "methodology": {
+            "analysis_only": True,
+            "paper_tracking_only": True,
+            "raw_price_history_stored": False,
+            "forward_results": "Pending results resolve only after later live or persisted price history covers the original signal horizon.",
+            "hit_rate_basis": "Measured paper signals are scored against action intent and benchmark-relative alpha when available.",
+        },
+        "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+    }
+
+
+def _compact_signal_journal_entry(entry: dict) -> dict:
+    return {
+        "id": entry.get("id"),
+        "created_at": entry.get("created_at"),
+        "target_kind": entry.get("target_kind"),
+        "target_id": entry.get("target_id"),
+        "target_name": entry.get("target_name"),
+        "action_label": entry.get("action_label"),
+        "score": entry.get("score"),
+        "benchmark": entry.get("benchmark"),
+        "input_start_date": entry.get("input_start_date"),
+        "input_end_date": entry.get("input_end_date"),
+        "input_rows": entry.get("input_rows"),
+        "horizon_days": entry.get("horizon_days"),
+        "data_mode": entry.get("data_mode"),
+        "eligible_for_real_research": bool(entry.get("eligible_for_real_research")),
+        "source_counts": entry.get("source_counts") or {},
+        "forward_status": entry.get("forward_status"),
+        "forward_start_date": entry.get("forward_start_date"),
+        "forward_end_date": entry.get("forward_end_date"),
+        "forward_result_pct": entry.get("forward_result_pct"),
+        "benchmark_result_pct": entry.get("benchmark_result_pct"),
+        "alpha_pct": entry.get("alpha_pct"),
+        "evaluated_at": entry.get("evaluated_at"),
+    }
+
+
+def _report_snapshot_ai_narrative(
+    report: dict,
+    *,
+    provided_narrative: str,
+    include_ai_narrative: bool,
+) -> tuple[str, dict]:
+    if provided_narrative:
+        return provided_narrative, {
+            "status": "provided",
+            "provider": {"source": "current_session", "needs_review": True},
+        }
+    if not include_ai_narrative:
+        return "", {"status": "not_requested", "provider": {}}
+    provider = ai_copilot.get_provider()
+    status = provider.status()
+    provider_meta = {
+        "provider": status.get("provider") or "",
+        "model": status.get("model") or "",
+        "available": bool(status.get("available")),
+        "needs_review": True,
+    }
+    if not status.get("available"):
+        return "", {"status": "provider_unavailable", "provider": provider_meta}
+    try:
+        result = provider.write_advisor_report({
+            "report": report,
+            "title": report.get("title"),
+            "preview_locked": not bool(report.get("eligible_for_real_research")),
+            "analysis_only_disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+        }, regenerate=True)
+    except ai_copilot.AIError as exc:
+        safe_status = exc.status or status
+        return "", {
+            "status": "provider_error",
+            "provider": {
+                "provider": safe_status.get("provider") or provider_meta["provider"],
+                "model": safe_status.get("model") or provider_meta["model"],
+                "available": bool(safe_status.get("available")),
+                "needs_review": True,
+            },
+        }
+    provider_meta.update({
+        "provider": result.get("provider") or provider_meta["provider"],
+        "model": result.get("model") or provider_meta["model"],
+        "needs_review": bool(result.get("needs_review", True)),
+    })
+    return report_exports.ai_result_to_narrative(result), {
+        "status": "generated",
+        "provider": provider_meta,
+    }
+
+
+def _report_snapshot_storage(store) -> dict:
+    status = store.status()
+    encryption = status.get("encryption") or {}
+    return {
+        "backend": "sqlite",
+        "scope": "local",
+        "durable": bool(status.get("available")),
+        "configured": bool(status.get("configured")),
+        "encrypted_at_rest": bool(encryption.get("enabled")),
+        "at_rest_format": encryption.get("at_rest_format") or "sqlite",
+        "warning": status.get("warning") or "",
+    }
 
 
 @app.route("/assets/<path:filename>")
@@ -1450,12 +1966,354 @@ def _data_status_payload() -> dict:
     }
 
 
+def _data_quality_thresholds() -> dict[str, int]:
+    min_research_rows = _env_int(
+        "HELIOS_DATA_QUALITY_MIN_RESEARCH_ROWS",
+        DATA_QUALITY_DEFAULT_MIN_RESEARCH_ROWS,
+        20,
+        10_000,
+    )
+    institutional_rows = _env_int(
+        "HELIOS_DATA_QUALITY_INSTITUTIONAL_ROWS",
+        DATA_QUALITY_DEFAULT_INSTITUTIONAL_ROWS,
+        min_research_rows,
+        20_000,
+    )
+    return {
+        "stale_days": _env_int("HELIOS_DATA_QUALITY_STALE_DAYS", DATA_QUALITY_DEFAULT_STALE_DAYS, 1, 3_650),
+        "min_research_rows": min_research_rows,
+        "institutional_history_rows": institutional_rows,
+    }
+
+
+def _data_quality_threshold_config() -> dict:
+    env_names = {
+        "stale_days": "HELIOS_DATA_QUALITY_STALE_DAYS",
+        "min_research_rows": "HELIOS_DATA_QUALITY_MIN_RESEARCH_ROWS",
+        "institutional_history_rows": "HELIOS_DATA_QUALITY_INSTITUTIONAL_ROWS",
+    }
+    return {
+        "source": "environment" if any(os.environ.get(name) for name in env_names.values()) else "defaults",
+        "env": env_names,
+        "range_guards": {
+            "stale_days": "1-3650",
+            "min_research_rows": "20-10000",
+            "institutional_history_rows": "at least min_research_rows, max 20000",
+        },
+    }
+
+
+def _data_quality_payload() -> dict:
+    thresholds = _data_quality_thresholds()
+    instruments = data.all_instruments()
+    models = portfolio.all_models()
+    refresh_logs = persistence.get_store().refresh_log(limit=250)
+    refresh_by_symbol = {}
+    for row in refresh_logs:
+        refresh_by_symbol.setdefault(row["symbol"], row)
+    symbols = [_data_quality_symbol_row(inst, refresh_by_symbol.get(inst.symbol), thresholds) for inst in instruments]
+    model_rows = [_data_quality_model_row(mdl) for mdl in models]
+    issues = []
+    for row in symbols:
+        if row["is_stale"]:
+            issues.append(_quality_issue(
+                "stale_symbols",
+                "warning",
+                row["symbol"],
+                f"{row['symbol']} latest data is {row['days_stale']} calendar days old.",
+                "Refresh live data or verify the uploaded date range before current research use.",
+            ))
+        if row["source"] != "sample" and row["row_count"] < thresholds["institutional_history_rows"]:
+            severity = "blocker" if row["row_count"] < thresholds["min_research_rows"] else "warning"
+            issues.append(_quality_issue(
+                "short_histories",
+                severity,
+                row["symbol"],
+                f"{row['symbol']} has {row['row_count']} rows; institutional review target is {thresholds['institutional_history_rows']}.",
+                "Fetch/upload a longer adjusted history before relying on model evidence.",
+            ))
+        if row["refresh_evidence"]["requires_refresh_log"] and not row["refresh_evidence"]["has_refresh_log"]:
+            issues.append(_quality_issue(
+                "refresh_observability_gaps",
+                "warning",
+                row["symbol"],
+                f"{row['symbol']} is marked live but has no persisted provider refresh attempt in the local log.",
+                "Refresh the symbol or enable automatic live polling so freshness evidence is auditable.",
+            ))
+    for row in refresh_logs:
+        if str(row.get("status") or "").lower() == "error":
+            issues.append(_quality_issue(
+                "refresh_failures",
+                "warning",
+                row["symbol"],
+                f"{row['symbol']} refresh failed: {row.get('message') or 'provider error'}",
+                "Retry refresh and keep the prior stored history until the provider succeeds.",
+            ))
+    missing_rows = []
+    coverage_gaps = []
+    source_conflicts = []
+    for model_row in model_rows:
+        missing_rows.extend({"symbol": symbol, "model_id": model_row["id"], "model_name": model_row["name"]} for symbol in model_row["missing_tickers"])
+        if model_row["coverage_state"] != "real":
+            coverage_gaps.append({
+                "model_id": model_row["id"],
+                "model_name": model_row["name"],
+                "coverage_state": model_row["coverage_state"],
+                "real_coverage_count": model_row["real_coverage_count"],
+                "n_holdings": model_row["n_holdings"],
+                "missing_tickers": model_row["missing_tickers"],
+            })
+            issues.append(_quality_issue(
+                "coverage_gaps",
+                "blocker" if model_row["real_coverage_count"] == 0 else "warning",
+                model_row["name"],
+                f"{model_row['name']} has {model_row['real_coverage_count']}/{model_row['n_holdings']} holdings with real research coverage.",
+                "Fetch live histories for each uncovered holding before treating the model as research-ready.",
+            ))
+        nonzero_sources = {k: v for k, v in model_row["source_counts"].items() if v}
+        if len(nonzero_sources) > 1:
+            conflict = {
+                "model_id": model_row["id"],
+                "model_name": model_row["name"],
+                "source_counts": nonzero_sources,
+                "coverage_state": model_row["coverage_state"],
+            }
+            source_conflicts.append(conflict)
+            issues.append(_quality_issue(
+                "source_conflicts",
+                "warning",
+                model_row["name"],
+                f"{model_row['name']} mixes sources: " + ", ".join(f"{source}={count}" for source, count in sorted(nonzero_sources.items())),
+                "Resolve mixed/missing/sample coverage before presenting a unified model evidence pack.",
+            ))
+    for row in missing_rows:
+        issues.append(_quality_issue(
+            "missing_data",
+            "blocker",
+            row["symbol"],
+            f"{row['symbol']} is required by {row['model_name']} but has no eligible real history.",
+            "Fetch live data or upload an eligible adjusted price history.",
+        ))
+    blockers = sum(1 for issue in issues if issue["severity"] == "blocker")
+    warnings = sum(1 for issue in issues if issue["severity"] == "warning")
+    research_ready_symbols = [row for row in symbols if row["research_ready"]]
+    research_ready_models = [row for row in model_rows if row["research_ready"]]
+    refresh_observability_gaps = [
+        row for row in symbols
+        if row["refresh_evidence"]["requires_refresh_log"] and not row["refresh_evidence"]["has_refresh_log"]
+    ]
+    refresh_observed = [
+        row for row in symbols
+        if row["refresh_evidence"]["requires_refresh_log"] and row["refresh_evidence"]["has_refresh_log"]
+    ]
+    payload = {
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "research_ready": blockers == 0 and bool(research_ready_symbols or research_ready_models),
+        "thresholds": thresholds,
+        "threshold_config": _data_quality_threshold_config(),
+        "refresh_observability": {
+            "requires_log_for_sources": ["live"],
+            "observed_count": len(refresh_observed),
+            "gap_count": len(refresh_observability_gaps),
+            "refresh_log_window": 250,
+            "basis": "provider refresh log plus price-history date range",
+        },
+        "summary": {
+            "symbol_count": len(symbols),
+            "model_count": len(model_rows),
+            "issue_count": len(issues),
+            "blocker_count": blockers,
+            "warning_count": warnings,
+            "research_ready_count": len(research_ready_symbols) + len(research_ready_models),
+            "stale_symbol_count": sum(1 for row in symbols if row["is_stale"]),
+            "missing_symbol_count": len({row["symbol"] for row in missing_rows}),
+            "refresh_failure_count": sum(1 for row in refresh_logs if str(row.get("status") or "").lower() == "error"),
+            "refresh_observability_gap_count": len(refresh_observability_gaps),
+            "coverage_gap_count": len(coverage_gaps),
+        },
+        "symbols": symbols,
+        "models": model_rows,
+        "issues": issues,
+        "stale_symbols": [row for row in symbols if row["is_stale"]],
+        "short_histories": [row for row in symbols if row["source"] != "sample" and row["row_count"] < thresholds["institutional_history_rows"]],
+        "missing_data": missing_rows,
+        "refresh_failures": [row for row in refresh_logs if str(row.get("status") or "").lower() == "error"],
+        "refresh_observability_gaps": refresh_observability_gaps,
+        "coverage_gaps": coverage_gaps,
+        "source_conflicts": source_conflicts,
+        "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+    }
+    payload["alerts"] = persistence.get_store().sync_data_quality_alerts(
+        _data_quality_alert_inputs(payload),
+        generated_at=payload["generated_at"],
+    )
+    return payload
+
+
+def _data_quality_symbol_row(inst: data.Instrument, last_refresh: dict | None, thresholds: dict[str, int]) -> dict:
+    close = inst.df["close"].dropna() if "close" in inst.df else pd.Series(dtype=float)
+    dates = pd.to_datetime(close.index, errors="coerce")
+    dates = dates[~pd.isna(dates)]
+    first_date = str(dates.min().date()) if len(dates) else None
+    last_date = str(dates.max().date()) if len(dates) else None
+    today = datetime.now(timezone.utc).date()
+    days_stale = (today - dates.max().date()).days if len(dates) else None
+    is_real_source = provenance.is_real_source(inst.source)
+    requires_refresh_log = inst.source == "live"
+    return {
+        "symbol": inst.symbol,
+        "name": inst.name,
+        "source": inst.source,
+        "row_count": int(len(close)),
+        "first_date": first_date,
+        "last_date": last_date,
+        "days_stale": days_stale,
+        "freshness_basis": "price_history_last_date" if last_date else "missing_price_history",
+        "is_stale": bool(is_real_source and days_stale is not None and days_stale > thresholds["stale_days"]),
+        "is_short": bool(is_real_source and len(close) < thresholds["institutional_history_rows"]),
+        "research_ready": bool(is_real_source and len(close) >= thresholds["min_research_rows"]),
+        "last_refresh": last_refresh,
+        "refresh_evidence": {
+            "requires_refresh_log": requires_refresh_log,
+            "has_refresh_log": bool(last_refresh),
+            "last_attempted_at": last_refresh.get("attempted_at") if last_refresh else None,
+            "status": last_refresh.get("status") if last_refresh else None,
+            "rows_added": last_refresh.get("rows_added") if last_refresh else None,
+            "source": last_refresh.get("source") if last_refresh else None,
+        },
+        "next_step": _data_quality_symbol_next_step(inst.source, len(close), days_stale, thresholds, bool(last_refresh)),
+    }
+
+
+def _data_quality_model_row(mdl: portfolio.Model) -> dict:
+    coverage = _model_coverage(mdl)
+    return {
+        "id": mdl.id,
+        "name": mdl.name,
+        "mandate": mdl.mandate_key,
+        "n_holdings": len(mdl.holdings),
+        "research_ready": coverage["coverage_state"] == "real",
+        **coverage,
+    }
+
+
+def _data_quality_symbol_next_step(source: str, row_count: int, days_stale: int | None, thresholds: dict[str, int], has_refresh_log: bool) -> str:
+    if not provenance.is_real_source(source):
+        return "Sample data is demo-only; fetch live or upload real history."
+    if row_count < thresholds["min_research_rows"]:
+        return f"Fetch/upload at least {thresholds['min_research_rows']} valid rows before real research."
+    if row_count < thresholds["institutional_history_rows"]:
+        return "Extend history toward a one-year institutional review window."
+    if source == "live" and not has_refresh_log:
+        return "Refresh once so provider freshness evidence is logged."
+    if days_stale is not None and days_stale > thresholds["stale_days"]:
+        return "Refresh or verify the latest available provider date."
+    return "Research-ready, subject to analysis-only caveats."
+
+
+def _quality_issue(category: str, severity: str, target: str, detail: str, next_step: str) -> dict:
+    return {
+        "category": category,
+        "severity": severity,
+        "target": target,
+        "detail": detail,
+        "next_step": next_step,
+    }
+
+
+def _data_quality_alert_inputs(payload: dict) -> list[dict]:
+    alerts = []
+    for issue in payload.get("issues") or []:
+        alerts.append({
+            "id": _data_quality_alert_id(issue.get("category"), issue.get("target")),
+            "category": issue.get("category") or "data_quality",
+            "severity": issue.get("severity") or "info",
+            "target": issue.get("target") or "Workspace",
+            "detail": issue.get("detail") or "",
+            "next_step": issue.get("next_step") or "",
+            "metadata": {
+                "source": "data_quality_dashboard",
+                "research_ready": bool(payload.get("research_ready")),
+            },
+        })
+    summary = payload.get("summary") or {}
+    if not payload.get("research_ready"):
+        blockers = int(summary.get("blocker_count") or 0)
+        warnings = int(summary.get("warning_count") or 0)
+        alerts.append({
+            "id": "data_quality:research_readiness:workspace",
+            "category": "research_readiness",
+            "severity": "blocker" if blockers else "warning",
+            "target": "Workspace",
+            "detail": f"Workspace is not research-ready: {blockers} blockers and {warnings} warnings are active.",
+            "next_step": "Resolve blocker alerts before using Helios outputs as real research evidence.",
+            "metadata": {
+                "source": "data_quality_dashboard",
+                "blocker_count": blockers,
+                "warning_count": warnings,
+            },
+        })
+    return alerts
+
+
+def _data_quality_alert_id(category: str | None, target: str | None) -> str:
+    return f"data_quality:{_alert_id_part(category or 'data_quality')}:{_alert_id_part(target or 'workspace')}"
+
+
+def _alert_id_part(value: str) -> str:
+    cleaned = "".join(ch.lower() if ch.isalnum() else "-" for ch in str(value))
+    cleaned = "-".join(part for part in cleaned.split("-") if part)
+    return cleaned[:80] or "item"
+
+
 def _dedupe_strings(items: list[str]) -> list[str]:
     out = []
     for item in items:
         if item and item not in out:
             out.append(item)
     return out
+
+
+def _record_instrument_signal(inst: data.Instrument, close: pd.Series, sig: dict, horizon_days: int) -> dict | None:
+    try:
+        p = provenance.instrument(inst.source, len(close.dropna()))
+        return signal_journal.record_signal(
+            target_kind="instrument",
+            target_id=inst.symbol,
+            target_name=inst.name,
+            close=close,
+            input_close=close,
+            signal=sig,
+            horizon_days=horizon_days,
+            benchmark="SPY",
+            source_counts={inst.source: 1},
+            eligible_for_real_research=p["eligible_for_real_research"],
+            data_mode=p["data_mode"],
+            metadata={"endpoint": "/api/analyze"},
+        )
+    except Exception:
+        return None
+
+
+def _record_model_signal(mdl: portfolio.Model, ps: portfolio.PortfolioSeries, close: pd.Series, sig: dict, horizon_days: int) -> dict | None:
+    try:
+        p = provenance.portfolio(ps.provenance)
+        return signal_journal.record_signal(
+            target_kind="model",
+            target_id=mdl.id,
+            target_name=mdl.name,
+            close=close,
+            input_close=close,
+            signal=sig,
+            horizon_days=horizon_days,
+            benchmark=signal_journal.benchmark_for_model(mdl),
+            source_counts={str(k): int(v) for k, v in ps.sources.items()},
+            eligible_for_real_research=p["eligible_for_real_research"],
+            data_mode=p["data_mode"],
+            metadata={"endpoint": "/api/model/analyze", "mandate": mdl.mandate_key},
+        )
+    except Exception:
+        return None
 
 
 def _holdings_with_signals(ps: portfolio.PortfolioSeries, mdl: portfolio.Model) -> list:

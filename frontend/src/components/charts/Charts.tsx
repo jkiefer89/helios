@@ -1,8 +1,18 @@
+import { lazy, Suspense } from "react";
+import type { EChartsOption } from "echarts";
 import { fmtNumber } from "../../utils/format";
+import { EmptyChartState, LoadingChartState } from "./chartStates";
+import { drawdownOption } from "./adapters/drawdown";
+import { equityCurveOption } from "./adapters/equity";
+import { priceTrendOption } from "./adapters/priceTrend";
+import { rollingSharpeOption } from "./adapters/rollingSharpe";
 
 type ChartTone = "positive" | "negative" | "warning" | "info" | "neutral";
 type ChartPoint = { label: string; x: number; y: number; size?: number; tone?: string; meta?: string };
 type ChartSegment = { label: string; value: number; tone?: string };
+type NullableNumber = number | null | undefined;
+
+const HeliosEChart = lazy(() => import("./HeliosEChart").then((module) => ({ default: module.HeliosEChart })));
 
 const TONE_COLORS: Record<ChartTone, string> = {
   positive: "#47d66f",
@@ -215,6 +225,85 @@ export function DonutChart({
   );
 }
 
+export function EquityCurveChart({
+  labels,
+  strategy,
+  benchmark,
+  height = 220,
+}: {
+  labels: string[];
+  strategy: NullableNumber[];
+  benchmark?: NullableNumber[];
+  height?: number;
+}) {
+  const points = labels.map((date, index) => ({
+    date,
+    strategy: chartNumber(strategy[index]),
+    benchmark: chartNumber(benchmark?.[index]),
+  }));
+  if (!hasEnoughPoints(points.map((point) => point.strategy))) {
+    return <EmptyChartState body="Equity curve appears when enough strategy history is available." minHeight={height} />;
+  }
+  return <LazyHeliosEChart option={equityCurveOption(points)} height={height} ariaLabel="Equity curve versus benchmark" />;
+}
+
+export function DrawdownChart({
+  labels,
+  values,
+  height = 180,
+}: {
+  labels: string[];
+  values: NullableNumber[];
+  height?: number;
+}) {
+  const points = labels.map((date, index) => ({ date, drawdown: chartNumber(values[index]) }));
+  if (!hasEnoughPoints(points.map((point) => point.drawdown))) {
+    return <EmptyChartState body="Drawdown chart appears when enough real-data history is available." minHeight={height} />;
+  }
+  return <LazyHeliosEChart option={drawdownOption(points)} height={height} ariaLabel="Drawdown chart" />;
+}
+
+export function RollingSharpeChart({
+  labels,
+  values,
+  height = 180,
+}: {
+  labels: string[];
+  values: NullableNumber[];
+  height?: number;
+}) {
+  const points = labels.map((date, index) => ({ date, sharpe: chartNumber(values[index]) }));
+  if (!hasEnoughPoints(points.map((point) => point.sharpe))) {
+    return <EmptyChartState body="Rolling Sharpe appears after enough strategy windows are available." minHeight={height} />;
+  }
+  return <LazyHeliosEChart option={rollingSharpeOption(points)} height={height} ariaLabel="Rolling Sharpe chart" />;
+}
+
+export function PriceTrendChart({
+  labels,
+  close,
+  sma50,
+  sma200,
+  height = 220,
+}: {
+  labels: string[];
+  close: NullableNumber[];
+  sma50?: NullableNumber[];
+  sma200?: NullableNumber[];
+  height?: number;
+}) {
+  const points = labels.map((date, index) => ({
+    date,
+    close: chartNumber(close[index]),
+    sma50: chartNumber(sma50?.[index]),
+    sma200: chartNumber(sma200?.[index]),
+  }));
+  if (!hasEnoughPoints(points.map((point) => point.close))) {
+    return <EmptyChartState body="Price trend appears when enough price history is available." minHeight={height} />;
+  }
+  return <LazyHeliosEChart option={priceTrendOption(points)} height={height} ariaLabel="Price and moving-average trend chart" />;
+}
+
 export function LineChart({
   labels,
   series,
@@ -273,5 +362,29 @@ export function LineChart({
         {series.map((item) => <span key={item.label} className={`tone-${safeTone(item.tone || "info")}`}>{item.label}</span>)}
       </div>
     </div>
+  );
+}
+
+function chartNumber(value: NullableNumber): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function hasEnoughPoints(values: Array<number | null | undefined>): boolean {
+  return values.filter((value): value is number => typeof value === "number" && Number.isFinite(value)).length >= 2;
+}
+
+function LazyHeliosEChart({
+  option,
+  height,
+  ariaLabel,
+}: {
+  option: EChartsOption;
+  height: number;
+  ariaLabel: string;
+}) {
+  return (
+    <Suspense fallback={<LoadingChartState minHeight={height} />}>
+      <HeliosEChart option={option} height={height} ariaLabel={ariaLabel} />
+    </Suspense>
   );
 }

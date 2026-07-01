@@ -5,11 +5,27 @@ import type {
   ClinicResponse,
   CommandCenterResponse,
   DataRefreshResponse,
+  DataQualityResponse,
   DataStatusResponse,
+  EvidenceLabResponse,
   MandateSummary,
+  ModelEditHoldingInput,
+  ModelEditPreviewResponse,
+  ModelEditSaveResponse,
+  ModelGovernanceCommitteeIdentity,
+  ModelGovernanceApprovalPacket,
   ModelSummary,
+  ModelGovernanceResponse,
+  ModelTemplate,
+  ModelTemplateImportResponse,
+  ModelValidationResponse,
   OpportunitiesResponse,
+  ReportSnapshotHistoryResponse,
+  ReportSnapshotSaveRequest,
+  ReportSnapshotSaveResponse,
   ReportResponse,
+  RiskAnalyticsResponse,
+  SignalJournalResponse,
   StrategyResponse,
   TickersResponse,
 } from "./types";
@@ -35,6 +51,7 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
 export const api = {
   commandCenter: () => request<CommandCenterResponse>("/api/command-center"),
   dataStatus: () => request<DataStatusResponse>("/api/data/status"),
+  dataQuality: () => request<DataQualityResponse>("/api/data-quality"),
   refreshData: (params: { symbol?: string; all?: boolean } = {}) =>
     request<DataRefreshResponse>("/api/data/refresh", {
       method: "POST",
@@ -44,6 +61,53 @@ export const api = {
   tickers: () => request<TickersResponse>("/api/tickers"),
   mandates: () => request<{ mandates: MandateSummary[] }>("/api/mandates"),
   models: () => request<{ models: ModelSummary[] }>("/api/models"),
+  modelGovernance: () => request<ModelGovernanceResponse>("/api/model-governance"),
+  modelApprovalPacket: (id: string) =>
+    request<{ packet: ModelGovernanceApprovalPacket }>(`/api/model-governance/${encodeURIComponent(id)}/approval-packet`),
+  modelValidation: () => request<ModelValidationResponse>("/api/model-validation"),
+  recordModelGovernanceEvent: (
+    id: string,
+    payload: {
+      actor?: string;
+      action?: string;
+      note?: string;
+      approval_status?: string;
+      committee_identity?: Partial<ModelGovernanceCommitteeIdentity> & { secret?: string };
+    },
+  ) =>
+    request<{ event: ModelGovernanceResponse["change_log"][number] & { snapshot?: Record<string, unknown> } }>(
+      `/api/model-governance/${encodeURIComponent(id)}/events`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      },
+    ),
+  previewModelEdit: (
+    id: string,
+    payload: { holdings: ModelEditHoldingInput[]; rebalance_to_target?: boolean },
+  ) =>
+    request<ModelEditPreviewResponse>(`/api/models/${encodeURIComponent(id)}/editor/preview`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
+  saveModelEdit: (
+    id: string,
+    payload: { holdings: ModelEditHoldingInput[]; change_note: string; actor?: string; rebalance_to_target?: boolean },
+  ) =>
+    request<ModelEditSaveResponse>(`/api/models/${encodeURIComponent(id)}/editor`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
+  modelLibrary: () => request<{ templates: ModelTemplate[] }>("/api/model-library"),
+  importModelTemplate: (slug: string) =>
+    request<ModelTemplateImportResponse>("/api/model-library/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slug }),
+    }),
   opportunities: (params: { kind: string; includeHold: boolean; minScore: number; limit?: number }) => {
     const query = new URLSearchParams({
       kind: params.kind,
@@ -70,9 +134,28 @@ export const api = {
       })}`,
     ),
   clinic: (id: string) => request<ClinicResponse>(`/api/model/clinic?id=${encodeURIComponent(id)}`),
+  modelRisk: (id: string) => request<RiskAnalyticsResponse>(`/api/model/risk?id=${encodeURIComponent(id)}`),
   reportInstrument: (symbol: string) =>
     request<ReportResponse>(`/api/report/instrument?ticker=${encodeURIComponent(symbol)}`),
   reportModel: (id: string) => request<ReportResponse>(`/api/report/model?id=${encodeURIComponent(id)}`),
+  reportSnapshots: () => request<ReportSnapshotHistoryResponse>("/api/report/snapshots"),
+  saveReportSnapshot: (payload: ReportSnapshotSaveRequest) =>
+    request<ReportSnapshotSaveResponse>("/api/report/snapshots", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
+  signalJournal: () => request<SignalJournalResponse>("/api/signal-journal"),
+  evidenceLab: (params: { kind: "instrument" | "model"; id: string; horizon?: number; trainWindow?: number; step?: number }) => {
+    const query = new URLSearchParams({
+      kind: params.kind,
+      id: params.id,
+      horizon: String(params.horizon ?? 21),
+      train_window: String(params.trainWindow ?? 252),
+      step: String(params.step ?? 21),
+    });
+    return request<EvidenceLabResponse>(`/api/evidence-lab?${query}`);
+  },
   analyzeInstrument: (symbol: string, horizon: number) =>
     request<AnalysisResponse>(`/api/analyze?ticker=${encodeURIComponent(symbol)}&horizon=${horizon}`),
   analyzeModel: (id: string, horizon: string | number) =>

@@ -4,7 +4,9 @@ import type {
   CommandCenterResponse,
   DataStatusResponse,
   MandateSummary,
+  ModelGovernanceResponse,
   ModelSummary,
+  ModelTemplate,
   OpportunitiesResponse,
   TickerSummary,
 } from "./api/types";
@@ -17,11 +19,17 @@ import { Reports } from "./views/Reports";
 import { Analysis } from "./views/Analysis";
 import { Instruments } from "./views/Instruments";
 import { Models } from "./views/Models";
+import { DataQuality } from "./views/DataQuality";
+import { SignalJournal } from "./views/SignalJournal";
+import { RiskAnalytics } from "./views/RiskAnalytics";
+import { EvidenceLab } from "./views/EvidenceLab";
 
 export default function App() {
   const [activeView, setActiveView] = useState<ViewId>("command");
   const [tickers, setTickers] = useState<TickerSummary[]>([]);
   const [models, setModels] = useState<ModelSummary[]>([]);
+  const [modelGovernance, setModelGovernance] = useState<ModelGovernanceResponse | null>(null);
+  const [modelLibrary, setModelLibrary] = useState<ModelTemplate[]>([]);
   const [mandates, setMandates] = useState<MandateSummary[]>([]);
   const [liveAvailable, setLiveAvailable] = useState(false);
   const [selectedInstrument, setSelectedInstrument] = useState<string>("");
@@ -33,14 +41,18 @@ export default function App() {
   const [notice, setNotice] = useState<string>("");
 
   const refreshLists = async () => {
-    const [tickerPayload, modelPayload, mandatePayload, statusPayload] = await Promise.all([
+    const [tickerPayload, modelPayload, governancePayload, libraryPayload, mandatePayload, statusPayload] = await Promise.all([
       api.tickers(),
       api.models(),
+      api.modelGovernance(),
+      api.modelLibrary(),
       api.mandates(),
       api.dataStatus(),
     ]);
     setTickers(tickerPayload.tickers);
     setModels(modelPayload.models);
+    setModelGovernance(governancePayload);
+    setModelLibrary(libraryPayload.templates);
     setMandates(mandatePayload.mandates);
     setDataStatus(statusPayload);
     setLiveAvailable(tickerPayload.live_available);
@@ -108,6 +120,49 @@ export default function App() {
     }
   };
 
+  const onImportTemplate = async (slug: string) => {
+    try {
+      const result = await api.importModelTemplate(slug);
+      setNotice(`Imported ${result.name} with ${result.n_holdings} governed holdings.`);
+      await Promise.all([refreshLists(), refreshCommand()]);
+      selectModelOnly(result.id);
+      setActiveView("clinic");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Model template import failed.");
+      throw error;
+    }
+  };
+
+  const onRecordModelGovernance = async (
+    id: string,
+    payload: {
+      actor?: string;
+      action?: string;
+      note?: string;
+      approval_status?: string;
+      committee_identity?: {
+        signer_name?: string;
+        signer_role?: string;
+        committee?: string;
+        secret?: string;
+      };
+    },
+  ) => {
+    try {
+      const result = await api.recordModelGovernanceEvent(id, payload);
+      setNotice(`Recorded model governance event v${result.event.version}.`);
+      await refreshLists();
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Model governance update failed.");
+      throw error;
+    }
+  };
+
+  const onModelEdited = async () => {
+    await Promise.all([refreshLists(), refreshCommand()]);
+    setNotice("Model edited and governance snapshot recorded.");
+  };
+
   const onFetchLive = async (symbol: string) => {
     try {
       const result = await api.fetchLive(symbol);
@@ -161,7 +216,18 @@ export default function App() {
       );
     }
     if (activeView === "models") {
-      return <Models models={models} onOpenModel={openModel} onOpenClinic={(id) => { selectModelOnly(id); setActiveView("clinic"); }} />;
+      return (
+        <Models
+          models={models}
+          governance={modelGovernance}
+          templates={modelLibrary}
+          onImportTemplate={onImportTemplate}
+          onRecordGovernance={onRecordModelGovernance}
+          onModelEdited={onModelEdited}
+          onOpenModel={openModel}
+          onOpenClinic={(id) => { selectModelOnly(id); setActiveView("clinic"); }}
+        />
+      );
     }
     if (activeView === "opportunities") {
       return (
@@ -188,6 +254,21 @@ export default function App() {
     if (activeView === "clinic") {
       return <PortfolioClinic models={models} selectedModel={selectedModel} onSelectModel={selectModelOnly} />;
     }
+    if (activeView === "risk") {
+      return <RiskAnalytics models={models} selectedModel={selectedModel} onSelectModel={selectModelOnly} />;
+    }
+    if (activeView === "evidence") {
+      return (
+        <EvidenceLab
+          tickers={tickers}
+          models={models}
+          selectedInstrument={selectedInstrument}
+          selectedModel={selectedModel}
+          onSelectInstrument={selectInstrumentOnly}
+          onSelectModel={selectModelOnly}
+        />
+      );
+    }
     if (activeView === "reports") {
       return (
         <Reports
@@ -200,6 +281,12 @@ export default function App() {
           dataStatus={dataStatus}
         />
       );
+    }
+    if (activeView === "data-quality") {
+      return <DataQuality />;
+    }
+    if (activeView === "journal") {
+      return <SignalJournal />;
     }
     return (
       <Analysis

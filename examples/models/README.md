@@ -14,10 +14,11 @@ across 2026 forward-looking themes:
 - Healthcare, longevity, and medical technology.
 - Quality-growth plus low-volatility and high-quality bonds.
 - Real assets and inflation/geopolitical resilience.
+- Cash and defensive reserve exposure.
 
-Sources used for theme selection include BlackRock/iShares 2026 thematic
-outlooks, Morgan Stanley 2026 megatrends, J.P. Morgan 2026 outlook commentary,
-and Vanguard 2026 fixed-income/equity valuation outlooks.
+The React Models workspace also exposes these as governed library templates
+with mandates, benchmarks, rebalance rules, risk limits, and provenance fields.
+Use the library import action, or import the CSVs manually.
 
 To import manually:
 
@@ -27,6 +28,14 @@ curl -F file=@examples/models/ai-infrastructure-compounders.csv \
   -F mandate=pure_growth \
   -F context="Starter research model; analysis only." \
   http://127.0.0.1:5057/api/model/upload
+```
+
+Or use the library API:
+
+```bash
+curl -X POST http://127.0.0.1:5057/api/model-library/import \
+  -H "Content-Type: application/json" \
+  -d '{"slug":"ai-infrastructure"}'
 ```
 
 Before using a template, fetch live histories for every holding or run Helios

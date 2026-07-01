@@ -1,10 +1,11 @@
 from io import BytesIO
 
+import pandas as pd
 import pytest
 
 import app as helios
-from engine import data, portfolio
-from tests.conftest import price_series
+from engine import data, persistence, portfolio
+from tests.conftest import price_csv, price_series
 
 
 @pytest.fixture()
@@ -77,18 +78,31 @@ def test_live_malformed_json_returns_json_error(client, monkeypatch):
     assert "error" in resp.get_json()
 
 
-def test_auto_live_config_is_disabled_without_symbols(monkeypatch):
+def test_auto_live_config_defaults_to_core_universe(monkeypatch):
     monkeypatch.delenv("HELIOS_AUTO_LIVE_SYMBOLS", raising=False)
+    monkeypatch.setenv("HELIOS_DB_PATH", ".helios/test-auto-live.db")
+
+    config = helios._auto_live_config()
+
+    assert config["enabled"] is True
+    assert config["source"] == "core"
+    assert {"SPY", "QQQ", "AAPL"} <= set(config["symbols"])
+
+
+def test_auto_live_config_can_be_explicitly_disabled(monkeypatch):
+    monkeypatch.setenv("HELIOS_AUTO_LIVE_SYMBOLS", "off")
 
     config = helios._auto_live_config()
 
     assert config["enabled"] is False
     assert config["symbols"] == []
+    assert config["source"] == "off"
 
 
 def test_auto_live_config_parses_core_universe_and_interval(monkeypatch):
     monkeypatch.setenv("HELIOS_AUTO_LIVE_SYMBOLS", "core")
     monkeypatch.setenv("HELIOS_AUTO_LIVE_REFRESH_SECONDS", "30")
+    monkeypatch.setenv("HELIOS_AUTO_LIVE_MAX_WORKERS", "99")
     monkeypatch.setenv("HELIOS_AUTO_LIVE_PERIOD", "1y")
 
     config = helios._auto_live_config()
@@ -96,6 +110,7 @@ def test_auto_live_config_parses_core_universe_and_interval(monkeypatch):
     assert config["enabled"] is True
     assert config["period"] == "1y"
     assert config["interval_seconds"] == 60
+    assert config["max_workers"] == 16
     assert {"SPY", "QQQ", "AAPL"} <= set(config["symbols"])
 
 
@@ -110,6 +125,161 @@ def test_data_status_includes_auto_live_configuration(client, monkeypatch):
     assert auto_live["enabled"] is True
     assert auto_live["symbols"] == ["SPY", "QQQ"]
     assert auto_live["interval_seconds"] == 120
+    assert auto_live["max_workers"] == 6
+
+
+def test_data_quality_dashboard_reports_institutional_issue_categories(client, monkeypatch, tmp_path):
+    monkeypatch.setenv("HELIOS_DB_PATH", str(tmp_path / "helios.db"))
+    persistence.reset_store_for_tests()
+    store = persistence.get_store()
+    assert store.available is True
+
+    short_live = pd.DataFrame({"close": price_series(days=45).values}, index=price_series(days=45).index)
+    data.register(data.Instrument("SHORTLIVE", "Short Live", short_live, "live", []))
+    store.record_refresh(
+        symbol="SHORTLIVE",
+        status="error",
+        rows_added=0,
+        message="upstream timeout during quality check",
+        source="live",
+    )
+    upload = client.post(
+        "/api/upload",
+        data={
+            "file": (BytesIO(price_csv(days=260)), "quality-upload.csv"),
+            "symbol": "QUALUP",
+            "name": "Quality Upload",
+        },
+        content_type="multipart/form-data",
+    )
+    assert upload.status_code == 200
+    model_upload = client.post(
+        "/api/model/upload",
+        data={
+            "file": (BytesIO(b"Ticker,Weight\nSHORTLIVE,35\nAAPL,35\nMISSINGQ,30\n"), "quality-model.csv"),
+            "name": "Quality Model",
+            "mandate": "balanced",
+        },
+        content_type="multipart/form-data",
+    )
+    assert model_upload.status_code == 200
+
+    resp = client.get("/api/data-quality")
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["research_ready"] is False
+    assert body["summary"]["issue_count"] >= 5
+    assert body["summary"]["research_ready_count"] >= 1
+    assert body["thresholds"]["min_research_rows"] == 60
+    categories = {issue["category"] for issue in body["issues"]}
+    assert {
+        "stale_symbols",
+        "short_histories",
+        "refresh_failures",
+        "missing_data",
+        "coverage_gaps",
+        "source_conflicts",
+    } <= categories
+    assert any(row["symbol"] == "SHORTLIVE" and row["is_stale"] for row in body["symbols"])
+    assert any(row["symbol"] == "SHORTLIVE" and not row["research_ready"] for row in body["symbols"])
+    assert any(row["symbol"] == "MISSINGQ" for row in body["missing_data"])
+    assert any(row["model_name"] == "Quality Model" for row in body["coverage_gaps"])
+    assert any(row["symbol"] == "SHORTLIVE" for row in body["refresh_failures"])
+    assert "Analysis only" in body["disclaimer"]
+
+
+def test_data_quality_thresholds_are_configurable_and_refresh_observability_is_explicit(client, monkeypatch, tmp_path):
+    monkeypatch.setenv("HELIOS_DB_PATH", str(tmp_path / "helios.db"))
+    monkeypatch.setenv("HELIOS_DATA_QUALITY_STALE_DAYS", "999")
+    monkeypatch.setenv("HELIOS_DATA_QUALITY_MIN_RESEARCH_ROWS", "100")
+    monkeypatch.setenv("HELIOS_DATA_QUALITY_INSTITUTIONAL_ROWS", "300")
+    persistence.reset_store_for_tests()
+
+    live_history = price_series(days=260)
+    data.register(data.Instrument("OBSERVE", "Observed Live", pd.DataFrame({"close": live_history}), "live", []))
+
+    resp = client.get("/api/data-quality")
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["thresholds"] == {
+        "stale_days": 999,
+        "min_research_rows": 100,
+        "institutional_history_rows": 300,
+    }
+    assert body["threshold_config"]["source"] == "environment"
+    assert body["summary"]["refresh_observability_gap_count"] >= 1
+    categories = {issue["category"] for issue in body["issues"]}
+    assert "refresh_observability_gaps" in categories
+    observe = next(row for row in body["symbols"] if row["symbol"] == "OBSERVE")
+    assert observe["research_ready"] is True
+    assert observe["is_stale"] is False
+    assert observe["is_short"] is True
+    assert observe["freshness_basis"] == "price_history_last_date"
+    assert observe["refresh_evidence"]["has_refresh_log"] is False
+    assert any(row["symbol"] == "OBSERVE" for row in body["refresh_observability_gaps"])
+    assert body["refresh_observability"]["gap_count"] >= 1
+
+
+def test_data_quality_alerts_track_active_and_resolved_research_readiness(client, monkeypatch, tmp_path):
+    monkeypatch.setenv("HELIOS_DB_PATH", str(tmp_path / "helios.db"))
+    monkeypatch.setenv("HELIOS_DATA_QUALITY_STALE_DAYS", "999")
+    persistence.reset_store_for_tests()
+    store = persistence.get_store()
+    assert store.available is True
+
+    data.parse_csv(price_csv(days=260), "REAL1", "Real One", source_filename="real-one.csv")
+    model_upload = client.post(
+        "/api/model/upload",
+        data={
+            "file": (BytesIO(b"Ticker,Weight\nREAL1,60\nNEEDPRICE,40\n"), "alert-model.csv"),
+            "name": "Alert Model",
+            "mandate": "balanced",
+        },
+        content_type="multipart/form-data",
+    )
+    assert model_upload.status_code == 200
+
+    first = client.get("/api/data-quality")
+
+    assert first.status_code == 200
+    first_body = first.get_json()
+    first_alerts = first_body["alerts"]
+    assert first_alerts["tracking_available"] is True
+    assert first_alerts["summary"]["active_count"] >= 3
+    assert first_alerts["summary"]["new_count"] >= 3
+    active_categories = {alert["category"] for alert in first_alerts["active"]}
+    assert {"coverage_gaps", "missing_data", "research_readiness"} <= active_categories
+    readiness_alert = next(alert for alert in first_alerts["active"] if alert["category"] == "research_readiness")
+    assert readiness_alert["status"] == "active"
+    assert readiness_alert["first_seen_at"]
+    assert readiness_alert["last_seen_at"]
+    assert readiness_alert["occurrence_count"] == 1
+    assert "research-ready" in readiness_alert["detail"].lower()
+
+    second = client.get("/api/data-quality")
+
+    assert second.status_code == 200
+    second_alerts = second.get_json()["alerts"]
+    assert second_alerts["summary"]["new_count"] == 0
+    assert next(alert for alert in second_alerts["active"] if alert["id"] == readiness_alert["id"])["occurrence_count"] == 2
+
+    data.parse_csv(price_csv(days=260), "NEEDPRICE", "Need Price", source_filename="need-price.csv")
+
+    resolved = client.get("/api/data-quality")
+
+    assert resolved.status_code == 200
+    resolved_body = resolved.get_json()
+    assert resolved_body["research_ready"] is True
+    resolved_alerts = resolved_body["alerts"]
+    assert resolved_alerts["summary"]["resolved_count"] >= 3
+    resolved_categories = {alert["category"] for alert in resolved_alerts["resolved"]}
+    assert {"coverage_gaps", "missing_data", "research_readiness"} <= resolved_categories
+    resolved_readiness = next(alert for alert in resolved_alerts["resolved"] if alert["id"] == readiness_alert["id"])
+    assert resolved_readiness["status"] == "resolved"
+    assert resolved_readiness["resolved_at"]
+    assert resolved_alerts["summary"]["active_count"] == 0
 
 
 def test_model_upload_and_analyze_smoke(client, monkeypatch):

@@ -1,11 +1,16 @@
 import sqlite3
+import threading
+import time
 from io import BytesIO
 
 import pandas as pd
+import pytest
 
 import app as helios
 from engine import data, persistence, portfolio
 from tests.conftest import price_csv, price_series
+
+SQLITE_HEADER = b"SQLite format 3\x00"
 
 
 def _use_db(monkeypatch, tmp_path):
@@ -22,13 +27,14 @@ def _client():
 
 
 def test_sqlite_schema_is_created_with_version(monkeypatch, tmp_path):
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION", "off")
     store = _use_db(monkeypatch, tmp_path)
 
     with sqlite3.connect(store.path) as conn:
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
 
-    assert {"instruments", "price_history", "models", "holdings", "refresh_log"} <= tables
+    assert {"instruments", "price_history", "models", "holdings", "refresh_log", "signal_journal"} <= tables
     assert version == persistence.SCHEMA_VERSION
 
 
@@ -142,6 +148,41 @@ def test_auto_live_bootstrap_fetches_and_persists_live_symbols(monkeypatch, tmp_
     assert store.refresh_log(limit=2)[0]["status"] == "ok"
 
 
+def test_auto_live_bootstrap_fetches_symbols_concurrently(monkeypatch, tmp_path):
+    store = _use_db(monkeypatch, tmp_path)
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+    calls = []
+
+    def fake_fetch(symbol, period="2y", persist=True):
+        nonlocal active, max_active
+        with lock:
+            calls.append((symbol, period, persist))
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.05)
+        with lock:
+            active -= 1
+        return data.Instrument(symbol, f"{symbol} Live", _ohlcv(days=95), "live", [])
+
+    result = data.ensure_live_symbols(
+        ["AAPL", "SPY", "MSFT", "NVDA"],
+        period="1y",
+        fetcher=fake_fetch,
+        max_workers=4,
+    )
+
+    assert result["requested"] == ["AAPL", "SPY", "MSFT", "NVDA"]
+    assert [item["symbol"] for item in result["results"]] == result["requested"]
+    assert result["refreshed"] == 4
+    assert result["failed"] == 0
+    assert max_active > 1
+    assert {call[0] for call in calls} == set(result["requested"])
+    assert all(call[1:] == ("1y", False) for call in calls)
+    assert store.status()["real_instrument_count"] == 4
+
+
 def test_auto_live_bootstrap_keeps_sample_when_fetch_fails(monkeypatch, tmp_path):
     store = _use_db(monkeypatch, tmp_path)
     original = data.get("AAPL")
@@ -250,15 +291,169 @@ def test_raw_upload_content_and_secret_tokens_are_not_stored(monkeypatch, tmp_pa
         "api_key=SECRET_TOKEN_SHOULD_NOT_STORE",
     )
 
-    with sqlite3.connect(store.path) as conn:
-        text = "\n".join(
-            str(row)
-            for table in ("instruments", "models", "holdings", "price_history")
-            for row in conn.execute(f"SELECT * FROM {table}").fetchall()
-        )
+    text = store.path.read_bytes().decode("utf-8", errors="ignore")
 
     assert raw.decode("utf-8") not in text
     assert "SECRET_TOKEN_SHOULD_NOT_STORE" not in text
+
+
+def test_data_quality_alert_tracking_redacts_secret_like_text(monkeypatch, tmp_path):
+    store = _use_db(monkeypatch, tmp_path)
+
+    result = store.sync_data_quality_alerts(
+        [{
+            "id": "data_quality:refresh_failures:SECRET1",
+            "category": "refresh_failures",
+            "severity": "warning",
+            "target": "SECRET1",
+            "detail": "Provider failed with api_key=SECRET_TOKEN_SHOULD_NOT_STORE",
+            "next_step": "Retry refresh after provider recovers.",
+        }],
+        generated_at="2026-07-01T12:00:00+00:00",
+    )
+
+    assert result["tracking_available"] is True
+    assert result["summary"]["active_count"] == 1
+    assert result["active"][0]["status"] == "active"
+    assert "SECRET_TOKEN_SHOULD_NOT_STORE" not in result["active"][0]["detail"]
+    assert "redacted" in result["active"][0]["detail"].lower()
+    assert "SECRET_TOKEN_SHOULD_NOT_STORE" not in store.path.read_bytes().decode("utf-8", errors="ignore")
+
+
+def test_local_persistence_encrypts_sensitive_payloads_when_key_configured(monkeypatch, tmp_path):
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION", "required")
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION_KEY", "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=")
+    store = _use_db(monkeypatch, tmp_path)
+
+    data.parse_csv(price_csv(days=90), "ENC1", "Sensitive Alpha Sleeve", source_filename="sensitive-alpha.csv")
+    portfolio.parse_model_file(
+        b"Ticker,Weight\nENC1,100\n",
+        "private-model.csv",
+        "Private Growth Mandate",
+        "balanced",
+        "client context should be sealed",
+    )
+
+    raw_db = store.path.read_bytes()
+    assert not raw_db.startswith(SQLITE_HEADER)
+    assert b"schema_version" not in raw_db
+    with pytest.raises(sqlite3.DatabaseError):
+        with sqlite3.connect(store.path) as conn:
+            conn.execute("SELECT name FROM sqlite_master").fetchall()
+    assert b"Sensitive Alpha Sleeve" not in raw_db
+    assert b"Private Growth Mandate" not in raw_db
+    assert b"client context should be sealed" not in raw_db
+    assert store.status()["encryption"]["enabled"] is True
+    assert store.status()["encryption"]["required"] is True
+    assert store.status()["encryption"]["at_rest_format"] == "fernet-sqlite-snapshot"
+    assert store.status()["encryption"]["plaintext_lookup_keys"] == []
+
+    data._STORE.pop("ENC1")
+    portfolio._MODELS.clear()
+    data.load_persisted_instruments()
+    portfolio.load_persisted_models()
+
+    assert data.get("ENC1").name == "Sensitive Alpha Sleeve"
+    assert portfolio.all_models()[0].name == "Private Growth Mandate"
+    assert portfolio.all_models()[0].mandate_context == "client context should be sealed"
+
+
+def test_encrypted_snapshot_loader_falls_back_when_deserialize_cannot_open(monkeypatch, tmp_path):
+    source = tmp_path / "source.sqlite"
+    with sqlite3.connect(source) as conn:
+        conn.execute("CREATE TABLE marker(value TEXT NOT NULL)")
+        conn.execute("INSERT INTO marker(value) VALUES ('ok')")
+    payload = source.read_bytes()
+    target = sqlite3.connect(":memory:")
+
+    def fail_deserialize(_conn, _payload):
+        raise sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr(persistence, "_deserialize_sqlite_payload", fail_deserialize)
+
+    loaded = persistence._load_sqlite_payload_into_memory(target, payload, tmp_path)
+
+    value = loaded.execute("SELECT value FROM marker").fetchone()[0]
+    leftovers = list(tmp_path.glob(".helios-decrypted-*"))
+    loaded.close()
+
+    assert value == "ok"
+    assert leftovers == []
+
+
+def test_encrypted_snapshot_loader_validates_deserialize_before_accepting(monkeypatch, tmp_path):
+    source = tmp_path / "source.sqlite"
+    with sqlite3.connect(source) as conn:
+        conn.execute("CREATE TABLE marker(value TEXT NOT NULL)")
+        conn.execute("INSERT INTO marker(value) VALUES ('ok')")
+    payload = source.read_bytes()
+    target = sqlite3.connect(":memory:")
+
+    def false_success(_conn, _payload):
+        return None
+
+    def fail_validation(_conn):
+        raise sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr(persistence, "_deserialize_sqlite_payload", false_success)
+    monkeypatch.setattr(persistence, "_validate_loaded_sqlite_payload", fail_validation)
+
+    loaded = persistence._load_sqlite_payload_into_memory(target, payload, tmp_path)
+
+    value = loaded.execute("SELECT value FROM marker").fetchone()[0]
+    loaded.close()
+
+    assert value == "ok"
+
+
+def test_encryption_migrates_existing_plaintext_sqlite_file(monkeypatch, tmp_path):
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION", "off")
+    store = _use_db(monkeypatch, tmp_path)
+    data.parse_csv(price_csv(days=90), "MIGRATE", "Migration Test", source_filename="migrate.csv")
+    assert store.path.read_bytes().startswith(SQLITE_HEADER)
+
+    data._STORE.pop("MIGRATE")
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION", "required")
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION_KEY", "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=")
+    persistence.reset_store_for_tests()
+    encrypted_store = persistence.get_store()
+    data.load_persisted_instruments()
+
+    raw_db = encrypted_store.path.read_bytes()
+    assert encrypted_store.available is True
+    assert data.get("MIGRATE").name == "Migration Test"
+    assert not raw_db.startswith(SQLITE_HEADER)
+    assert b"Migration Test" not in raw_db
+
+
+def test_required_encryption_without_key_fails_closed(monkeypatch, tmp_path):
+    monkeypatch.setenv("HELIOS_DB_PATH", str(tmp_path / "helios.db"))
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION", "required")
+    monkeypatch.delenv("HELIOS_DB_ENCRYPTION_KEY", raising=False)
+    persistence.reset_store_for_tests()
+
+    store = persistence.get_store()
+
+    assert store.available is False
+    assert "encryption" in store.warning.lower()
+    assert store.status()["encryption"]["required"] is True
+
+
+def test_encrypted_database_does_not_load_as_plaintext(monkeypatch, tmp_path):
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION", "required")
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION_KEY", "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=")
+    store = _use_db(monkeypatch, tmp_path)
+    data.parse_csv(price_csv(days=90), "LOCKED", "Locked Store", source_filename="locked.csv")
+    data._STORE.pop("LOCKED")
+
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION", "off")
+    monkeypatch.delenv("HELIOS_DB_ENCRYPTION_KEY", raising=False)
+    persistence.reset_store_for_tests()
+    plaintext_store = persistence.get_store()
+
+    assert plaintext_store.load_instruments() == []
+    assert plaintext_store.available is False
+    assert "encrypted sqlite persistence" in plaintext_store.warning.lower()
 
 
 def _ohlcv(days=90):

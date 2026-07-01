@@ -15,6 +15,7 @@ interface AICopilotPanelProps {
   payload: Record<string, unknown> | null;
   dataMode?: string;
   actions: CopilotAction[];
+  onResult?: (result: AIResult) => void;
 }
 
 export function AICopilotPanel({
@@ -23,6 +24,7 @@ export function AICopilotPanel({
   payload,
   dataMode,
   actions,
+  onResult,
 }: AICopilotPanelProps) {
   const [status, setStatus] = useState<AIStatusResponse | null>(null);
   const [result, setResult] = useState<AIResult | null>(null);
@@ -82,6 +84,7 @@ export function AICopilotPanel({
     try {
       const response = await action.run(payload, regenerate);
       setResult(response.result);
+      onResult?.(response.result);
       setStatus(response.status);
     } catch (err) {
       setResult(null);

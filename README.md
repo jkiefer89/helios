@@ -73,6 +73,13 @@ starts Helios.
 | `HELIOS_AUTH` | `1` | `0` disables the password gate (localhost dev only) |
 | `HELIOS_RF` | `0.02` | Risk-free / CD benchmark rate used by mandates and projections |
 | `HELIOS_DB_PATH` | `.helios/helios.db` | Local SQLite store for parsed live/uploaded data (`off` disables persistence) |
+| `HELIOS_DB_ENCRYPTION` | `auto` | Encrypt sensitive local persistence payloads; use `required` to fail closed without a key |
+| `HELIOS_DB_ENCRYPTION_KEY` | empty | Optional Fernet key for persistence encryption; keep it local and never commit it |
+| `HELIOS_DB_ENCRYPTION_KEY_PATH` | `.helios/helios.key` | Optional local key-file path when `HELIOS_DB_ENCRYPTION=auto` |
+| `HELIOS_AUTO_LIVE_SYMBOLS` | `core` | Automatic live polling universe; use `off` to disable or provide tickers/presets |
+| `HELIOS_DATA_QUALITY_STALE_DAYS` | `7` | Data Quality stale-symbol diagnostic threshold |
+| `HELIOS_DATA_QUALITY_MIN_RESEARCH_ROWS` | `60` | Minimum valid rows for research-readiness diagnostics |
+| `HELIOS_DATA_QUALITY_INSTITUTIONAL_ROWS` | `252` | Institutional history target for short-history diagnostics |
 
 ```bash
 HELIOS_USER=jkiefer HELIOS_PASSWORD='choose-a-strong-one' ./run.sh
@@ -118,6 +125,9 @@ the backend's demo, mixed, or blocked provenance state.
 | **Mandates** | Tag each model with its purpose (pure growth, income, CD alternative, balanced, capital preservation); the mandate **intentionally** tilts the signal weights, risk budgets and forecast anchor |
 | **Long-horizon projection** | 5–90 day tactical signal **plus** 6-month / 1-year / 3-year / 5-year strategic value cones (terminal value, CAGR bands, probability of meeting the mandate, drawdown-breach odds) |
 | **Conviction rationale** | Every signal explains itself: per-component clauses with the actual numbers, the mandate tilt, the vol penalty, and honesty caveats |
+| **Signal Journal** | Dedicated paper-performance workspace for signal history, pending/measured forward results, hit rate, benchmark comparison, model-by-model evidence and drift over time |
+| **Report Export + History** | Advisor report snapshots are saved locally with branded HTML/PDF exports, source/date range/row counts, model metadata, caveats and optional AI narrative |
+| **Institutional Data Quality** | Dedicated research-readiness dashboard for stale symbols, missing data, short histories, source conflicts, refresh failures and model coverage gaps |
 | **Insights** | 12 rule-based suggestions per model — concentration, mandate fit, drawdown, correlation, forecast skill, data honesty — each with a concrete action |
 
 ### Data quality modes
@@ -135,14 +145,24 @@ Helios separates interface demos from advisor-grade research:
 
 Helios creates a small SQLite database on first use. It stores parsed
 live/uploaded price history, instrument provenance, uploaded model metadata,
-holdings, and live-refresh logs. It does **not** store raw uploaded files, API
+holdings, live-refresh logs, Signal Journal entries, and saved advisor report
+snapshots. It does **not** store raw uploaded files, API
 keys, secrets, browser artifacts, generated builds, screenshots, or sample data
 as real research evidence. The database path is controlled by `HELIOS_DB_PATH`;
 set `HELIOS_DB_PATH=off` for an ephemeral session.
 
-The SQLite file stays on your machine and is not encrypted by Helios. Keep it on
-a trusted local disk and protect it the same way you would protect other client
-research files.
+Local persistence encryption is enabled by default. When
+`HELIOS_DB_ENCRYPTION=auto`, Helios creates a local `.helios/helios.key` file if
+no `HELIOS_DB_ENCRYPTION_KEY` is provided, keeps the active SQLite database in
+process memory, and writes only a Fernet-encrypted database snapshot to disk.
+Older plaintext SQLite files are migrated into the encrypted snapshot at startup.
+Use
+`HELIOS_DB_ENCRYPTION=required` for fail-closed operation when a configured key
+must be present. In encrypted mode the on-disk `.db` file is not a readable
+SQLite database and does not expose schema, lookup keys, model holdings, price
+values, refresh logs, journal results, or metadata at rest. Keep the local key
+outside Git and protect/back it up like other client research secrets; without
+that key, the encrypted local research store cannot be opened.
 
 The React **Real Data Center** shows database availability, persisted
 instrument/model counts, date ranges, row counts, live-refresh status, model
@@ -150,11 +170,36 @@ coverage, missing tickers, and copyable import templates. Refresh controls only
 refresh symbols already imported as `live`; bundled samples and uploaded CSVs
 are never silently promoted into live market data.
 
-For a no-upload live workflow, enable automatic polling before startup:
+The React **Data Quality** workspace adds an institutional readiness screen for
+stale symbols, short histories, missing model holdings, source conflicts,
+refresh failures, refresh-observability gaps, coverage gaps, and overall
+research-ready status. Thresholds are configurable through environment
+variables, and live histories are checked for persisted provider refresh
+evidence so the dashboard can flag when freshness cannot be audited from the
+local log. It is a diagnostic surface only; it does not change opportunity
+scoring, strategy evidence, or provenance gates.
+
+The **Reports** workspace can save an analysis-only snapshot of the current
+instrument or model report. Saved snapshots are local persistence records and
+can be reopened as an escaped HTML page or downloaded as a branded PDF evidence
+pack. The history API reports whether the local snapshot store is durable and
+encrypted at rest.
+Snapshots include the report source, input date range, row count, source counts,
+model metadata where applicable, warnings/caveats, and the analysis-only
+disclaimer. If the optional AI Copilot has already generated a narrative in the
+current report session, the saved snapshot can include that narrative. If the
+advisor leaves **Include AI narrative when available** enabled and a provider is
+configured, save can generate a sanitized report narrative at snapshot time.
+Provider failures do not block deterministic report saving, and every exported
+AI narrative remains marked for advisor review.
+
+For a no-upload live workflow, automatic polling defaults to the built-in
+`core` liquid advisor universe. To choose a different universe before startup:
 
 ```bash
 HELIOS_AUTO_LIVE_SYMBOLS=core \
 HELIOS_AUTO_LIVE_REFRESH_SECONDS=300 \
+HELIOS_AUTO_LIVE_MAX_WORKERS=6 \
 ./run.sh
 ```
 
@@ -162,9 +207,21 @@ HELIOS_AUTO_LIVE_REFRESH_SECONDS=300 \
 yfinance, persists those histories locally, and refreshes them every five
 minutes. Use `HELIOS_AUTO_LIVE_SYMBOLS=starter_models` to cover every holding in
 the example model templates under `examples/models/`. You can also provide a
-comma-separated ticker list. This is a polling workflow using the latest
-available provider data, not a streaming quote feed; failed provider calls leave
-existing/sample data untouched and logged as failed refresh attempts.
+comma-separated ticker list. Live polling fetches symbols with bounded parallel
+network workers (`HELIOS_AUTO_LIVE_MAX_WORKERS`, default `6`, max `16`) and then
+persists the validated provider histories sequentially. This is a polling
+workflow using the latest available provider data, not a streaming quote feed;
+failed provider calls leave existing/sample data untouched and logged as failed
+refresh attempts. Successful live refreshes also re-check pending Signal Journal
+entries, so paper forward results are measured automatically once refreshed
+history covers the original signal horizon.
+
+The React **Signal Journal** workspace shows logged signal history, pending
+versus measured outcomes, paper hit rate, benchmark-relative alpha,
+model-by-model evidence, and drift over time. It is paper tracking only and
+never represents live orders, brokerage execution, or a performance guarantee.
+
+Set `HELIOS_AUTO_LIVE_SYMBOLS=off` to disable automatic polling explicitly.
 
 ### Optional AI Copilot
 
@@ -241,6 +298,14 @@ Prices for each holding are resolved from samples/uploads/cache, then live
 `yfinance` when available, then deterministic simulation, with every source
 flagged.
 
+The React **Models** workspace also includes a governed starter model library:
+AI infrastructure, quality compounders, defense/security, energy/grid,
+healthcare innovation, inflation hedges, and cash/defensive reserve. Each
+template has real public tickers, a mandate, benchmark, rebalance rule, risk
+limits, and provenance/caveats. These are workflow templates, not investment
+advice or managed account models, and Helios keeps model research blocked until
+every analyzed holding has eligible live or uploaded history.
+
 ```csv
 Ticker,Weight
 AAPL,30
@@ -275,7 +340,7 @@ serve.py              production entrypoint — waitress on the local network
 app.py                Flask app + JSON API + Basic-Auth gate + payload sanitation
 frontend/            React + Vite + TypeScript research terminal
   src/api/           typed client for existing Flask APIs
-  src/views/         Command Center, Opportunity Radar, Strategy Lab, Clinic, Reports
+  src/views/         Command Center, Opportunity Radar, Strategy Lab, Clinic, Reports, Data Quality
 engine/
   data.py             data store, samples, CSV import, live fetch, holding resolution
   edgar.py            SEC EDGAR client: ticker→registrant, N-PORT holdings, former names
@@ -304,6 +369,8 @@ static/styles.css     legacy dashboard theme
 |----------|---------|
 | `GET /api/command-center` | Pro dashboard payload with regime, real-data opportunities, risks, model alerts and research queue |
 | `GET /api/data/status` | SQLite/database health, real-data counts, model coverage, missing tickers and refresh log |
+| `GET /api/data-quality` | institutional research-readiness dashboard: stale symbols, missing data, short histories, source conflicts, refresh failures and coverage gaps |
+| `GET /api/signal-journal` | local paper-performance journal with recorded signals, summary hit-rate metrics, benchmark comparison, model evidence and drift |
 | `POST /api/data/refresh` | refresh existing live instruments (`{ "symbol": "AAPL" }` or `{ "all": true }`) |
 | `GET /api/opportunities` | Opportunity Radar rankings; returns no placeholder rows when real data is unavailable |
 | `GET /api/strategy/analyze` | Strategy Lab for a single instrument with no-lookahead evidence |
@@ -314,8 +381,14 @@ static/styles.css     legacy dashboard theme
 | `GET /api/model/forward?id=ID` | Forward expected return from look-through fundamentals via a building-block CMA (yield + earnings growth + valuation reversion), coverage-weighted toward the mandate anchor — needs no price history, with every block and coverage % exposed |
 | `GET /api/report/instrument` | Analysis-only advisor report for an instrument |
 | `GET /api/report/model` | Analysis-only advisor report for a model |
+| `GET /api/report/snapshots` | list saved local report snapshots and export links |
+| `POST /api/report/snapshots` | save a deterministic report snapshot; optional AI narrative can be supplied or generated from sanitized payloads when explicitly requested |
+| `GET /api/report/snapshots/<id>.html` | escaped HTML export for a saved report snapshot |
+| `GET /api/report/snapshots/<id>.pdf` | branded PDF evidence-pack export for a saved report snapshot |
 | `GET /api/mandates` | list mandate presets for the model-import form |
 | `GET /api/models` | list imported portfolio models |
+| `GET /api/model-library` | governed starter model templates with mandate, benchmark, rebalance, risk-limit and provenance metadata |
+| `POST /api/model-library/import` | import a governed starter template by slug; still requires real holding histories before real model research |
 | `POST /api/model/upload` | import an Excel/CSV model (multipart `file`, `name`, `mandate`, `context`) |
 | `GET /api/model/analyze?id=ID&horizon=H` | full model analysis (`H` = 5–90 or `6M`/`1Y`/`3Y`/`5Y`) |
 | `GET /api/tickers` | list single instruments + last price/change |

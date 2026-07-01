@@ -10,6 +10,7 @@ column; 'open'/'high'/'low'/'volume' are included when known.
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import io
 import hashlib
 import re
@@ -24,6 +25,8 @@ import pandas as pd
 # without bound. Keep it high enough for a serious multi-theme research
 # universe plus model holdings; samples are never counted against this limit.
 MAX_USER_INSTRUMENTS = 250
+DEFAULT_LIVE_REFRESH_WORKERS = 6
+MAX_LIVE_REFRESH_WORKERS = 16
 # Tickers only ever contain these characters (e.g. BRK-B, BTC-USD, ^GSPC, EURUSD=X).
 # Sanitizing at the boundary neutralizes XSS-in-symbol and yfinance URL injection.
 _SYMBOL_RE = re.compile(r"[^A-Z0-9.\-=^]")
@@ -352,6 +355,7 @@ def refresh_live_symbol(symbol: str, fetcher=None) -> dict:
         after_dates = set(pd.to_datetime(inst.df.index).normalize())
         rows_added = max(0, len(after_dates - before_dates))
         _persist_instrument(inst, adjusted=True, metadata={"imported_via": "live_refresh"})
+        _refresh_signal_journal_forward_results()
         message = f"Refreshed {len(inst.df)} live rows."
         _record_refresh(sym, "ok", rows_added, message)
         return {"symbol": sym, "status": "ok", "rows_added": rows_added, "rows": len(inst.df), "message": message}
@@ -382,7 +386,23 @@ def expand_live_symbols(raw: str | list[str] | tuple[str, ...] | None) -> list[s
     return out[:MAX_USER_INSTRUMENTS]
 
 
-def ensure_live_symbols(symbols: list[str] | tuple[str, ...], period: str = "2y", fetcher=None) -> dict:
+def _live_refresh_worker_count(max_workers: int | None, n_symbols: int) -> int:
+    if n_symbols <= 0:
+        return 0
+    try:
+        requested = int(max_workers or DEFAULT_LIVE_REFRESH_WORKERS)
+    except (TypeError, ValueError):
+        requested = DEFAULT_LIVE_REFRESH_WORKERS
+    bounded = max(1, min(MAX_LIVE_REFRESH_WORKERS, requested))
+    return min(n_symbols, bounded)
+
+
+def ensure_live_symbols(
+    symbols: list[str] | tuple[str, ...],
+    period: str = "2y",
+    fetcher=None,
+    max_workers: int | None = None,
+) -> dict:
     """Fetch or refresh a configured live universe and persist real provider data.
 
     Existing sample instruments are intentionally replaced only after the live
@@ -390,8 +410,9 @@ def ensure_live_symbols(symbols: list[str] | tuple[str, ...], period: str = "2y"
     remains in place and is not promoted to real research evidence.
     """
     requested = expand_live_symbols(list(symbols))
-    results = []
-    for symbol in requested:
+    worker_count = _live_refresh_worker_count(max_workers, len(requested))
+
+    def fetch_one(symbol: str) -> dict:
         before = get(symbol)
         before_dates = set()
         if before is not None and before.source == "live":
@@ -405,22 +426,42 @@ def ensure_live_symbols(symbols: list[str] | tuple[str, ...], period: str = "2y"
                 inst = fetcher(symbol, period=period, persist=False)
                 if not isinstance(inst, Instrument):
                     raise RuntimeError("Live provider returned an invalid payload.")
-                inst.symbol = symbol
-                inst.source = "live"
-                register(inst)
+            inst.symbol = symbol
+            inst.source = "live"
+            return {"symbol": symbol, "status": "ok", "instrument": inst, "before_dates": before_dates}
+        except Exception as exc:
+            message = str(exc) or "Auto live update failed."
+            return {"symbol": symbol, "status": "error", "rows_added": 0, "message": message}
+
+    if worker_count > 1:
+        with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="helios-live") as executor:
+            fetched = list(executor.map(fetch_one, requested))
+    else:
+        fetched = [fetch_one(symbol) for symbol in requested]
+
+    results = []
+    for item in fetched:
+        symbol = item["symbol"]
+        if item["status"] == "ok":
+            inst = item["instrument"]
+            register(inst)
             after_dates = set(pd.to_datetime(inst.df.index).normalize())
+            before_dates = item["before_dates"]
             rows_added = max(0, len(after_dates - before_dates)) if before_dates else len(after_dates)
             _persist_instrument(inst, adjusted=True, metadata={"period": period, "imported_via": "auto_live"})
             _record_refresh(symbol, "ok", rows_added, f"Auto live updated {len(inst.df)} rows.")
             results.append({"symbol": symbol, "status": "ok", "rows_added": rows_added, "rows": len(inst.df), "message": f"Auto live updated {len(inst.df)} rows."})
-        except Exception as exc:
-            message = str(exc) or "Auto live update failed."
+        else:
+            message = item["message"]
             _record_refresh(symbol, "error", 0, message)
             results.append({"symbol": symbol, "status": "error", "rows_added": 0, "message": message})
+    if any(item["status"] == "ok" for item in results):
+        _refresh_signal_journal_forward_results()
     return {
         "requested": requested,
         "refreshed": sum(1 for item in results if item["status"] == "ok"),
         "failed": sum(1 for item in results if item["status"] == "error"),
+        "max_workers": worker_count,
         "results": results,
     }
 
@@ -458,6 +499,15 @@ def _record_refresh(symbol: str, status: str, rows_added: int, message: str) -> 
             message=message,
             source="live",
         )
+    except Exception:
+        return
+
+
+def _refresh_signal_journal_forward_results() -> None:
+    try:
+        from . import signal_journal
+
+        signal_journal.refresh_forward_results()
     except Exception:
         return
 
