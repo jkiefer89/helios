@@ -141,9 +141,10 @@ _AUTO_LIVE_THREAD: threading.Thread | None = None
 _AUTO_LIVE_STOP = threading.Event()
 _AUTO_LIVE_LAST_RESULT: dict | None = None
 _AUTO_LIVE_LAST_RUN: str | None = None
-DATA_QUALITY_STALE_DAYS = 7
-DATA_QUALITY_MIN_RESEARCH_ROWS = 60
-DATA_QUALITY_MIN_INSTITUTIONAL_ROWS = 252
+DEFAULT_AUTO_LIVE_SYMBOLS = "core"
+DATA_QUALITY_DEFAULT_STALE_DAYS = 7
+DATA_QUALITY_DEFAULT_MIN_RESEARCH_ROWS = 60
+DATA_QUALITY_DEFAULT_INSTITUTIONAL_ROWS = 252
 
 
 def _env_int(name: str, default: int, min_value: int, max_value: int) -> int:
@@ -155,11 +156,15 @@ def _env_int(name: str, default: int, min_value: int, max_value: int) -> int:
 
 
 def _auto_live_config() -> dict:
-    symbols = data.expand_live_symbols(os.environ.get("HELIOS_AUTO_LIVE_SYMBOLS"))
+    raw_symbols = os.environ.get("HELIOS_AUTO_LIVE_SYMBOLS")
+    if raw_symbols is None or not raw_symbols.strip():
+        raw_symbols = "" if os.environ.get("HELIOS_DB_PATH") == "off" else DEFAULT_AUTO_LIVE_SYMBOLS
+    symbols = data.expand_live_symbols(raw_symbols)
     return {
         "enabled": bool(symbols),
         "live_available": data.HAS_YF,
         "symbols": symbols,
+        "source": raw_symbols,
         "period": (os.environ.get("HELIOS_AUTO_LIVE_PERIOD") or "2y").strip() or "2y",
         "interval_seconds": _env_int("HELIOS_AUTO_LIVE_REFRESH_SECONDS", 300, 60, 86_400),
         "max_workers": _env_int(
@@ -1557,14 +1562,52 @@ def _data_status_payload() -> dict:
     }
 
 
+def _data_quality_thresholds() -> dict[str, int]:
+    min_research_rows = _env_int(
+        "HELIOS_DATA_QUALITY_MIN_RESEARCH_ROWS",
+        DATA_QUALITY_DEFAULT_MIN_RESEARCH_ROWS,
+        20,
+        10_000,
+    )
+    institutional_rows = _env_int(
+        "HELIOS_DATA_QUALITY_INSTITUTIONAL_ROWS",
+        DATA_QUALITY_DEFAULT_INSTITUTIONAL_ROWS,
+        min_research_rows,
+        20_000,
+    )
+    return {
+        "stale_days": _env_int("HELIOS_DATA_QUALITY_STALE_DAYS", DATA_QUALITY_DEFAULT_STALE_DAYS, 1, 3_650),
+        "min_research_rows": min_research_rows,
+        "institutional_history_rows": institutional_rows,
+    }
+
+
+def _data_quality_threshold_config() -> dict:
+    env_names = {
+        "stale_days": "HELIOS_DATA_QUALITY_STALE_DAYS",
+        "min_research_rows": "HELIOS_DATA_QUALITY_MIN_RESEARCH_ROWS",
+        "institutional_history_rows": "HELIOS_DATA_QUALITY_INSTITUTIONAL_ROWS",
+    }
+    return {
+        "source": "environment" if any(os.environ.get(name) for name in env_names.values()) else "defaults",
+        "env": env_names,
+        "range_guards": {
+            "stale_days": "1-3650",
+            "min_research_rows": "20-10000",
+            "institutional_history_rows": "at least min_research_rows, max 20000",
+        },
+    }
+
+
 def _data_quality_payload() -> dict:
+    thresholds = _data_quality_thresholds()
     instruments = data.all_instruments()
     models = portfolio.all_models()
     refresh_logs = persistence.get_store().refresh_log(limit=250)
     refresh_by_symbol = {}
     for row in refresh_logs:
         refresh_by_symbol.setdefault(row["symbol"], row)
-    symbols = [_data_quality_symbol_row(inst, refresh_by_symbol.get(inst.symbol)) for inst in instruments]
+    symbols = [_data_quality_symbol_row(inst, refresh_by_symbol.get(inst.symbol), thresholds) for inst in instruments]
     model_rows = [_data_quality_model_row(mdl) for mdl in models]
     issues = []
     for row in symbols:
@@ -1576,14 +1619,22 @@ def _data_quality_payload() -> dict:
                 f"{row['symbol']} latest data is {row['days_stale']} calendar days old.",
                 "Refresh live data or verify the uploaded date range before current research use.",
             ))
-        if row["source"] != "sample" and row["row_count"] < DATA_QUALITY_MIN_INSTITUTIONAL_ROWS:
-            severity = "blocker" if row["row_count"] < DATA_QUALITY_MIN_RESEARCH_ROWS else "warning"
+        if row["source"] != "sample" and row["row_count"] < thresholds["institutional_history_rows"]:
+            severity = "blocker" if row["row_count"] < thresholds["min_research_rows"] else "warning"
             issues.append(_quality_issue(
                 "short_histories",
                 severity,
                 row["symbol"],
-                f"{row['symbol']} has {row['row_count']} rows; institutional review target is {DATA_QUALITY_MIN_INSTITUTIONAL_ROWS}.",
+                f"{row['symbol']} has {row['row_count']} rows; institutional review target is {thresholds['institutional_history_rows']}.",
                 "Fetch/upload a longer adjusted history before relying on model evidence.",
+            ))
+        if row["refresh_evidence"]["requires_refresh_log"] and not row["refresh_evidence"]["has_refresh_log"]:
+            issues.append(_quality_issue(
+                "refresh_observability_gaps",
+                "warning",
+                row["symbol"],
+                f"{row['symbol']} is marked live but has no persisted provider refresh attempt in the local log.",
+                "Refresh the symbol or enable automatic live polling so freshness evidence is auditable.",
             ))
     for row in refresh_logs:
         if str(row.get("status") or "").lower() == "error":
@@ -1643,13 +1694,25 @@ def _data_quality_payload() -> dict:
     warnings = sum(1 for issue in issues if issue["severity"] == "warning")
     research_ready_symbols = [row for row in symbols if row["research_ready"]]
     research_ready_models = [row for row in model_rows if row["research_ready"]]
+    refresh_observability_gaps = [
+        row for row in symbols
+        if row["refresh_evidence"]["requires_refresh_log"] and not row["refresh_evidence"]["has_refresh_log"]
+    ]
+    refresh_observed = [
+        row for row in symbols
+        if row["refresh_evidence"]["requires_refresh_log"] and row["refresh_evidence"]["has_refresh_log"]
+    ]
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "research_ready": blockers == 0 and bool(research_ready_symbols or research_ready_models),
-        "thresholds": {
-            "stale_days": DATA_QUALITY_STALE_DAYS,
-            "min_research_rows": DATA_QUALITY_MIN_RESEARCH_ROWS,
-            "institutional_history_rows": DATA_QUALITY_MIN_INSTITUTIONAL_ROWS,
+        "thresholds": thresholds,
+        "threshold_config": _data_quality_threshold_config(),
+        "refresh_observability": {
+            "requires_log_for_sources": ["live"],
+            "observed_count": len(refresh_observed),
+            "gap_count": len(refresh_observability_gaps),
+            "refresh_log_window": 250,
+            "basis": "provider refresh log plus price-history date range",
         },
         "summary": {
             "symbol_count": len(symbols),
@@ -1661,22 +1724,24 @@ def _data_quality_payload() -> dict:
             "stale_symbol_count": sum(1 for row in symbols if row["is_stale"]),
             "missing_symbol_count": len({row["symbol"] for row in missing_rows}),
             "refresh_failure_count": sum(1 for row in refresh_logs if str(row.get("status") or "").lower() == "error"),
+            "refresh_observability_gap_count": len(refresh_observability_gaps),
             "coverage_gap_count": len(coverage_gaps),
         },
         "symbols": symbols,
         "models": model_rows,
         "issues": issues,
         "stale_symbols": [row for row in symbols if row["is_stale"]],
-        "short_histories": [row for row in symbols if row["source"] != "sample" and row["row_count"] < DATA_QUALITY_MIN_INSTITUTIONAL_ROWS],
+        "short_histories": [row for row in symbols if row["source"] != "sample" and row["row_count"] < thresholds["institutional_history_rows"]],
         "missing_data": missing_rows,
         "refresh_failures": [row for row in refresh_logs if str(row.get("status") or "").lower() == "error"],
+        "refresh_observability_gaps": refresh_observability_gaps,
         "coverage_gaps": coverage_gaps,
         "source_conflicts": source_conflicts,
         "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
     }
 
 
-def _data_quality_symbol_row(inst: data.Instrument, last_refresh: dict | None) -> dict:
+def _data_quality_symbol_row(inst: data.Instrument, last_refresh: dict | None, thresholds: dict[str, int]) -> dict:
     close = inst.df["close"].dropna() if "close" in inst.df else pd.Series(dtype=float)
     dates = pd.to_datetime(close.index, errors="coerce")
     dates = dates[~pd.isna(dates)]
@@ -1685,6 +1750,7 @@ def _data_quality_symbol_row(inst: data.Instrument, last_refresh: dict | None) -
     today = datetime.now(timezone.utc).date()
     days_stale = (today - dates.max().date()).days if len(dates) else None
     is_real_source = provenance.is_real_source(inst.source)
+    requires_refresh_log = inst.source == "live"
     return {
         "symbol": inst.symbol,
         "name": inst.name,
@@ -1693,11 +1759,20 @@ def _data_quality_symbol_row(inst: data.Instrument, last_refresh: dict | None) -
         "first_date": first_date,
         "last_date": last_date,
         "days_stale": days_stale,
-        "is_stale": bool(is_real_source and days_stale is not None and days_stale > DATA_QUALITY_STALE_DAYS),
-        "is_short": bool(is_real_source and len(close) < DATA_QUALITY_MIN_INSTITUTIONAL_ROWS),
-        "research_ready": bool(is_real_source and len(close) >= DATA_QUALITY_MIN_RESEARCH_ROWS),
+        "freshness_basis": "price_history_last_date" if last_date else "missing_price_history",
+        "is_stale": bool(is_real_source and days_stale is not None and days_stale > thresholds["stale_days"]),
+        "is_short": bool(is_real_source and len(close) < thresholds["institutional_history_rows"]),
+        "research_ready": bool(is_real_source and len(close) >= thresholds["min_research_rows"]),
         "last_refresh": last_refresh,
-        "next_step": _data_quality_symbol_next_step(inst.source, len(close), days_stale),
+        "refresh_evidence": {
+            "requires_refresh_log": requires_refresh_log,
+            "has_refresh_log": bool(last_refresh),
+            "last_attempted_at": last_refresh.get("attempted_at") if last_refresh else None,
+            "status": last_refresh.get("status") if last_refresh else None,
+            "rows_added": last_refresh.get("rows_added") if last_refresh else None,
+            "source": last_refresh.get("source") if last_refresh else None,
+        },
+        "next_step": _data_quality_symbol_next_step(inst.source, len(close), days_stale, thresholds, bool(last_refresh)),
     }
 
 
@@ -1713,14 +1788,16 @@ def _data_quality_model_row(mdl: portfolio.Model) -> dict:
     }
 
 
-def _data_quality_symbol_next_step(source: str, row_count: int, days_stale: int | None) -> str:
+def _data_quality_symbol_next_step(source: str, row_count: int, days_stale: int | None, thresholds: dict[str, int], has_refresh_log: bool) -> str:
     if not provenance.is_real_source(source):
         return "Sample data is demo-only; fetch live or upload real history."
-    if row_count < DATA_QUALITY_MIN_RESEARCH_ROWS:
-        return "Fetch/upload at least 60 valid rows before real research."
-    if row_count < DATA_QUALITY_MIN_INSTITUTIONAL_ROWS:
+    if row_count < thresholds["min_research_rows"]:
+        return f"Fetch/upload at least {thresholds['min_research_rows']} valid rows before real research."
+    if row_count < thresholds["institutional_history_rows"]:
         return "Extend history toward a one-year institutional review window."
-    if days_stale is not None and days_stale > DATA_QUALITY_STALE_DAYS:
+    if source == "live" and not has_refresh_log:
+        return "Refresh once so provider freshness evidence is logged."
+    if days_stale is not None and days_stale > thresholds["stale_days"]:
         return "Refresh or verify the latest available provider date."
     return "Research-ready, subject to analysis-only caveats."
 

@@ -178,7 +178,7 @@ export interface DataRefreshResponse {
 }
 
 export interface DataQualityIssue {
-  category: "stale_symbols" | "missing_data" | "short_histories" | "source_conflicts" | "refresh_failures" | "coverage_gaps" | string;
+  category: "stale_symbols" | "missing_data" | "short_histories" | "source_conflicts" | "refresh_failures" | "refresh_observability_gaps" | "coverage_gaps" | string;
   severity: "blocker" | "warning" | "info" | string;
   target: string;
   detail: string;
@@ -193,10 +193,19 @@ export interface DataQualitySymbol {
   first_date?: string | null;
   last_date?: string | null;
   days_stale?: number | null;
+  freshness_basis: string;
   is_stale: boolean;
   is_short: boolean;
   research_ready: boolean;
   last_refresh?: RefreshLogEntry | null;
+  refresh_evidence: {
+    requires_refresh_log: boolean;
+    has_refresh_log: boolean;
+    last_attempted_at?: string | null;
+    status?: string | null;
+    rows_added?: number | null;
+    source?: string | null;
+  };
   next_step: string;
 }
 
@@ -229,6 +238,18 @@ export interface DataQualityResponse {
     min_research_rows: number;
     institutional_history_rows: number;
   };
+  threshold_config: {
+    source: string;
+    env: Record<string, string>;
+    range_guards: Record<string, string>;
+  };
+  refresh_observability: {
+    requires_log_for_sources: string[];
+    observed_count: number;
+    gap_count: number;
+    refresh_log_window: number;
+    basis: string;
+  };
   summary: {
     symbol_count: number;
     model_count: number;
@@ -239,6 +260,7 @@ export interface DataQualityResponse {
     stale_symbol_count: number;
     missing_symbol_count: number;
     refresh_failure_count: number;
+    refresh_observability_gap_count: number;
     coverage_gap_count: number;
   };
   symbols: DataQualitySymbol[];
@@ -248,6 +270,7 @@ export interface DataQualityResponse {
   short_histories: DataQualitySymbol[];
   missing_data: Array<{ symbol: string; model_id: string; model_name: string }>;
   refresh_failures: RefreshLogEntry[];
+  refresh_observability_gaps: DataQualitySymbol[];
   coverage_gaps: DataQualityCoverageGap[];
   source_conflicts: Array<{ model_id: string; model_name: string; source_counts: Record<string, number>; coverage_state: string }>;
   disclaimer: string;
@@ -257,6 +280,7 @@ export interface AutoLiveStatus {
   enabled: boolean;
   live_available: boolean;
   symbols: string[];
+  source: string;
   period: string;
   interval_seconds: number;
   max_workers: number;

@@ -78,13 +78,25 @@ def test_live_malformed_json_returns_json_error(client, monkeypatch):
     assert "error" in resp.get_json()
 
 
-def test_auto_live_config_is_disabled_without_symbols(monkeypatch):
+def test_auto_live_config_defaults_to_core_universe(monkeypatch):
     monkeypatch.delenv("HELIOS_AUTO_LIVE_SYMBOLS", raising=False)
+    monkeypatch.setenv("HELIOS_DB_PATH", ".helios/test-auto-live.db")
+
+    config = helios._auto_live_config()
+
+    assert config["enabled"] is True
+    assert config["source"] == "core"
+    assert {"SPY", "QQQ", "AAPL"} <= set(config["symbols"])
+
+
+def test_auto_live_config_can_be_explicitly_disabled(monkeypatch):
+    monkeypatch.setenv("HELIOS_AUTO_LIVE_SYMBOLS", "off")
 
     config = helios._auto_live_config()
 
     assert config["enabled"] is False
     assert config["symbols"] == []
+    assert config["source"] == "off"
 
 
 def test_auto_live_config_parses_core_universe_and_interval(monkeypatch):
@@ -175,6 +187,39 @@ def test_data_quality_dashboard_reports_institutional_issue_categories(client, m
     assert any(row["model_name"] == "Quality Model" for row in body["coverage_gaps"])
     assert any(row["symbol"] == "SHORTLIVE" for row in body["refresh_failures"])
     assert "Analysis only" in body["disclaimer"]
+
+
+def test_data_quality_thresholds_are_configurable_and_refresh_observability_is_explicit(client, monkeypatch, tmp_path):
+    monkeypatch.setenv("HELIOS_DB_PATH", str(tmp_path / "helios.db"))
+    monkeypatch.setenv("HELIOS_DATA_QUALITY_STALE_DAYS", "999")
+    monkeypatch.setenv("HELIOS_DATA_QUALITY_MIN_RESEARCH_ROWS", "100")
+    monkeypatch.setenv("HELIOS_DATA_QUALITY_INSTITUTIONAL_ROWS", "300")
+    persistence.reset_store_for_tests()
+
+    live_history = price_series(days=260)
+    data.register(data.Instrument("OBSERVE", "Observed Live", pd.DataFrame({"close": live_history}), "live", []))
+
+    resp = client.get("/api/data-quality")
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["thresholds"] == {
+        "stale_days": 999,
+        "min_research_rows": 100,
+        "institutional_history_rows": 300,
+    }
+    assert body["threshold_config"]["source"] == "environment"
+    assert body["summary"]["refresh_observability_gap_count"] >= 1
+    categories = {issue["category"] for issue in body["issues"]}
+    assert "refresh_observability_gaps" in categories
+    observe = next(row for row in body["symbols"] if row["symbol"] == "OBSERVE")
+    assert observe["research_ready"] is True
+    assert observe["is_stale"] is False
+    assert observe["is_short"] is True
+    assert observe["freshness_basis"] == "price_history_last_date"
+    assert observe["refresh_evidence"]["has_refresh_log"] is False
+    assert any(row["symbol"] == "OBSERVE" for row in body["refresh_observability_gaps"])
+    assert body["refresh_observability"]["gap_count"] >= 1
 
 
 def test_model_upload_and_analyze_smoke(client, monkeypatch):

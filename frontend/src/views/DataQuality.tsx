@@ -63,6 +63,7 @@ export function DataQuality() {
                 <div><dt>Stale Symbols</dt><dd>{payload.thresholds.stale_days} calendar days</dd></div>
                 <div><dt>Research Minimum</dt><dd>{payload.thresholds.min_research_rows} rows</dd></div>
                 <div><dt>Institutional History</dt><dd>{payload.thresholds.institutional_history_rows} rows</dd></div>
+                <div><dt>Threshold Source</dt><dd>{payload.threshold_config.source}</dd></div>
               </dl>
             </Panel>
             <Panel title="Issue Mix" meta={`${payload.issues.length} total`}>
@@ -70,15 +71,25 @@ export function DataQuality() {
                 <StatTile label="Stale Symbols" value={fmtNumber(payload.summary.stale_symbol_count, 0)} tone={payload.summary.stale_symbol_count ? "warning" : "positive"} />
                 <StatTile label="Missing Data" value={fmtNumber(payload.summary.missing_symbol_count, 0)} tone={payload.summary.missing_symbol_count ? "warning" : "positive"} />
                 <StatTile label="Refresh Failures" value={fmtNumber(payload.summary.refresh_failure_count, 0)} tone={payload.summary.refresh_failure_count ? "warning" : "positive"} />
+                <StatTile label="Observability Gaps" value={fmtNumber(payload.summary.refresh_observability_gap_count, 0)} tone={payload.summary.refresh_observability_gap_count ? "warning" : "positive"} />
                 <StatTile label="Coverage Gaps" value={fmtNumber(payload.summary.coverage_gap_count, 0)} tone={payload.summary.coverage_gap_count ? "warning" : "positive"} />
               </div>
             </Panel>
           </section>
 
+          <Panel title="Refresh Evidence" meta={`${payload.refresh_observability.observed_count} observed · ${payload.refresh_observability.gap_count} gaps`}>
+            <dl className="report-dl">
+              <div><dt>Required For</dt><dd>{payload.refresh_observability.requires_log_for_sources.join(", ") || "None"}</dd></div>
+              <div><dt>Evidence Basis</dt><dd>{payload.refresh_observability.basis}</dd></div>
+              <div><dt>Log Window</dt><dd>{fmtNumber(payload.refresh_observability.refresh_log_window, 0)} latest attempts</dd></div>
+              <div><dt>Gaps</dt><dd>{fmtNumber(payload.refresh_observability.gap_count, 0)}</dd></div>
+            </dl>
+          </Panel>
+
           <section className="dashboard-grid">
             <IssuePanel title="Stale Symbols" rows={payload.stale_symbols.map((row) => ({
               target: row.symbol,
-              detail: `${row.name} · ${row.days_stale ?? "?"} days stale · last ${row.last_date || "unknown"}`,
+              detail: `${row.name} · ${row.days_stale ?? "?"} days stale · last ${row.last_date || "unknown"} · ${row.freshness_basis}`,
               next_step: row.next_step,
               severity: "warning",
             }))} />
@@ -91,6 +102,12 @@ export function DataQuality() {
           </section>
 
           <section className="dashboard-grid">
+            <IssuePanel title="Observability Gaps" rows={payload.refresh_observability_gaps.map((row) => ({
+              target: row.symbol,
+              detail: `${row.name} is live data without a persisted refresh attempt. Last price date ${row.last_date || "unknown"}.`,
+              next_step: row.next_step,
+              severity: "warning",
+            }))} />
             <Panel title="Refresh Failures" meta={`${payload.refresh_failures.length} failed`}>
               {payload.refresh_failures.length === 0 ? (
                 <EmptyState title="No refresh failures" body="Live provider refreshes have not reported failures in the stored log." />

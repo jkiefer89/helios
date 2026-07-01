@@ -92,7 +92,7 @@ export function RealDataCenter({
             ) : <span className="muted">No refresh attempts recorded yet.</span>}
           </div>
         </Panel>
-        <Panel title="Automatic Live Refresh" meta={autoLive?.enabled ? `${autoLive.symbols.length} symbols` : "off"}>
+        <Panel title="Automatic Live Refresh" meta={autoLive?.enabled ? `${autoLive.symbols.length} symbols` : "explicitly off"}>
           {autoLive?.enabled ? (
             <div className="auto-live-status">
               <div className="status-line">
@@ -109,7 +109,7 @@ export function RealDataCenter({
               </div>
             </div>
           ) : (
-            <p className="muted">Set HELIOS_AUTO_LIVE_SYMBOLS to keep a live universe refreshed automatically.</p>
+            <p className="muted">Automatic polling is explicitly disabled with HELIOS_AUTO_LIVE_SYMBOLS=off. Remove that override to use the default core live universe.</p>
           )}
         </Panel>
         <Panel title="Missing Coverage" meta={`${missingTickers.length} tickers`}>

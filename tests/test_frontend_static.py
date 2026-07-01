@@ -119,6 +119,8 @@ def test_data_quality_dashboard_view_is_dedicated_and_routed():
     assert "Stale Symbols" in view_source
     assert "Short Histories" in view_source
     assert "Refresh Failures" in view_source
+    assert "Refresh Evidence" in view_source
+    assert "Observability Gaps" in view_source
     assert "Coverage Gaps" in view_source
     assert "Research-ready" in view_source
 

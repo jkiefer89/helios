@@ -76,6 +76,10 @@ starts Helios.
 | `HELIOS_DB_ENCRYPTION` | `auto` | Encrypt sensitive local persistence payloads; use `required` to fail closed without a key |
 | `HELIOS_DB_ENCRYPTION_KEY` | empty | Optional Fernet key for persistence encryption; keep it local and never commit it |
 | `HELIOS_DB_ENCRYPTION_KEY_PATH` | `.helios/helios.key` | Optional local key-file path when `HELIOS_DB_ENCRYPTION=auto` |
+| `HELIOS_AUTO_LIVE_SYMBOLS` | `core` | Automatic live polling universe; use `off` to disable or provide tickers/presets |
+| `HELIOS_DATA_QUALITY_STALE_DAYS` | `7` | Data Quality stale-symbol diagnostic threshold |
+| `HELIOS_DATA_QUALITY_MIN_RESEARCH_ROWS` | `60` | Minimum valid rows for research-readiness diagnostics |
+| `HELIOS_DATA_QUALITY_INSTITUTIONAL_ROWS` | `252` | Institutional history target for short-history diagnostics |
 
 ```bash
 HELIOS_USER=jkiefer HELIOS_PASSWORD='choose-a-strong-one' ./run.sh
@@ -168,9 +172,12 @@ are never silently promoted into live market data.
 
 The React **Data Quality** workspace adds an institutional readiness screen for
 stale symbols, short histories, missing model holdings, source conflicts,
-refresh failures, coverage gaps, and overall research-ready status. It is a
-diagnostic surface only; it does not change opportunity scoring, strategy
-evidence, or provenance gates.
+refresh failures, refresh-observability gaps, coverage gaps, and overall
+research-ready status. Thresholds are configurable through environment
+variables, and live histories are checked for persisted provider refresh
+evidence so the dashboard can flag when freshness cannot be audited from the
+local log. It is a diagnostic surface only; it does not change opportunity
+scoring, strategy evidence, or provenance gates.
 
 The **Reports** workspace can save an analysis-only snapshot of the current
 instrument or model report. Saved snapshots are local persistence records and
@@ -186,7 +193,8 @@ configured, save can generate a sanitized report narrative at snapshot time.
 Provider failures do not block deterministic report saving, and every exported
 AI narrative remains marked for advisor review.
 
-For a no-upload live workflow, enable automatic polling before startup:
+For a no-upload live workflow, automatic polling defaults to the built-in
+`core` liquid advisor universe. To choose a different universe before startup:
 
 ```bash
 HELIOS_AUTO_LIVE_SYMBOLS=core \
@@ -207,6 +215,8 @@ failed provider calls leave existing/sample data untouched and logged as failed
 refresh attempts. Successful live refreshes also re-check pending Signal Journal
 entries, so paper forward results are measured automatically once refreshed
 history covers the original signal horizon.
+
+Set `HELIOS_AUTO_LIVE_SYMBOLS=off` to disable automatic polling explicitly.
 
 ### Optional AI Copilot
 
