@@ -1086,7 +1086,7 @@ class SQLiteStore:
                     """
                     SELECT *
                     FROM report_snapshots
-                    ORDER BY created_at DESC
+                    ORDER BY created_at DESC, rowid DESC
                     LIMIT ?
                     """,
                     (max(1, min(int(limit), 200)),),
@@ -1432,12 +1432,20 @@ def _report_snapshot_row(row: sqlite3.Row, store: SQLiteStore, *, include_report
     warnings = store._load_json(row["warnings_json"]).get("warnings") or []
     metadata = store._load_json(row["metadata_json"])
     ai_narrative = store._load_text(row["ai_narrative"])
+    version = int(metadata.get("version") or 1) if isinstance(metadata, dict) else 1
     snapshot = {
         "id": row["snapshot_id"],
         "created_at": row["created_at"],
+        "report_package": metadata.get("report_package") or "report_snapshot",
+        "version": version,
+        "version_label": metadata.get("version_label") or f"v{version}",
         "target_kind": row["target_kind"],
         "target_id": row["target_id"],
         "target_name": store._load_text(row["target_name"]),
+        "prepared_for": metadata.get("prepared_for") or "",
+        "prepared_by": metadata.get("prepared_by") or "",
+        "reviewer": metadata.get("reviewer") or "",
+        "report_purpose": metadata.get("report_purpose") or "",
         "title": store._load_text(row["title"]),
         "data_mode": store._load_text(row["data_mode"]),
         "display_label": store._load_text(row["display_label"]),
@@ -1453,6 +1461,9 @@ def _report_snapshot_row(row: sqlite3.Row, store: SQLiteStore, *, include_report
         "ai_narrative_included": bool(ai_narrative),
         "ai_narrative_status": metadata.get("ai_narrative_status") or ("included" if ai_narrative else "not_included"),
         "ai_provider": metadata.get("ai_provider") or {},
+        "audit_trail": metadata.get("audit_trail") if isinstance(metadata.get("audit_trail"), list) else [],
+        "disclosure_blocks": metadata.get("disclosure_blocks") if isinstance(metadata.get("disclosure_blocks"), list) else [],
+        "output_formats": metadata.get("output_formats") if isinstance(metadata.get("output_formats"), list) else [],
         "metadata": metadata,
     }
     if include_report:

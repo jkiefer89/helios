@@ -731,9 +731,16 @@ export interface ReportResponse extends ProvenancePayload {
 export interface ReportSnapshot {
   id: string;
   created_at: string;
+  report_package: string;
+  version: number;
+  version_label: string;
   target_kind: "instrument" | "model" | string;
   target_id: string;
   target_name: string;
+  prepared_for: string;
+  prepared_by: string;
+  reviewer: string;
+  report_purpose: string;
   title: string;
   data_mode: DataMode;
   display_label: string;
@@ -748,6 +755,17 @@ export interface ReportSnapshot {
   ai_narrative_included: boolean;
   ai_narrative_status: string;
   ai_provider: Record<string, unknown>;
+  audit_trail: Array<{
+    event: string;
+    at: string;
+    actor: string;
+    summary: string;
+  }>;
+  disclosure_blocks: Array<{
+    title: string;
+    body: string;
+  }>;
+  output_formats: string[];
   html_url: string;
   pdf_url: string;
   metadata?: Record<string, unknown>;
@@ -758,6 +776,10 @@ export interface ReportSnapshotSaveRequest {
   id: string;
   ai_narrative?: string;
   include_ai_narrative?: boolean;
+  prepared_for?: string;
+  prepared_by?: string;
+  reviewer?: string;
+  report_purpose?: string;
 }
 
 export interface ReportSnapshotSaveResponse {

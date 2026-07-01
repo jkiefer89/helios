@@ -3970,6 +3970,28 @@ p {
   padding: 1.2rem;
 }
 
+.report-package-controls {
+  margin-top: -0.35rem;
+}
+
+.report-control-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
+.report-control-grid label {
+  display: grid;
+  gap: 0.3rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.report-control-grid input {
+  width: 100%;
+}
+
 .report-sheet > header {
   display: flex;
   justify-content: space-between;
@@ -4016,6 +4038,32 @@ p {
   font-size: 0.72rem;
   font-weight: 850;
   text-transform: uppercase;
+}
+
+.report-disclosure-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.55rem;
+}
+
+.report-disclosure-grid article {
+  display: grid;
+  gap: 0.28rem;
+  border: 1px solid rgba(148, 163, 184, 0.15);
+  border-radius: 6px;
+  background: rgba(7, 12, 20, 0.42);
+  padding: 0.62rem;
+}
+
+.report-disclosure-grid strong {
+  color: var(--text);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+}
+
+.report-disclosure-grid span {
+  color: var(--soft);
+  font-size: 0.75rem;
 }
 
 .report-dl {
@@ -4392,6 +4440,8 @@ p {
   .source-context-strip,
   .unlock-evidence-strip,
   .report-grid,
+  .report-control-grid,
+  .report-disclosure-grid,
   .side-section.onboarding,
   .command-disclosure {
     grid-template-columns: 1fr;

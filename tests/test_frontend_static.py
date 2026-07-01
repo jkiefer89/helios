@@ -151,6 +151,25 @@ def test_reports_view_exposes_report_snapshot_exports():
     assert "ReportSnapshot" in type_source
 
 
+def test_reports_view_exposes_institutional_report_system():
+    source = (ROOT / "frontend" / "src" / "views" / "Reports.tsx").read_text()
+    type_source = (ROOT / "frontend" / "src" / "api" / "types.ts").read_text()
+
+    assert "Institutional Report System" in source
+    assert "Advisor/client-ready reports" in source
+    assert "Prepared for" in source
+    assert "Prepared by" in source
+    assert "Reviewer" in source
+    assert "Report Version" in source
+    assert "Audit Trail" in source
+    assert "Disclosure Blocks" in source
+    assert "Print / PDF layout" in source
+    assert "version_label" in source
+    assert "audit_trail" in type_source
+    assert "disclosure_blocks" in type_source
+    assert "output_formats" in type_source
+
+
 def test_data_quality_dashboard_view_is_dedicated_and_routed():
     app_source = (ROOT / "frontend" / "src" / "App.tsx").read_text()
     shell_source = (ROOT / "frontend" / "src" / "components" / "layout" / "AppShell.tsx").read_text()

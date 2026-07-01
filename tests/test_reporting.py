@@ -198,6 +198,81 @@ def test_report_snapshot_history_exports_html_and_pdf_with_provenance(monkeypatc
     assert pdf.data.count(b"/Type /Page ") >= 2
 
 
+def test_institutional_report_snapshots_include_versions_audit_and_disclosures(monkeypatch, tmp_path):
+    monkeypatch.setenv("HELIOS_DB_PATH", str(tmp_path / "helios.db"))
+    from engine import persistence
+
+    persistence.reset_store_for_tests()
+    client = _client()
+    upload = client.post(
+        "/api/upload",
+        data={
+            "file": (BytesIO(price_csv(days=260)), "institutional.csv"),
+            "symbol": "INST",
+            "name": "Institutional Upload",
+        },
+        content_type="multipart/form-data",
+    )
+    assert upload.status_code == 200
+
+    first = client.post(
+        "/api/report/snapshots",
+        json={
+            "kind": "instrument",
+            "id": "INST",
+            "prepared_for": "Investment Committee",
+            "prepared_by": "Helios Advisor Desk",
+            "reviewer": "Chief Investment Officer",
+            "report_purpose": "client_review",
+        },
+    )
+    assert first.status_code == 200
+    first_snapshot = first.get_json()["snapshot"]
+    assert first_snapshot["report_package"] == "institutional_advisor_report"
+    assert first_snapshot["version"] == 1
+    assert first_snapshot["version_label"] == "v1"
+    assert first_snapshot["prepared_for"] == "Investment Committee"
+    assert first_snapshot["prepared_by"] == "Helios Advisor Desk"
+    assert first_snapshot["reviewer"] == "Chief Investment Officer"
+    assert first_snapshot["report_purpose"] == "client_review"
+    assert first_snapshot["output_formats"] == ["html", "pdf", "print"]
+    assert first_snapshot["metadata"]["snapshot_version"] == 2
+    assert first_snapshot["metadata"]["institutional_report"] is True
+    assert first_snapshot["audit_trail"][0]["event"] == "report_built"
+    assert first_snapshot["audit_trail"][-1]["event"] == "snapshot_saved"
+    assert any(block["title"] == "Analysis-Only Use" for block in first_snapshot["disclosure_blocks"])
+    assert any("does not provide investment advice" in block["body"].lower() for block in first_snapshot["disclosure_blocks"])
+
+    second = client.post("/api/report/snapshots", json={"kind": "instrument", "id": "INST"})
+    assert second.status_code == 200
+    second_snapshot = second.get_json()["snapshot"]
+    assert second_snapshot["version"] == 2
+    assert second_snapshot["version_label"] == "v2"
+
+    history = client.get("/api/report/snapshots").get_json()["snapshots"]
+    assert [row["version"] for row in history[:2]] == [2, 1]
+
+    html = client.get(first_snapshot["html_url"])
+    assert html.status_code == 200
+    html_text = html.get_data(as_text=True)
+    assert "Institutional Advisor Report" in html_text
+    assert "Report Version" in html_text and "v1" in html_text
+    assert "Audit Trail" in html_text
+    assert "Disclosure Blocks" in html_text
+    assert "Investment Committee" in html_text
+    assert "Helios Advisor Desk" in html_text
+    assert "No Trade Execution" in html_text
+    assert "No Return Guarantee" in html_text
+
+    pdf = client.get(first_snapshot["pdf_url"])
+    assert pdf.status_code == 200
+    assert pdf.content_type == "application/pdf"
+    assert b"INSTITUTIONAL ADVISOR REPORT" in pdf.data
+    assert b"REPORT VERSION" in pdf.data
+    assert b"AUDIT TRAIL" in pdf.data
+    assert b"DISCLOSURE BLOCKS" in pdf.data
+
+
 def test_report_snapshot_can_generate_ai_narrative_when_provider_enabled(monkeypatch, tmp_path):
     monkeypatch.setenv("HELIOS_DB_PATH", str(tmp_path / "helios.db"))
     from engine import persistence

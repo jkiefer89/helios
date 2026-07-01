@@ -1452,6 +1452,10 @@ def save_report_snapshot():
     target_id = str(body.get("id") or body.get("target_id") or "").strip()
     ai_narrative = str(body.get("ai_narrative") or "").strip()
     include_ai_narrative = bool(body.get("include_ai_narrative"))
+    prepared_for = str(body.get("prepared_for") or "").strip()
+    prepared_by = str(body.get("prepared_by") or "").strip()
+    reviewer = str(body.get("reviewer") or "").strip()
+    report_purpose = str(body.get("report_purpose") or "").strip()
     try:
         report = _report_for_snapshot(kind, target_id)
     except ValueError as exc:
@@ -1468,6 +1472,11 @@ def save_report_snapshot():
         ai_narrative=ai_narrative,
         ai_narrative_status=ai_meta["status"],
         ai_provider=ai_meta["provider"],
+        version=_next_report_snapshot_version(store, kind, target_id),
+        prepared_for=prepared_for,
+        prepared_by=prepared_by,
+        reviewer=reviewer,
+        report_purpose=report_purpose,
     )
     result = store.save_report_snapshot(snapshot)
     if not result.get("saved"):
@@ -1519,6 +1528,18 @@ def _report_for_snapshot(kind: str, target_id: str) -> dict:
             raise ValueError("Unknown model.")
         return reporting.model_report(mdl)
     raise ValueError("Report snapshot kind must be 'instrument' or 'model'.")
+
+
+def _next_report_snapshot_version(store, kind: str, target_id: str) -> int:
+    try:
+        versions = [
+            int(row.get("version") or row.get("metadata", {}).get("version") or 1)
+            for row in store.report_snapshots(limit=200)
+            if row.get("target_kind") == kind and row.get("target_id") == target_id
+        ]
+    except Exception:
+        versions = []
+    return (max(versions) if versions else 0) + 1
 
 
 def _report_snapshot_ai_narrative(

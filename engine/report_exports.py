@@ -23,6 +23,11 @@ def build_snapshot(
     ai_narrative: str = "",
     ai_narrative_status: str = "",
     ai_provider: dict[str, Any] | None = None,
+    version: int = 1,
+    prepared_for: str = "",
+    prepared_by: str = "",
+    reviewer: str = "",
+    report_purpose: str = "",
 ) -> dict[str, Any]:
     data_quality = report.get("data_provenance") or {}
     sections = report.get("sections") or {}
@@ -35,12 +40,34 @@ def build_snapshot(
     if not source_counts and source:
         source_counts = {source: 1}
     target_name = _text(report.get("name") or report.get("symbol") or report.get("id") or target_id)
+    created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    safe_version = max(1, _int(version))
+    version_label = f"v{safe_version}"
+    prepared_for = _text(prepared_for)[:160]
+    prepared_by = _text(prepared_by)[:160]
+    reviewer = _text(reviewer)[:160]
+    report_purpose = _text(report_purpose)[:80] or "advisor_review"
+    output_formats = ["html", "pdf", "print"]
+    disclosure_blocks = _disclosure_blocks(report)
+    audit_trail = _audit_trail(
+        report=report,
+        created_at=created_at,
+        version_label=version_label,
+        prepared_by=prepared_by,
+    )
     snapshot = {
         "id": secrets.token_urlsafe(12),
-        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "created_at": created_at,
+        "report_package": "institutional_advisor_report",
+        "version": safe_version,
+        "version_label": version_label,
         "target_kind": target_kind,
         "target_id": target_id,
         "target_name": target_name,
+        "prepared_for": prepared_for,
+        "prepared_by": prepared_by,
+        "reviewer": reviewer,
+        "report_purpose": report_purpose,
         "title": _text(report.get("title") or target_name),
         "data_mode": _text(report.get("data_mode") or data_quality.get("data_mode")),
         "display_label": _text(report.get("display_label") or data_quality.get("display_label")),
@@ -57,8 +84,22 @@ def build_snapshot(
         "ai_narrative_included": bool(_text(ai_narrative)),
         "ai_narrative_status": ai_narrative_status or ("provided" if _text(ai_narrative) else "not_requested"),
         "ai_provider": ai_provider or {},
+        "audit_trail": audit_trail,
+        "disclosure_blocks": disclosure_blocks,
+        "output_formats": output_formats,
         "metadata": {
-            "snapshot_version": 1,
+            "snapshot_version": 2,
+            "institutional_report": True,
+            "report_package": "institutional_advisor_report",
+            "version": safe_version,
+            "version_label": version_label,
+            "prepared_for": prepared_for,
+            "prepared_by": prepared_by,
+            "reviewer": reviewer,
+            "report_purpose": report_purpose,
+            "audit_trail": audit_trail,
+            "disclosure_blocks": disclosure_blocks,
+            "output_formats": output_formats,
             "analysis_only": True,
             "no_execution": True,
             "no_return_guarantee": True,
@@ -96,6 +137,11 @@ def ai_result_to_narrative(result: dict[str, Any]) -> str:
 
 def render_html(snapshot: dict[str, Any]) -> str:
     rows = {
+        "Report Version": snapshot.get("version_label") or "v1",
+        "Prepared For": snapshot.get("prepared_for") or "Advisor review",
+        "Prepared By": snapshot.get("prepared_by") or "Helios local workspace",
+        "Reviewer": snapshot.get("reviewer") or "Advisor review required",
+        "Report Purpose": snapshot.get("report_purpose") or "advisor_review",
         "Source": snapshot.get("source") or "Unknown",
         "Row Count": snapshot.get("row_count") or 0,
         "First Date": snapshot.get("first_date") or "Unknown",
@@ -115,20 +161,24 @@ def render_html(snapshot: dict[str, Any]) -> str:
         f"<title>{_esc(snapshot.get('title') or 'Helios Report Snapshot')}</title>",
         "<style>",
         "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#071019;color:#e6edf7;margin:0;padding:32px;line-height:1.45}",
-        "main{max-width:1040px;margin:0 auto;background:#0d1622;border:1px solid #263548;border-radius:8px;padding:28px}",
-        "h1,h2{margin:0 0 12px} h1{font-size:28px} h2{font-size:16px;text-transform:uppercase;letter-spacing:.08em;color:#9fb2c8}",
-        "section{border-top:1px solid #263548;margin-top:22px;padding-top:18px} dl{display:grid;grid-template-columns:220px 1fr;gap:8px 18px}",
-        "dt{color:#9fb2c8;font-weight:700} dd{margin:0} .warn{color:#ffd24a}.muted{color:#9fb2c8}.caveat{border:1px solid #775f18;background:#17180f;padding:12px;border-radius:6px}",
-        "pre{white-space:pre-wrap;font-family:inherit}.footer{font-size:13px;color:#9fb2c8}",
+        "main{max-width:1120px;margin:0 auto;background:#0d1622;border:1px solid #263548;border-radius:8px;overflow:hidden}",
+        ".cover{padding:30px 34px;background:linear-gradient(135deg,#101d2c,#08111b 70%);border-bottom:1px solid #263548}",
+        ".eyebrow{margin:0 0 8px;color:#55a7ff;font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.1em}",
+        "h1,h2,h3{margin:0 0 12px} h1{font-size:32px;letter-spacing:-.01em} h2{font-size:16px;text-transform:uppercase;letter-spacing:.08em;color:#9fb2c8} h3{font-size:14px}",
+        ".body{padding:26px 34px} section{border-top:1px solid #263548;margin-top:22px;padding-top:18px} dl{display:grid;grid-template-columns:230px 1fr;gap:8px 18px}",
+        "dt{color:#9fb2c8;font-weight:700} dd{margin:0} .warn{color:#ffd24a}.muted{color:#9fb2c8}.caveat{border:1px solid #775f18;background:#17180f;padding:14px;border-radius:6px}",
+        ".disclosures{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.disclosure{border:1px solid #263548;background:#0a111c;border-radius:6px;padding:14px}.audit{display:grid;gap:10px}.audit article{border:1px solid #263548;border-radius:6px;background:#09111b;padding:12px}",
+        "pre{white-space:pre-wrap;font-family:inherit}.footer{font-size:13px;color:#9fb2c8}@media print{body{background:#fff;color:#111827;padding:0}main{border:0}section{break-inside:avoid}.cover{background:#f8fafc;color:#0f172a}.disclosures{grid-template-columns:1fr}}",
         "</style>",
         "</head>",
         "<body>",
         "<main>",
-        "<header>",
-        "<p class=\"muted\">Helios Report Snapshot</p>",
+        "<header class=\"cover\">",
+        "<p class=\"eyebrow\">Institutional Advisor Report / Helios Report Snapshot</p>",
         f"<h1>{_esc(snapshot.get('title'))}</h1>",
-        f"<p class=\"muted\">Saved {_esc(snapshot.get('created_at'))} for {_esc(snapshot.get('target_kind'))}:{_esc(snapshot.get('target_id'))}</p>",
+        f"<p class=\"muted\">{_esc(snapshot.get('version_label') or 'v1')} / Saved {_esc(snapshot.get('created_at'))} / {_esc(snapshot.get('target_kind'))}:{_esc(snapshot.get('target_id'))}</p>",
         "</header>",
+        '<div class="body">',
         '<section class="caveat">',
         "<h2>Analysis-Only Caveat</h2>",
         f"<p>{_esc(report.get('disclaimer') or DISCLAIMER)}</p>",
@@ -141,6 +191,8 @@ def render_html(snapshot: dict[str, Any]) -> str:
         "<h2>Source And Provenance</h2>",
         _render_dict(rows),
         "</section>",
+        _audit_html(snapshot),
+        _disclosures_html(snapshot),
         _model_metadata_html(snapshot),
         _warnings_html(snapshot),
         _ai_html(snapshot),
@@ -149,6 +201,7 @@ def render_html(snapshot: dict[str, Any]) -> str:
         _render_value(sections),
         "</section>",
         f"<p class=\"footer\">{_esc(DISCLAIMER)}</p>",
+        "</div>",
         "</main>",
         "</body>",
         "</html>",
@@ -206,18 +259,21 @@ def _pdf_cover_page(snapshot: dict[str, Any]) -> str:
     cmds.append(_pdf_rect(0, 724, 612, 68, (0.04, 0.075, 0.12)))
     cmds.append(_pdf_text("HELIOS PRO", 42, 758, 18, bold=True))
     cmds.append(_pdf_text("Advisor-Grade Research Terminal", 42, 740, 9, color=(0.70, 0.78, 0.88)))
-    cmds.append(_pdf_text("REPORT SNAPSHOT", 430, 754, 12, bold=True, color=(0.32, 0.65, 1.0)))
+    cmds.append(_pdf_text("INSTITUTIONAL ADVISOR REPORT", 340, 754, 11, bold=True, color=(0.32, 0.65, 1.0)))
     y = _pdf_wrapped(cmds, str(snapshot.get("title") or "Helios Report Snapshot"), 42, 682, 520, size=21, bold=True, max_lines=3)
     y -= 18
+    cmds.append(_pdf_text("REPORT VERSION", 42, y, 11, bold=True, color=(0.32, 0.65, 1.0)))
+    cmds.append(_pdf_text(str(snapshot.get("version_label") or "v1"), 174, y, 11, bold=True))
+    y -= 24
     cmds.append(_pdf_text("SOURCE AND PROVENANCE", 42, y, 11, bold=True, color=(1.0, 0.82, 0.24)))
     y -= 18
     cards = [
+        ("Prepared For", snapshot.get("prepared_for") or "Advisor review"),
+        ("Prepared By", snapshot.get("prepared_by") or "Helios local workspace"),
         ("Source", snapshot.get("source") or "Unknown"),
         ("Rows", snapshot.get("row_count") or 0),
         ("First Date", snapshot.get("first_date") or "Unknown"),
         ("Last Date", snapshot.get("last_date") or "Unknown"),
-        ("Mode", snapshot.get("data_mode") or "Unknown"),
-        ("Research Eligible", "Yes" if snapshot.get("eligible_for_real_research") else "No"),
     ]
     for index, (label, value) in enumerate(cards):
         x = 42 + (index % 2) * 266
@@ -245,8 +301,10 @@ def _pdf_cover_page(snapshot: dict[str, Any]) -> str:
 def _pdf_evidence_page(snapshot: dict[str, Any]) -> str:
     cmds = [_pdf_rect(0, 0, 612, 792, (0.025, 0.055, 0.085))]
     cmds.append(_pdf_text("HELIOS PRO", 42, 760, 13, bold=True))
-    cmds.append(_pdf_text("Evidence Pack Details", 430, 760, 10, bold=True, color=(0.32, 0.65, 1.0)))
+    cmds.append(_pdf_text("Institutional Report Details", 402, 760, 10, bold=True, color=(0.32, 0.65, 1.0)))
     y = 718
+    y = _pdf_section(cmds, "AUDIT TRAIL", _audit_rows(snapshot), 42, y)
+    y = _pdf_section(cmds, "DISCLOSURE BLOCKS", _disclosure_rows(snapshot), 42, y)
     y = _pdf_section(cmds, "MODEL METADATA", snapshot.get("model_metadata") or {}, 42, y)
     y = _pdf_section(cmds, "SOURCE COUNTS", snapshot.get("source_counts") or {}, 42, y)
     warnings = snapshot.get("warnings") or []
@@ -356,6 +414,91 @@ def _model_metadata(report: dict[str, Any]) -> dict[str, Any]:
         "mandate": _text(report.get("mandate")),
         "source": _text(report.get("source")),
     }
+
+
+def _audit_trail(*, report: dict[str, Any], created_at: str, version_label: str, prepared_by: str) -> list[dict[str, str]]:
+    report_timestamp = _text(report.get("timestamp")) or created_at
+    return [
+        {
+            "event": "report_built",
+            "at": report_timestamp,
+            "actor": "Helios deterministic analytics engine",
+            "summary": "Report facts were composed from current Helios analytics, provenance, and caveats.",
+        },
+        {
+            "event": "snapshot_saved",
+            "at": created_at,
+            "actor": prepared_by or "Helios local workspace",
+            "summary": f"Institutional report snapshot {version_label} was frozen for history, print, and PDF export.",
+        },
+    ]
+
+
+def _disclosure_blocks(report: dict[str, Any]) -> list[dict[str, str]]:
+    data_provenance = report.get("data_provenance") if isinstance(report.get("data_provenance"), dict) else {}
+    data_mode = _text(report.get("data_mode") or data_provenance.get("data_mode"))
+    return [
+        {
+            "title": "Analysis-Only Use",
+            "body": DISCLAIMER,
+        },
+        {
+            "title": "No Trade Execution",
+            "body": "This report is an evidence summary. Helios does not route orders, rebalance accounts, or execute brokerage instructions.",
+        },
+        {
+            "title": "No Return Guarantee",
+            "body": "Forecasts, scores, strategy evidence, and AI narratives are estimates or explanations, not promises of return or risk reduction.",
+        },
+        {
+            "title": "Data Provenance Required",
+            "body": f"Real research depends on eligible live or uploaded histories. Current data mode: {data_mode or 'unknown'}.",
+        },
+    ]
+
+
+def _audit_html(snapshot: dict[str, Any]) -> str:
+    rows = snapshot.get("audit_trail") or []
+    if not rows:
+        return ""
+    articles = []
+    for row in rows:
+        articles.append(
+            "<article>"
+            f"<h3>{_esc(_label(row.get('event')))}</h3>"
+            f"<p class=\"muted\">{_esc(row.get('at'))} / {_esc(row.get('actor'))}</p>"
+            f"<p>{_esc(row.get('summary'))}</p>"
+            "</article>"
+        )
+    return "<section><h2>Audit Trail</h2><div class=\"audit\">" + "".join(articles) + "</div></section>"
+
+
+def _disclosures_html(snapshot: dict[str, Any]) -> str:
+    rows = snapshot.get("disclosure_blocks") or []
+    if not rows:
+        return ""
+    cards = []
+    for row in rows:
+        cards.append(
+            "<article class=\"disclosure\">"
+            f"<h3>{_esc(row.get('title'))}</h3>"
+            f"<p>{_esc(row.get('body'))}</p>"
+            "</article>"
+        )
+    return "<section><h2>Disclosure Blocks</h2><div class=\"disclosures\">" + "".join(cards) + "</div></section>"
+
+
+def _audit_rows(snapshot: dict[str, Any]) -> dict[str, str]:
+    rows = snapshot.get("audit_trail") or []
+    out = {}
+    for index, row in enumerate(rows[:4], start=1):
+        out[f"{index}. {_label(row.get('event'))}"] = f"{row.get('at') or ''} / {row.get('summary') or ''}"
+    return out
+
+
+def _disclosure_rows(snapshot: dict[str, Any]) -> dict[str, str]:
+    rows = snapshot.get("disclosure_blocks") or []
+    return {str(row.get("title") or f"Disclosure {index + 1}"): str(row.get("body") or "") for index, row in enumerate(rows[:4])}
 
 
 def _model_metadata_html(snapshot: dict[str, Any]) -> str:
