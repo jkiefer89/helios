@@ -1152,8 +1152,34 @@ def model_governance_event(model_id):
         approval_status=str(payload.get("approval_status") or ""),
     )
     if not result.get("recorded"):
-        return err(result.get("warning") or "Could not record model governance event.", 503)
+        return err(result.get("warning") or "Could not record model governance event.", int(result.get("status_code") or 503))
     return ok({"event": result["event"]})
+
+
+@app.route("/api/model-governance/<model_id>/approval-packet")
+def model_governance_approval_packet(model_id):
+    mdl = portfolio.get(model_id)
+    if mdl is None:
+        return err("Unknown model.", 404)
+    packet = model_governance.approval_packet(mdl)
+    if not packet.get("available", True):
+        return err(packet.get("warning") or "Model approval packet unavailable.", 503)
+    return ok({"packet": packet})
+
+
+@app.route("/api/model-governance/<model_id>/approval-packet.html")
+def model_governance_approval_packet_html(model_id):
+    mdl = portfolio.get(model_id)
+    if mdl is None:
+        return err("Unknown model.", 404)
+    packet = model_governance.approval_packet(mdl)
+    if not packet.get("available", True):
+        return err(packet.get("warning") or "Model approval packet unavailable.", 503)
+    return Response(
+        model_governance.render_approval_packet_html(packet),
+        mimetype="text/html",
+        headers={"Content-Disposition": f'inline; filename="helios-model-approval-{model_id}.html"'},
+    )
 
 
 @app.route("/api/models/<model_id>/editor", methods=["GET"])

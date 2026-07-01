@@ -114,6 +114,21 @@ export interface ModelGovernanceViolation {
   message: string;
 }
 
+export interface ModelGovernanceVersionDiff {
+  added: Array<{ ticker: string; weight_pct: number }>;
+  removed: Array<{ ticker: string; weight_pct: number }>;
+  changed_weights: Array<{ ticker: string; from_weight_pct: number; to_weight_pct: number; change_pct: number }>;
+  turnover_pct: number;
+  summary: string;
+}
+
+export interface ModelGovernanceRiskGate {
+  can_approve: boolean;
+  state: string;
+  blocked_reason: string;
+  violations: ModelGovernanceViolation[];
+}
+
 export interface ModelGovernanceRow {
   id: string;
   name: string;
@@ -127,6 +142,8 @@ export interface ModelGovernanceRow {
   risk_limits: ModelTemplate["risk_limits"];
   risk_limit_state: "within_limits" | "breach" | string;
   risk_limit_violations: ModelGovernanceViolation[];
+  can_approve: boolean;
+  approval_blocked_reason: string;
   rebalance_rules: ModelTemplate["rebalance_rules"];
   rebalance_status: string;
   last_rebalance_at?: string | null;
@@ -139,6 +156,7 @@ export interface ModelGovernanceRow {
   holdings_count: number;
   top_holding: string;
   top_weight_pct: number;
+  holdings: Array<{ ticker: string; weight: number; weight_pct: number; source?: string }>;
   source: string;
   provenance: ModelTemplate["provenance"];
 }
@@ -152,6 +170,10 @@ export interface ModelGovernanceEvent {
   action: string;
   note: string;
   approval_status: string;
+  committee_note?: string;
+  version_diff?: ModelGovernanceVersionDiff;
+  risk_gate?: ModelGovernanceRiskGate;
+  snapshot?: Record<string, unknown>;
 }
 
 export interface ModelEditHoldingInput {
@@ -213,6 +235,41 @@ export interface ModelGovernanceResponse {
     change_count: number;
   };
   warning?: string;
+  disclaimer: string;
+}
+
+export interface ModelGovernanceApprovalPacket {
+  available: boolean;
+  packet_type: string;
+  model: ModelGovernanceRow;
+  approval: {
+    status: string;
+    approved_by: string;
+    approval_updated_at?: string | null;
+    can_approve: boolean;
+    blocked_reason: string;
+  };
+  risk_gate: ModelGovernanceRiskGate;
+  risk_limits: ModelTemplate["risk_limits"];
+  version: number;
+  version_diff: ModelGovernanceVersionDiff;
+  before_snapshot: Record<string, unknown>;
+  after_snapshot: {
+    model?: Record<string, unknown>;
+    version?: number;
+    holdings?: Array<{ ticker: string; weight: number; weight_pct: number; source?: string }>;
+    risk_limits?: ModelTemplate["risk_limits"];
+    risk_limit_violations?: ModelGovernanceViolation[];
+    risk_gate?: ModelGovernanceRiskGate;
+  };
+  committee_notes: Array<{ event_id: number; created_at: string; actor: string; action: string; note: string }>;
+  snapshots: ModelGovernanceSnapshot[];
+  audit_trail: ModelGovernanceEvent[];
+  export: {
+    formats: string[];
+    json_url: string;
+    html_url: string;
+  };
   disclaimer: string;
 }
 

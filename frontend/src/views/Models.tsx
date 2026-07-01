@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import { api } from "../api/client";
-import type { ModelEditPreviewResponse, ModelGovernanceResponse, ModelGovernanceRow, ModelSummary, ModelTemplate, ModelValidationResponse, ModelValidationRow } from "../api/types";
+import type { ModelEditPreviewResponse, ModelGovernanceApprovalPacket, ModelGovernanceResponse, ModelGovernanceRow, ModelSummary, ModelTemplate, ModelValidationResponse, ModelValidationRow } from "../api/types";
 import { Panel } from "../components/cards/Panel";
 import { EmptyState } from "../components/empty-states/EmptyState";
 import { fmtNumber, fmtPct } from "../utils/format";
@@ -42,6 +42,8 @@ export function Models({
   const [validation, setValidation] = useState<ModelValidationResponse | null>(null);
   const [validationError, setValidationError] = useState("");
   const [validationLoading, setValidationLoading] = useState(false);
+  const [approvalPacket, setApprovalPacket] = useState<ModelGovernanceApprovalPacket | null>(null);
+  const [packetLoading, setPacketLoading] = useState("");
   const governanceById = useMemo(() => {
     return new Map((governance?.models || []).map((row) => [row.id, row]));
   }, [governance]);
@@ -93,6 +95,15 @@ export function Models({
       setNotes((current) => ({ ...current, [id]: "" }));
     } finally {
       setRecording("");
+    }
+  };
+  const loadApprovalPacket = async (id: string) => {
+    setPacketLoading(id);
+    try {
+      const result = await api.modelApprovalPacket(id);
+      setApprovalPacket(result.packet);
+    } finally {
+      setPacketLoading("");
     }
   };
   const startEdit = (model: ModelSummary) => {
@@ -295,7 +306,7 @@ export function Models({
           </div>
         )}
       </Panel>
-      <Panel title="Model Governance" meta={governance?.summary.available ? `${governance.summary.model_count} governed` : "SQLite required"}>
+      <Panel title="Model Governance v2" meta={governance?.summary.available ? `${governance.summary.model_count} governed` : "SQLite required"}>
         {!governance ? (
           <EmptyState title="Governance loading" body="Model governance is loaded with the model workspace." />
         ) : !governance.summary.available ? (
@@ -308,7 +319,7 @@ export function Models({
               <div className="stat-tile"><span>Approval Status</span><strong>{governance.summary.approved_count} approved</strong><small>{governance.summary.draft_count} draft / {governance.summary.pending_count} pending</small></div>
               <div className="stat-tile"><span>Mandate / Risk Limits</span><strong className={governance.summary.breach_count ? "tone-warning" : "tone-positive"}>{governance.summary.breach_count} breaches</strong><small>Deterministic checks only</small></div>
               <div className="stat-tile"><span>Archived Snapshots</span><strong>{governance.summary.snapshot_count}</strong><small>Versioned model states</small></div>
-              <div className="stat-tile"><span>Who changed what</span><strong>{governance.summary.change_count}</strong><small>{GOVERNANCE_SOURCE_LABEL}</small></div>
+              <div className="stat-tile"><span>Approval Packet</span><strong>{governance.summary.change_count}</strong><small>Exportable committee evidence</small></div>
             </div>
             <div className="governance-actor-row">
               <label>
@@ -326,8 +337,8 @@ export function Models({
                   <span><strong>{row.name}</strong><small>v{row.version} / {row.holdings_count} holdings / top {row.top_holding || "n/a"} {fmtPct(row.top_weight_pct)}</small></span>
                   <span><b className={row.approval_status === "approved" ? "tone-positive" : "tone-warning"}>{formatStatus(row.approval_status)}</b><small>{row.approved_by || "Not approved"}</small></span>
                   <span>
-                    <b className={row.risk_limit_state === "breach" ? "tone-warning" : "tone-positive"}>{formatStatus(row.risk_limit_state)}</b>
-                    <small>{row.risk_limit_violations[0]?.message || `Single ${row.risk_limits.max_single_position_pct}% max / min ${row.risk_limits.min_holdings} holdings`}</small>
+                    <b className={row.risk_limit_state === "breach" ? "tone-warning" : "tone-positive"}>{row.can_approve ? formatStatus(row.risk_limit_state) : "Risk-limit blocked"}</b>
+                    <small>{row.approval_blocked_reason || row.risk_limit_violations[0]?.message || `Single ${row.risk_limits.max_single_position_pct}% max / min ${row.risk_limits.min_holdings} holdings`}</small>
                   </span>
                   <span><b>{formatStatus(row.rebalance_status)}</b><small>{row.last_rebalance_at ? formatDate(row.last_rebalance_at) : `${row.rebalance_rules.frequency} / ${row.rebalance_rules.drift_band_pct}% band`}</small></span>
                   <span><b>{row.snapshot_count}</b><small>{row.provenance.version ? `Template v${row.provenance.version}` : row.provenance.source_type}</small></span>
@@ -339,8 +350,11 @@ export function Models({
                       placeholder="Change notes"
                       aria-label={`Change notes for ${row.name}`}
                     />
-                    <button type="button" disabled={Boolean(recording)} onClick={() => recordGovernance(row.id, "approval_update", "approved")}>
+                    <button type="button" disabled={Boolean(recording) || !row.can_approve} onClick={() => recordGovernance(row.id, "approval_update", "approved")}>
                       {recording === `${row.id}:approval_update` ? "Saving..." : "Approve"}
+                    </button>
+                    <button type="button" disabled={Boolean(recording)} onClick={() => recordGovernance(row.id, "approval_update", "rejected")}>
+                      Reject
                     </button>
                     <button type="button" disabled={Boolean(recording)} onClick={() => recordGovernance(row.id, "archive_snapshot")}>
                       Snapshot
@@ -348,10 +362,55 @@ export function Models({
                     <button type="button" disabled={Boolean(recording)} onClick={() => recordGovernance(row.id, "rebalance_recorded")}>
                       Rebalance
                     </button>
+                    <button type="button" disabled={Boolean(packetLoading)} onClick={() => void loadApprovalPacket(row.id)}>
+                      {packetLoading === row.id ? "Loading..." : "Approval Packet"}
+                    </button>
                   </span>
                 </div>
               ))}
             </div>
+            {approvalPacket && (
+              <section className="governance-packet-panel">
+                <header>
+                  <div>
+                    <h2>Approval Packet</h2>
+                    <p>{approvalPacket.model.name} · v{approvalPacket.version} · {formatStatus(approvalPacket.approval.status)}</p>
+                  </div>
+                  <a href={approvalPacket.export.html_url} target="_blank" rel="noreferrer">Export HTML</a>
+                </header>
+                <div className="metric-grid">
+                  <div className="stat-tile"><span>Approval Gate</span><strong className={approvalPacket.risk_gate.can_approve ? "tone-positive" : "tone-warning"}>{approvalPacket.risk_gate.can_approve ? "Pass" : "Blocked"}</strong><small>{approvalPacket.risk_gate.blocked_reason || "Risk limits pass"}</small></div>
+                  <div className="stat-tile"><span>Version Diff</span><strong>{fmtPct(approvalPacket.version_diff.turnover_pct)}</strong><small>{approvalPacket.version_diff.summary}</small></div>
+                  <div className="stat-tile"><span>Committee Notes</span><strong>{approvalPacket.committee_notes.length}</strong><small>Approval/rejection/change notes</small></div>
+                  <div className="stat-tile"><span>Snapshots</span><strong>{approvalPacket.snapshots.length}</strong><small>Before / after archive</small></div>
+                </div>
+                <div className="governance-log-grid">
+                  <section>
+                    <h2>Version Diff</h2>
+                    {approvalPacket.version_diff.added.length === 0 && approvalPacket.version_diff.removed.length === 0 && approvalPacket.version_diff.changed_weights.length === 0 ? (
+                      <p className="muted">{approvalPacket.version_diff.summary}</p>
+                    ) : (
+                      approvalPacket.version_diff.changed_weights.slice(0, 5).map((row) => (
+                        <article key={row.ticker}><strong>{row.ticker}</strong><span>{fmtPct(row.from_weight_pct)} to {fmtPct(row.to_weight_pct)}</span><p>{fmtPct(row.change_pct)} change</p></article>
+                      ))
+                    )}
+                  </section>
+                  <section>
+                    <h2>Committee Notes</h2>
+                    {approvalPacket.committee_notes.length === 0 ? (
+                      <p className="muted">No committee notes recorded.</p>
+                    ) : approvalPacket.committee_notes.slice(0, 4).map((note) => (
+                      <article key={note.event_id}><strong>{note.actor}</strong><span>{formatDate(note.created_at)} / {formatStatus(note.action)}</span><p>{note.note}</p></article>
+                    ))}
+                  </section>
+                  <section>
+                    <h2>Archived Before / After</h2>
+                    <article><strong>Before snapshot</strong><span>{Array.isArray((approvalPacket.before_snapshot as { holdings?: unknown[] }).holdings) ? `${(approvalPacket.before_snapshot as { holdings?: unknown[] }).holdings?.length || 0} holdings` : "Not recorded"}</span><p>Archived before model edits when available.</p></article>
+                    <article><strong>After snapshot</strong><span>{approvalPacket.after_snapshot.holdings?.length || 0} holdings</span><p>Current packet state for committee review.</p></article>
+                  </section>
+                </div>
+              </section>
+            )}
             <div className="governance-log-grid">
               <section>
                 <h2>Rebalance History</h2>

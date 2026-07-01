@@ -6,6 +6,7 @@ alter Helios analytics, trade labels, forecasts, scores, or provenance gates.
 from __future__ import annotations
 
 from collections import Counter
+from html import escape
 from typing import Any
 
 from . import data, mandate, model_library, persistence, portfolio
@@ -89,6 +90,7 @@ def record_event(
     action: str = "",
     note: str = "",
     approval_status: str = "",
+    previous_model: portfolio.Model | None = None,
 ) -> dict[str, Any]:
     """Archive a governance event for the current model state."""
     store = persistence.get_store()
@@ -99,16 +101,41 @@ def record_event(
     current = _model_row(model, current_events)
     status = _normalise_status(approval_status) or current["approval_status"]
     safe_action = _normalise_action(action, bool(approval_status))
+    safe_note = str(note or "").strip()
+    if status in {"approved", "rejected"} and len(safe_note) < 5:
+        return {
+            "recorded": False,
+            "status_code": 400,
+            "warning": "Committee notes are required before approving or rejecting a model.",
+        }
+    if status == "approved" and not current["can_approve"]:
+        return {
+            "recorded": False,
+            "status_code": 400,
+            "warning": current["approval_blocked_reason"] or "Cannot approve model while risk-limit breaches are active.",
+        }
     version = store.next_model_governance_version(model.id)
-    snapshot = _snapshot(model, version=version, approval_status=status)
+    snapshot = _snapshot(
+        model,
+        version=version,
+        approval_status=status,
+        previous_model=previous_model,
+        action=safe_action,
+        note=safe_note,
+    )
     event = store.record_model_governance_event(
         model_id=model.id,
         version=version,
         actor=actor,
         action=safe_action,
-        note=note,
+        note=safe_note,
         approval_status=status,
         snapshot=snapshot,
+        metadata={
+            "committee_note": safe_note,
+            "version_diff": snapshot.get("version_diff") or {},
+            "risk_gate": snapshot.get("risk_gate") or {},
+        },
     )
     return {"recorded": event is not None, "event": event, "warning": "" if event else store.warning}
 
@@ -157,6 +184,8 @@ def save_edit(
         actor=actor or DEFAULT_ACTOR,
         action="model_edit",
         note=note,
+        approval_status="pending_review",
+        previous_model=model,
     )
     if not event_result.get("recorded"):
         return {"saved": False, "warning": event_result.get("warning") or "Could not record model edit governance event."}
@@ -167,6 +196,110 @@ def save_edit(
     }
 
 
+def approval_packet(model: portfolio.Model) -> dict[str, Any]:
+    """Build an exportable local approval packet for committee review."""
+    store = persistence.get_store()
+    if not store.available:
+        return {
+            "available": False,
+            "warning": store.warning or "SQLite persistence is required for model approval packets.",
+            "disclaimer": _disclaimer(),
+        }
+    events = store.model_governance_events(model.id, limit=1000)
+    row = _model_row(model, events)
+    event_summaries = [_event_summary(event) for event in events]
+    snapshot_summaries = [
+        _snapshot_summary(event)
+        for event in events
+        if isinstance(event.get("snapshot"), dict) and event["snapshot"]
+    ]
+    latest_snapshot = next(
+        (event.get("snapshot") for event in events if isinstance(event.get("snapshot"), dict) and event.get("snapshot")),
+        {},
+    )
+    before_snapshot = latest_snapshot.get("before_snapshot") or {}
+    after_snapshot = latest_snapshot.get("after_snapshot") or _compact_model_snapshot(model, row["version"])
+    version_diff = latest_snapshot.get("version_diff") or _empty_version_diff()
+    packet = {
+        "available": True,
+        "packet_type": "model_approval_packet",
+        "model": row,
+        "approval": {
+            "status": row["approval_status"],
+            "approved_by": row["approved_by"],
+            "approval_updated_at": row["approval_updated_at"],
+            "can_approve": row["can_approve"],
+            "blocked_reason": row["approval_blocked_reason"],
+        },
+        "risk_gate": _risk_gate(model),
+        "risk_limits": row["risk_limits"],
+        "version": row["version"],
+        "version_diff": version_diff,
+        "before_snapshot": before_snapshot,
+        "after_snapshot": after_snapshot,
+        "committee_notes": [
+            {
+                "event_id": event["id"],
+                "created_at": event["created_at"],
+                "actor": event["actor"],
+                "action": event["action"],
+                "note": event["note"],
+            }
+            for event in events
+            if event.get("note")
+        ],
+        "snapshots": snapshot_summaries,
+        "audit_trail": event_summaries,
+        "export": {
+            "formats": ["json", "html"],
+            "json_url": f"/api/model-governance/{model.id}/approval-packet",
+            "html_url": f"/api/model-governance/{model.id}/approval-packet.html",
+        },
+        "disclaimer": _disclaimer(),
+    }
+    return packet
+
+
+def render_approval_packet_html(packet: dict[str, Any]) -> str:
+    model = packet.get("model") if isinstance(packet.get("model"), dict) else {}
+    risk_gate = packet.get("risk_gate") if isinstance(packet.get("risk_gate"), dict) else {}
+    version_diff = packet.get("version_diff") if isinstance(packet.get("version_diff"), dict) else {}
+    notes = packet.get("committee_notes") if isinstance(packet.get("committee_notes"), list) else []
+    audit = packet.get("audit_trail") if isinstance(packet.get("audit_trail"), list) else []
+    holdings = (packet.get("after_snapshot") or {}).get("holdings") if isinstance(packet.get("after_snapshot"), dict) else []
+    changed = version_diff.get("changed_weights") if isinstance(version_diff.get("changed_weights"), list) else []
+    added = version_diff.get("added") if isinstance(version_diff.get("added"), list) else []
+    removed = version_diff.get("removed") if isinstance(version_diff.get("removed"), list) else []
+    return "\n".join([
+        "<!doctype html>",
+        "<html><head><meta charset=\"utf-8\"><title>Model Approval Packet</title>",
+        "<style>body{font-family:Arial,sans-serif;background:#08111d;color:#e6eef8;margin:32px;line-height:1.45}section{border:1px solid #26384d;border-radius:8px;padding:18px;margin:16px 0;background:#101b2a}h1,h2{margin:0 0 10px}table{width:100%;border-collapse:collapse}td,th{border-bottom:1px solid #26384d;padding:8px;text-align:left}.muted{color:#9fb1c7}.warn{color:#ffd24a}.ok{color:#47d66f}</style>",
+        "</head><body>",
+        f"<h1>Model Approval Packet: {escape(str(model.get('name') or 'Model'))}</h1>",
+        f"<p class=\"muted\">Version {escape(str(packet.get('version') or ''))} / Status {escape(str((packet.get('approval') or {}).get('status') or ''))}</p>",
+        "<section><h2>Approval Gate</h2>",
+        f"<p class=\"{'ok' if risk_gate.get('can_approve') else 'warn'}\">{escape('Can approve' if risk_gate.get('can_approve') else risk_gate.get('blocked_reason') or 'Approval blocked')}</p>",
+        "</section>",
+        "<section><h2>Version Diff</h2>",
+        f"<p>{escape(str(version_diff.get('summary') or 'No version diff recorded.'))}</p>",
+        _html_table(["Ticker", "From", "To"], [[row.get("ticker"), row.get("from_weight_pct"), row.get("to_weight_pct")] for row in changed]),
+        _html_table(["Added", "Weight"], [[row.get("ticker"), row.get("weight_pct")] for row in added]),
+        _html_table(["Removed", "Weight"], [[row.get("ticker"), row.get("weight_pct")] for row in removed]),
+        "</section>",
+        "<section><h2>Current Holdings</h2>",
+        _html_table(["Ticker", "Weight"], [[row.get("ticker"), row.get("weight_pct")] for row in holdings if isinstance(row, dict)]),
+        "</section>",
+        "<section><h2>Committee Notes</h2>",
+        "".join(f"<article><strong>{escape(str(row.get('actor') or ''))}</strong><p>{escape(str(row.get('note') or ''))}</p></article>" for row in notes if isinstance(row, dict)) or "<p class=\"muted\">No committee notes recorded.</p>",
+        "</section>",
+        "<section><h2>Audit Trail</h2>",
+        _html_table(["Version", "Actor", "Action", "Status"], [[row.get("version"), row.get("actor"), row.get("action"), row.get("approval_status")] for row in audit if isinstance(row, dict)]),
+        "</section>",
+        f"<p class=\"muted\">{escape(str(packet.get('disclaimer') or _disclaimer()))}</p>",
+        "</body></html>",
+    ])
+
+
 def _model_row(model: portfolio.Model, events: list[dict[str, Any]]) -> dict[str, Any]:
     latest_event = events[0] if events else None
     latest_status_event = next((event for event in events if event.get("approval_status")), None)
@@ -175,6 +308,7 @@ def _model_row(model: portfolio.Model, events: list[dict[str, Any]]) -> dict[str
     limits = _risk_limits(model)
     rebalance = _rebalance_rules(model)
     violations = _risk_limit_violations(model, limits)
+    risk_gate = _risk_gate(model)
     latest_rebalance = next((event for event in events if event.get("action") in REBALANCE_ACTIONS), None)
     latest_note_event = next((event for event in events if event.get("note")), None)
     approved_by = ""
@@ -195,6 +329,8 @@ def _model_row(model: portfolio.Model, events: list[dict[str, Any]]) -> dict[str
         "risk_limits": limits,
         "risk_limit_state": "breach" if violations else "within_limits",
         "risk_limit_violations": violations,
+        "can_approve": risk_gate["can_approve"],
+        "approval_blocked_reason": risk_gate["blocked_reason"],
         "rebalance_rules": rebalance,
         "rebalance_status": "recorded" if latest_rebalance else "not_recorded",
         "last_rebalance_at": latest_rebalance.get("created_at") if latest_rebalance else None,
@@ -317,7 +453,17 @@ def _holdings_payload(holdings: list[portfolio.Holding]) -> list[dict[str, Any]]
     ]
 
 
-def _snapshot(model: portfolio.Model, *, version: int, approval_status: str) -> dict[str, Any]:
+def _snapshot(
+    model: portfolio.Model,
+    *,
+    version: int,
+    approval_status: str,
+    previous_model: portfolio.Model | None = None,
+    action: str = "",
+    note: str = "",
+) -> dict[str, Any]:
+    before_snapshot = _compact_model_snapshot(previous_model, max(1, version - 1)) if previous_model is not None else {}
+    after_snapshot = _compact_model_snapshot(model, version)
     return {
         "model": {
             "id": model.id,
@@ -334,7 +480,13 @@ def _snapshot(model: portfolio.Model, *, version: int, approval_status: str) -> 
         ],
         "risk_limits": _risk_limits(model),
         "risk_limit_violations": _risk_limit_violations(model, _risk_limits(model)),
+        "risk_gate": _risk_gate(model),
         "rebalance_rules": _rebalance_rules(model),
+        "before_snapshot": before_snapshot,
+        "after_snapshot": after_snapshot,
+        "version_diff": _version_diff(previous_model, model) if previous_model is not None else _empty_version_diff(),
+        "event_action": action,
+        "committee_note": note,
         "provenance": _template_for_model(model).get("provenance", {
             "source_type": "client_model",
             "version": "",
@@ -343,6 +495,92 @@ def _snapshot(model: portfolio.Model, *, version: int, approval_status: str) -> 
         }),
         "disclaimer": _disclaimer(),
     }
+
+
+def _compact_model_snapshot(model: portfolio.Model, version: int) -> dict[str, Any]:
+    limits = _risk_limits(model)
+    return {
+        "model": {
+            "id": model.id,
+            "name": model.name,
+            "mandate": model.mandate_key,
+            "mandate_label": mandate.get(model.mandate_key)["label"],
+        },
+        "version": int(version),
+        "holdings": _holdings_payload(model.holdings),
+        "risk_limits": limits,
+        "risk_limit_violations": _risk_limit_violations(model, limits),
+        "risk_gate": _risk_gate(model),
+    }
+
+
+def _version_diff(before: portfolio.Model | None, after: portfolio.Model) -> dict[str, Any]:
+    if before is None:
+        return _empty_version_diff()
+    before_weights = {holding.ticker: round(float(holding.weight) * 100, 2) for holding in before.holdings}
+    after_weights = {holding.ticker: round(float(holding.weight) * 100, 2) for holding in after.holdings}
+    added = [
+        {"ticker": ticker, "weight_pct": after_weights[ticker]}
+        for ticker in after_weights
+        if ticker not in before_weights
+    ]
+    removed = [
+        {"ticker": ticker, "weight_pct": before_weights[ticker]}
+        for ticker in before_weights
+        if ticker not in after_weights
+    ]
+    changed = [
+        {
+            "ticker": ticker,
+            "from_weight_pct": before_weights[ticker],
+            "to_weight_pct": after_weights[ticker],
+            "change_pct": round(after_weights[ticker] - before_weights[ticker], 2),
+        }
+        for ticker in after_weights
+        if ticker in before_weights and abs(after_weights[ticker] - before_weights[ticker]) >= 0.01
+    ]
+    all_tickers = set(before_weights) | set(after_weights)
+    turnover_pct = round(sum(abs(after_weights.get(ticker, 0.0) - before_weights.get(ticker, 0.0)) for ticker in all_tickers) / 2.0, 2)
+    summary = f"{len(added)} added, {len(removed)} removed, {len(changed)} changed weights; estimated one-way turnover {turnover_pct:.2f}%."
+    return {
+        "added": added,
+        "removed": removed,
+        "changed_weights": changed,
+        "turnover_pct": turnover_pct,
+        "summary": summary,
+    }
+
+
+def _empty_version_diff() -> dict[str, Any]:
+    return {
+        "added": [],
+        "removed": [],
+        "changed_weights": [],
+        "turnover_pct": 0.0,
+        "summary": "No holding-level version changes recorded.",
+    }
+
+
+def _risk_gate(model: portfolio.Model) -> dict[str, Any]:
+    limits = _risk_limits(model)
+    violations = _risk_limit_violations(model, limits)
+    return {
+        "can_approve": not violations,
+        "state": "blocked" if violations else "pass",
+        "blocked_reason": "Risk-limit breaches must be resolved before approval." if violations else "",
+        "violations": violations,
+    }
+
+
+def _html_table(headers: list[str], rows: list[list[Any]]) -> str:
+    if not rows:
+        return "<p class=\"muted\">None.</p>"
+    head = "".join(f"<th>{escape(str(header))}</th>" for header in headers)
+    body = "".join(
+        "<tr>" + "".join(f"<td>{escape(str(value if value is not None else ''))}</td>" for value in row) + "</tr>"
+        for row in rows
+    )
+    return f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
 
 
 def _snapshot_summary(event: dict[str, Any]) -> dict[str, Any]:
@@ -359,10 +597,12 @@ def _snapshot_summary(event: dict[str, Any]) -> dict[str, Any]:
         "approval_status": event["approval_status"],
         "holding_count": len(snapshot.get("holdings") or []),
         "risk_limit_state": "breach" if snapshot.get("risk_limit_violations") else "within_limits",
+        "version_diff": snapshot.get("version_diff") or _empty_version_diff(),
     }
 
 
 def _event_summary(event: dict[str, Any]) -> dict[str, Any]:
+    snapshot = event.get("snapshot") if isinstance(event.get("snapshot"), dict) else {}
     return {
         "id": event["id"],
         "model_id": event["model_id"],
@@ -372,6 +612,9 @@ def _event_summary(event: dict[str, Any]) -> dict[str, Any]:
         "action": event["action"],
         "note": event["note"],
         "approval_status": event["approval_status"],
+        "committee_note": snapshot.get("committee_note") or event.get("note") or "",
+        "version_diff": snapshot.get("version_diff") or _empty_version_diff(),
+        "risk_gate": snapshot.get("risk_gate") or {},
     }
 
 

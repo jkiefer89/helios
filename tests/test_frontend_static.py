@@ -83,9 +83,17 @@ def test_models_view_exposes_governed_model_library():
     assert "Archived Snapshots" in source
     assert "Rebalance History" in source
     assert "Who changed what" in source
+    assert "Model Governance v2" in source
+    assert "Reject" in source
+    assert "Approval Packet" in source
+    assert "Version Diff" in source
+    assert "Risk-limit blocked" in source
+    assert "api.modelApprovalPacket" in source
+    assert "modelApprovalPacket:" in client_source
     assert "api.modelGovernance" in source
     assert "modelGovernance:" in client_source
     assert "ModelGovernanceResponse" in type_source
+    assert "ModelGovernanceApprovalPacket" in type_source
 
 
 def test_models_view_exposes_native_model_editor():

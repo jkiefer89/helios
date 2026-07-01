@@ -3085,6 +3085,31 @@ p {
   grid-column: 1 / -1;
 }
 
+.governance-packet-panel {
+  display: grid;
+  gap: 0.8rem;
+  border: 1px solid rgba(76, 157, 255, 0.28);
+  border-radius: 6px;
+  background: linear-gradient(180deg, rgba(20, 36, 55, 0.68), rgba(7, 12, 20, 0.62));
+  padding: 0.85rem;
+}
+
+.governance-packet-panel > header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 0.9rem;
+}
+
+.governance-packet-panel h2,
+.governance-packet-panel p {
+  margin: 0;
+}
+
+.governance-packet-panel > header a {
+  white-space: nowrap;
+}
+
 .governance-log-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

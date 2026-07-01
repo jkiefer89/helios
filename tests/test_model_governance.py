@@ -1,6 +1,5 @@
 import app as helios
-from engine import data, persistence, portfolio
-from tests.conftest import price_csv
+from engine import persistence, portfolio
 
 
 def _use_db(monkeypatch, tmp_path):
@@ -19,11 +18,10 @@ def _client():
 
 def test_model_governance_tracks_versions_approval_risk_limits_and_history(monkeypatch, tmp_path):
     _use_db(monkeypatch, tmp_path)
-    data.parse_csv(price_csv(days=260), "REAL1", "Real One", source_filename="real1.csv")
     model = portfolio.parse_model_file(
-        b"Ticker,Weight\nREAL1,70\nREAL2,30\n",
-        "concentrated.csv",
-        "Concentrated Growth",
+        b"Ticker,Weight\nAAPL,20\nMSFT,20\nGOOGL,20\nAMZN,20\nNVDA,20\n",
+        "committee-ready.csv",
+        "Committee Ready Growth",
         "balanced",
         "Advisor-created model for governance review.",
     )
@@ -34,11 +32,12 @@ def test_model_governance_tracks_versions_approval_risk_limits_and_history(monke
     row = next(item for item in initial["models"] if item["id"] == model.id)
     assert row["version"] == 1
     assert row["approval_status"] == "draft"
-    assert row["risk_limit_state"] == "breach"
-    assert row["risk_limit_violations"][0]["field"] == "max_single_position_pct"
+    assert row["risk_limit_state"] == "within_limits"
+    assert row["risk_limit_violations"] == []
+    assert row["can_approve"] is True
     assert row["risk_limits"]["max_single_position_pct"] == 35.0
     assert row["rebalance_status"] == "not_recorded"
-    assert initial["summary"]["breach_count"] == 1
+    assert initial["summary"]["breach_count"] == 0
 
     resp = client.post(
         f"/api/model-governance/{model.id}/events",
@@ -56,7 +55,7 @@ def test_model_governance_tracks_versions_approval_risk_limits_and_history(monke
     assert event["approval_status"] == "approved"
     assert event["actor"] == "Advisor Console"
     assert event["snapshot"]["model"]["id"] == model.id
-    assert event["snapshot"]["holdings"][0]["ticker"] == "REAL1"
+    assert event["snapshot"]["holdings"][0]["ticker"] == "AAPL"
 
     updated = client.get("/api/model-governance").get_json()
     governed = next(item for item in updated["models"] if item["id"] == model.id)
@@ -71,6 +70,160 @@ def test_model_governance_tracks_versions_approval_risk_limits_and_history(monke
     assert updated["rebalance_history"][0]["model_id"] == model.id
     assert updated["change_log"][0]["actor"] == "Advisor Console"
     assert updated["summary"]["approved_count"] == 1
+
+
+def test_model_governance_blocks_approval_when_risk_limits_breach_and_allows_rejection(monkeypatch, tmp_path):
+    _use_db(monkeypatch, tmp_path)
+    model = portfolio.parse_model_file(
+        b"Ticker,Weight\nAAPL,70\nMSFT,30\n",
+        "breached.csv",
+        "Breached Governance Model",
+        "balanced",
+        "Committee review model with excessive concentration.",
+    )
+    client = _client()
+
+    blocked = client.post(
+        f"/api/model-governance/{model.id}/events",
+        json={
+            "actor": "Investment Committee",
+            "approval_status": "approved",
+            "action": "approval_update",
+            "note": "Approve for implementation despite concentration.",
+        },
+    )
+
+    assert blocked.status_code == 400
+    assert "risk-limit" in blocked.get_json()["error"].lower()
+    body = client.get("/api/model-governance").get_json()
+    row = next(item for item in body["models"] if item["id"] == model.id)
+    assert row["approval_status"] == "draft"
+    assert row["can_approve"] is False
+    assert "risk-limit" in row["approval_blocked_reason"].lower()
+
+    rejected = client.post(
+        f"/api/model-governance/{model.id}/events",
+        json={
+            "actor": "Investment Committee",
+            "approval_status": "rejected",
+            "action": "approval_update",
+            "note": "Rejected until concentration is below the mandate limit.",
+        },
+    )
+
+    assert rejected.status_code == 200
+    event = rejected.get_json()["event"]
+    assert event["approval_status"] == "rejected"
+    assert event["note"] == "Rejected until concentration is below the mandate limit."
+    updated = client.get("/api/model-governance").get_json()
+    row = next(item for item in updated["models"] if item["id"] == model.id)
+    assert row["approval_status"] == "rejected"
+    assert row["approved_by"] == ""
+    assert row["latest_change_note"] == "Rejected until concentration is below the mandate limit."
+
+
+def test_model_editor_archives_before_after_diff_and_resets_approval(monkeypatch, tmp_path):
+    _use_db(monkeypatch, tmp_path)
+    model = portfolio.parse_model_file(
+        b"Ticker,Weight\nAAPL,20\nMSFT,20\nGOOGL,20\nAMZN,20\nNVDA,20\n",
+        "approved-edit.csv",
+        "Approved Edit Model",
+        "balanced",
+        "Approved model before a committee edit.",
+    )
+    client = _client()
+    approved = client.post(
+        f"/api/model-governance/{model.id}/events",
+        json={
+            "actor": "Investment Committee",
+            "approval_status": "approved",
+            "action": "approval_update",
+            "note": "Approved original five-name balanced sleeve.",
+        },
+    )
+    assert approved.status_code == 200
+
+    edited = client.post(
+        f"/api/models/{model.id}/editor",
+        json={
+            "actor": "Portfolio Manager",
+            "change_note": "Added AVGO and trimmed AAPL after committee review.",
+            "holdings": [
+                {"ticker": "AAPL", "weight_pct": 15},
+                {"ticker": "MSFT", "weight_pct": 20},
+                {"ticker": "GOOGL", "weight_pct": 20},
+                {"ticker": "AMZN", "weight_pct": 20},
+                {"ticker": "NVDA", "weight_pct": 15},
+                {"ticker": "AVGO", "weight_pct": 10},
+            ],
+        },
+    )
+
+    assert edited.status_code == 200
+    event = edited.get_json()["event"]
+    snapshot = event["snapshot"]
+    assert event["approval_status"] == "pending_review"
+    assert snapshot["before_snapshot"]["holdings"][0]["ticker"] == "AAPL"
+    assert snapshot["after_snapshot"]["holdings"][-1]["ticker"] == "AVGO"
+    assert snapshot["version_diff"]["added"] == [{"ticker": "AVGO", "weight_pct": 10.0}]
+    assert snapshot["version_diff"]["removed"] == []
+    assert any(row["ticker"] == "AAPL" and row["from_weight_pct"] == 20.0 and row["to_weight_pct"] == 15.0 for row in snapshot["version_diff"]["changed_weights"])
+    assert "Added AVGO" in snapshot["committee_note"]
+
+    governance = client.get("/api/model-governance").get_json()
+    row = next(item for item in governance["models"] if item["id"] == model.id)
+    assert row["approval_status"] == "pending_review"
+    assert row["can_approve"] is True
+    assert governance["change_log"][0]["version_diff"]["added"][0]["ticker"] == "AVGO"
+    assert governance["change_log"][0]["committee_note"] == "Added AVGO and trimmed AAPL after committee review."
+
+
+def test_model_governance_approval_packet_exports_committee_evidence(monkeypatch, tmp_path):
+    _use_db(monkeypatch, tmp_path)
+    model = portfolio.parse_model_file(
+        b"Ticker,Weight\nAAPL,20\nMSFT,20\nGOOGL,20\nAMZN,20\nNVDA,20\n",
+        "packet.csv",
+        "Packet Model",
+        "balanced",
+        "Approval packet model.",
+    )
+    client = _client()
+    edit = client.post(
+        f"/api/models/{model.id}/editor",
+        json={
+            "actor": "Portfolio Manager",
+            "change_note": "Changed weights for approval packet evidence.",
+            "holdings": [
+                {"ticker": "AAPL", "weight_pct": 18},
+                {"ticker": "MSFT", "weight_pct": 22},
+                {"ticker": "GOOGL", "weight_pct": 20},
+                {"ticker": "AMZN", "weight_pct": 20},
+                {"ticker": "NVDA", "weight_pct": 20},
+            ],
+        },
+    )
+    assert edit.status_code == 200
+
+    packet_resp = client.get(f"/api/model-governance/{model.id}/approval-packet")
+
+    assert packet_resp.status_code == 200
+    packet = packet_resp.get_json()["packet"]
+    assert packet["model"]["id"] == model.id
+    assert packet["approval"]["status"] == "pending_review"
+    assert packet["risk_gate"]["can_approve"] is True
+    assert packet["version_diff"]["changed_weights"]
+    assert packet["before_snapshot"]["holdings"]
+    assert packet["after_snapshot"]["holdings"]
+    assert packet["committee_notes"][0]["note"] == "Changed weights for approval packet evidence."
+    assert packet["export"]["html_url"].endswith("/approval-packet.html")
+    assert "analysis-only" in packet["disclaimer"].lower()
+
+    html = client.get(packet["export"]["html_url"])
+
+    assert html.status_code == 200
+    assert "text/html" in html.headers["Content-Type"]
+    assert b"Model Approval Packet" in html.data
+    assert b"Changed weights for approval packet evidence" in html.data
 
 
 def test_model_governance_is_unavailable_without_sqlite_persistence(monkeypatch):

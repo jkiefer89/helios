@@ -12,6 +12,7 @@ import type {
   ModelEditHoldingInput,
   ModelEditPreviewResponse,
   ModelEditSaveResponse,
+  ModelGovernanceApprovalPacket,
   ModelSummary,
   ModelGovernanceResponse,
   ModelTemplate,
@@ -60,6 +61,8 @@ export const api = {
   mandates: () => request<{ mandates: MandateSummary[] }>("/api/mandates"),
   models: () => request<{ models: ModelSummary[] }>("/api/models"),
   modelGovernance: () => request<ModelGovernanceResponse>("/api/model-governance"),
+  modelApprovalPacket: (id: string) =>
+    request<{ packet: ModelGovernanceApprovalPacket }>(`/api/model-governance/${encodeURIComponent(id)}/approval-packet`),
   modelValidation: () => request<ModelValidationResponse>("/api/model-validation"),
   recordModelGovernanceEvent: (
     id: string,
