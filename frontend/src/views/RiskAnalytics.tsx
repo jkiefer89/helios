@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
-import type { ModelSummary, RiskAnalyticsResponse } from "../api/types";
+import type { ClientRiskPack, ModelSummary, RiskAnalyticsResponse } from "../api/types";
 import { DataQualityBanner } from "../components/badges/DataModeBadge";
 import { Panel, StatTile } from "../components/cards/Panel";
 import { DonutChart, MiniBars } from "../components/charts/Charts";
@@ -109,6 +109,8 @@ export function RiskAnalytics({
             </Panel>
           </section>
 
+          <ClientGradeRiskPack pack={payload.client_risk_pack} />
+
           <section className="dashboard-grid">
             <Panel title="Factor Exposure" meta="weighted taxonomy">
               <MiniBars rows={factorRows} />
@@ -188,5 +190,95 @@ export function RiskAnalytics({
         </>
       )}
     </div>
+  );
+}
+
+function ClientGradeRiskPack({ pack }: { pack?: ClientRiskPack }) {
+  if (!pack) return null;
+  if (!pack.available) {
+    return (
+      <Panel title="Client-Grade Risk Pack" meta="real data required">
+        <EmptyState title="Risk pack locked" body={pack.required_action || "Eligible real model histories are required before rendering client-grade risk language."} />
+      </Panel>
+    );
+  }
+  return (
+    <Panel title="Client-Grade Risk Pack" meta={titleCase(pack.summary.risk_posture || "advisor review")}>
+      <div className="risk-pack-grid">
+        <section>
+          <h2>Benchmark-Relative Drawdown</h2>
+          <div className="metric-grid">
+            <StatTile label="Benchmark" value={pack.benchmark_relative_drawdown.benchmark_symbol || pack.summary.benchmark_symbol || "—"} />
+            <StatTile label="Rel. drawdown" value={fmtPct(pack.benchmark_relative_drawdown.relative_drawdown_pct)} tone="warning" />
+            <StatTile label="Beta" value={fmtNumber(pack.benchmark_relative_drawdown.beta, 2)} />
+            <StatTile label="Tracking error" value={fmtPct(pack.benchmark_relative_drawdown.tracking_error_pct)} />
+          </div>
+          <p className="muted">{pack.benchmark_relative_drawdown.interpretation}</p>
+        </section>
+        <section>
+          <h2>What Would Break This Model</h2>
+          <div className="risk-break-list">
+            {pack.what_would_break_this_model.map((row) => (
+              <article key={`${row.driver}-${row.severity}`}>
+                <strong>{row.driver}</strong>
+                <span className={row.severity === "high" ? "tone-negative" : row.severity === "medium" ? "tone-warning" : ""}>{titleCase(row.severity)}</span>
+                <p>{row.language}</p>
+              </article>
+            ))}
+          </div>
+        </section>
+      </div>
+      <section className="dashboard-grid three risk-pack-panels">
+        <div>
+          <h2>Stress Scenarios</h2>
+          <div className="terminal-table risk-pack-table" tabIndex={0} aria-label="Client risk pack stress scenarios">
+            <div className="terminal-table__head"><span>Scenario</span><span>Impact</span><span>Severity</span></div>
+            {pack.stress_scenarios.slice(0, 5).map((row) => (
+              <div className="table-row" key={row.scenario}>
+                <strong>{row.scenario}<small>{row.what_it_tests}</small></strong>
+                <span className={row.portfolio_impact_pct < 0 ? "tone-negative" : "tone-positive"}>{fmtPct(row.portfolio_impact_pct)}</span>
+                <span>{titleCase(row.severity)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div>
+          <h2>Concentration Warnings</h2>
+          <div className="risk-break-list compact">
+            {pack.concentration_warnings.slice(0, 5).map((row) => (
+              <article key={`${row.type}-${row.title}`}>
+                <strong>{row.title}</strong>
+                <span>{titleCase(row.severity)}</span>
+                <p>{row.detail}</p>
+              </article>
+            ))}
+          </div>
+        </div>
+        <div>
+          <h2>Liquidity Watchlist</h2>
+          <div className="risk-break-list compact">
+            {pack.liquidity_flags.items.slice(0, 5).map((row) => (
+              <article key={`${row.ticker}-${row.flag}`}>
+                <strong>{row.ticker || "Holding"}</strong>
+                <span>{titleCase(row.flag || "review")} · {fmtPct(row.weight_pct)}</span>
+                <p>{row.language}</p>
+              </article>
+            ))}
+          </div>
+        </div>
+      </section>
+      {pack.correlation_clusters.length > 0 && (
+        <div className="risk-pack-clusters">
+          <h2>Correlation Clusters</h2>
+          {pack.correlation_clusters.slice(0, 3).map((cluster) => (
+            <article key={`${cluster.name}-${cluster.type}`}>
+              <strong>{cluster.name || "Correlation cluster"}</strong>
+              <span>{cluster.language}</span>
+            </article>
+          ))}
+        </div>
+      )}
+      <p className="muted">{pack.disclaimer}</p>
+    </Panel>
   );
 }

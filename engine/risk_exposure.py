@@ -124,6 +124,14 @@ def analyze_model_risk(model: portfolio.Model) -> dict[str, Any]:
     factor_exposure = _factor_exposure(model)
     vol_budget = _volatility_budget(metrics, model)
     liquidity = _liquidity_flags(model)
+    concentration = _concentration(model, ps)
+    drawdown = _drawdown_stress(ps.close)
+    scenario_shocks = _scenario_shocks(model, factor_exposure)
+    benchmark_relative = benchmark
+    sector_exposure = _weighted_exposure(model, kind="sector")
+    theme_exposure = _weighted_exposure(model, kind="theme")
+    volatility_contribution = _volatility_contribution(ps)
+    correlation_clusters = _correlation_clusters(returns)
     warnings = list(ps.warnings)
     if benchmark["status"] != "available":
         warnings.append(benchmark["message"])
@@ -140,17 +148,31 @@ def analyze_model_risk(model: portfolio.Model) -> dict[str, Any]:
         "data_provenance": p,
         "mandate": {"key": model.mandate_key, **mandate.get(model.mandate_key)},
         "benchmark": {"symbol": benchmark_symbol, "status": benchmark["status"]},
-        "sector_exposure": _weighted_exposure(model, kind="sector"),
-        "theme_exposure": _weighted_exposure(model, kind="theme"),
+        "sector_exposure": sector_exposure,
+        "theme_exposure": theme_exposure,
         "factor_exposure": factor_exposure,
-        "single_name_concentration": _concentration(model, ps),
+        "single_name_concentration": concentration,
         "volatility_budget": vol_budget,
-        "volatility_contribution": _volatility_contribution(ps),
-        "correlation_clusters": _correlation_clusters(returns),
-        "drawdown_stress": _drawdown_stress(ps.close),
-        "scenario_shocks": _scenario_shocks(model, factor_exposure),
+        "volatility_contribution": volatility_contribution,
+        "correlation_clusters": correlation_clusters,
+        "drawdown_stress": drawdown,
+        "scenario_shocks": scenario_shocks,
         "liquidity_flags": liquidity,
-        "benchmark_relative": benchmark,
+        "benchmark_relative": benchmark_relative,
+        "client_risk_pack": _client_risk_pack(
+            model=model,
+            data_provenance=p,
+            benchmark_symbol=benchmark_symbol,
+            benchmark_relative=benchmark_relative,
+            concentration=concentration,
+            sector_exposure=sector_exposure,
+            factor_exposure=factor_exposure,
+            volatility_budget=vol_budget,
+            drawdown_stress=drawdown,
+            scenario_shocks=scenario_shocks,
+            liquidity=liquidity,
+            correlation_clusters=correlation_clusters,
+        ),
         "provenance": ps.provenance,
         "warnings": _dedupe(warnings),
         "methodology": {
@@ -203,6 +225,7 @@ def _blocked_payload(
         "scenario_shocks": [],
         "liquidity_flags": {"items": [], "summary": {"flagged_count": 0}},
         "benchmark_relative": {"status": "blocked", "benchmark_symbol": signal_journal.benchmark_for_model(model)},
+        "client_risk_pack": _blocked_client_risk_pack(model, reason, missing_tickers),
         "warnings": _dedupe(list(warnings or []) + [reason]),
         "methodology": {
             "analysis_only": True,
@@ -210,6 +233,315 @@ def _blocked_payload(
             "no_trade_execution": True,
         },
         "disclaimer": "Analysis only. Risk analytics require eligible real price history.",
+    }
+
+
+def _blocked_client_risk_pack(model: portfolio.Model, reason: str, missing_tickers: list[str]) -> dict[str, Any]:
+    return {
+        "available": False,
+        "summary": {
+            "model_id": model.id,
+            "model_name": model.name,
+            "risk_posture": "blocked",
+            "benchmark_symbol": signal_journal.benchmark_for_model(model),
+        },
+        "stress_scenarios": [],
+        "benchmark_relative_drawdown": {
+            "status": "blocked",
+            "benchmark_symbol": signal_journal.benchmark_for_model(model),
+            "interpretation": "Benchmark-relative drawdown requires eligible model and benchmark history.",
+        },
+        "concentration_warnings": [],
+        "liquidity_flags": {"items": [], "summary": {"flagged_count": 0, "basis": "Unavailable until real model histories pass provenance checks."}},
+        "correlation_clusters": [],
+        "what_would_break_this_model": [{
+            "driver": "Real history gate",
+            "language": reason or "Eligible live or uploaded price history is required before client-grade risk language is shown.",
+            "severity": "blocked",
+        }],
+        "required_action": "Upload real price history for every model holding before running the client-grade risk pack.",
+        "missing_tickers": missing_tickers,
+        "methodology": _risk_pack_methodology(),
+        "disclaimer": "Analysis only. Client-grade risk packs require eligible real price history and do not guarantee outcomes.",
+    }
+
+
+def _client_risk_pack(
+    *,
+    model: portfolio.Model,
+    data_provenance: dict[str, Any],
+    benchmark_symbol: str,
+    benchmark_relative: dict[str, Any],
+    concentration: dict[str, Any],
+    sector_exposure: list[dict[str, Any]],
+    factor_exposure: dict[str, float],
+    volatility_budget: dict[str, Any],
+    drawdown_stress: dict[str, Any],
+    scenario_shocks: list[dict[str, Any]],
+    liquidity: dict[str, Any],
+    correlation_clusters: list[dict[str, Any]],
+) -> dict[str, Any]:
+    stress = _stress_pack_rows(scenario_shocks)
+    concentration_warnings = _concentration_warnings(concentration, sector_exposure, volatility_budget)
+    liquidity_watchlist = _liquidity_watchlist(liquidity)
+    clusters = _cluster_pack_rows(correlation_clusters)
+    breakpoints = _break_model_language(
+        model=model,
+        stress_scenarios=stress,
+        concentration_warnings=concentration_warnings,
+        liquidity_watchlist=liquidity_watchlist,
+        benchmark_relative=benchmark_relative,
+        factor_exposure=factor_exposure,
+    )
+    risk_posture = _risk_posture(stress, concentration_warnings, liquidity_watchlist, volatility_budget)
+    return {
+        "available": True,
+        "summary": {
+            "model_id": model.id,
+            "model_name": model.name,
+            "risk_posture": risk_posture,
+            "benchmark_symbol": benchmark_symbol,
+            "data_mode": data_provenance.get("data_mode"),
+            "source_counts": data_provenance.get("source_counts") or {},
+        },
+        "stress_scenarios": stress,
+        "benchmark_relative_drawdown": _benchmark_drawdown_pack(benchmark_relative, benchmark_symbol),
+        "concentration_warnings": concentration_warnings,
+        "liquidity_flags": {
+            "items": liquidity_watchlist,
+            "summary": liquidity.get("summary") or {"flagged_count": len(liquidity_watchlist)},
+        },
+        "correlation_clusters": clusters,
+        "what_would_break_this_model": breakpoints,
+        "methodology": _risk_pack_methodology(),
+        "disclaimer": "Analysis only. Stress scenarios and breakpoints are deterministic review language, not forecasts, recommendations, or guarantees.",
+    }
+
+
+def _stress_pack_rows(scenarios: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = []
+    for scenario in sorted(scenarios, key=lambda row: float(row.get("portfolio_impact_pct") or 0.0))[:6]:
+        impact = float(scenario.get("portfolio_impact_pct") or 0.0)
+        rows.append({
+            "scenario": scenario.get("scenario") or "Scenario shock",
+            "portfolio_impact_pct": round(impact, 2),
+            "severity": "high" if impact <= -8 else "medium" if impact <= -4 else "watch" if impact < 0 else "offset",
+            "basis": scenario.get("basis") or "deterministic exposure shock",
+            "what_it_tests": _scenario_language(str(scenario.get("scenario") or "")),
+        })
+    return rows
+
+
+def _scenario_language(name: str) -> str:
+    lower = name.lower()
+    if "growth" in lower:
+        return "Tests sensitivity to valuation compression in growth-heavy holdings."
+    if "rates" in lower:
+        return "Tests rate-sensitive duration, utilities, fixed-income, and growth exposure."
+    if "liquidity" in lower:
+        return "Tests whether lower-liquidity holdings could pressure exits during stress."
+    if "defensive" in lower:
+        return "Tests whether a rotation away from growth and cyclicals would hurt the model."
+    if "equity" in lower:
+        return "Tests broad equity beta during a market drawdown."
+    return "Tests deterministic exposure sensitivity."
+
+
+def _benchmark_drawdown_pack(benchmark: dict[str, Any], benchmark_symbol: str) -> dict[str, Any]:
+    status = benchmark.get("status") or "unavailable"
+    out = {
+        "status": status,
+        "benchmark_symbol": benchmark.get("benchmark_symbol") or benchmark_symbol,
+        "relative_drawdown_pct": benchmark.get("relative_drawdown_pct"),
+        "beta": benchmark.get("beta"),
+        "correlation": benchmark.get("correlation"),
+        "tracking_error_pct": benchmark.get("tracking_error_pct"),
+        "overlap_days": benchmark.get("overlap_days"),
+    }
+    if status == "available":
+        out["interpretation"] = "Shows model drawdown versus benchmark on overlapping real history."
+    else:
+        out["interpretation"] = benchmark.get("message") or "Benchmark-relative drawdown is unavailable until benchmark history overlaps the model."
+    return out
+
+
+def _concentration_warnings(
+    concentration: dict[str, Any],
+    sector_exposure: list[dict[str, Any]],
+    volatility_budget: dict[str, Any],
+) -> list[dict[str, Any]]:
+    warnings: list[dict[str, Any]] = []
+    top = concentration.get("top_holding") or {}
+    top_weight = float(top.get("weight_pct") or 0.0)
+    if top_weight >= 20:
+        warnings.append({
+            "type": "single_name",
+            "severity": "high" if top_weight >= 30 else "medium",
+            "title": "Single-name concentration",
+            "detail": f"{top.get('ticker') or 'Top holding'} is {top_weight:.1f}% of the model.",
+        })
+    top_5 = float(concentration.get("top_5_weight_pct") or 0.0)
+    if top_5 >= 60:
+        warnings.append({
+            "type": "top_5",
+            "severity": "medium",
+            "title": "Top-five concentration",
+            "detail": f"Top five holdings are {top_5:.1f}% of the model.",
+        })
+    if concentration.get("status") == "concentrated":
+        warnings.append({
+            "type": "hhi",
+            "severity": "medium",
+            "title": "HHI concentration",
+            "detail": f"HHI is {concentration.get('hhi')}; effective holdings are {concentration.get('effective_holdings')}.",
+        })
+    for sector in sector_exposure:
+        weight = float(sector.get("weight_pct") or 0.0)
+        if weight >= 45:
+            warnings.append({
+                "type": "sector",
+                "severity": "medium",
+                "title": "Sector concentration",
+                "detail": f"{sector.get('name')} is {weight:.1f}% of the model.",
+            })
+    if volatility_budget.get("status") == "over_budget":
+        warnings.append({
+            "type": "volatility_budget",
+            "severity": "high",
+            "title": "Volatility budget breach",
+            "detail": f"Annualized volatility is {volatility_budget.get('annual_vol_pct')}% versus target {volatility_budget.get('target_vol_pct')}%.",
+        })
+    if not warnings:
+        warnings.append({
+            "type": "review",
+            "severity": "info",
+            "title": "No concentration breach",
+            "detail": "No concentration threshold was triggered by the current model weights.",
+        })
+    return warnings
+
+
+def _liquidity_watchlist(liquidity: dict[str, Any]) -> list[dict[str, Any]]:
+    items = liquidity.get("items") if isinstance(liquidity.get("items"), list) else []
+    flagged = [item for item in items if item.get("flag") != "normal"]
+    watchlist = flagged if flagged else items[:3]
+    return [
+        {
+            "ticker": item.get("ticker"),
+            "weight_pct": item.get("weight_pct"),
+            "liquidity_score": item.get("liquidity_score"),
+            "flag": item.get("flag"),
+            "estimated_adv_usd": item.get("estimated_adv_usd"),
+            "language": "Verify liquidity with current provider/venue data before any implementation."
+            if item.get("flag") != "normal"
+            else "Large-cap liquidity proxy is normal; still verify before execution outside Helios.",
+        }
+        for item in watchlist
+    ]
+
+
+def _cluster_pack_rows(clusters: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out = []
+    for cluster in clusters:
+        pairs = cluster.get("pairs") if isinstance(cluster.get("pairs"), list) else []
+        out.append({
+            "name": cluster.get("name"),
+            "type": cluster.get("type"),
+            "average_correlation": cluster.get("average_correlation"),
+            "pairs": pairs[:5],
+            "language": "High-correlation clusters can reduce diversification when stress is broad."
+            if cluster.get("type") == "high_correlation"
+            else "Diversifier pairs may help, but correlations can rise during market stress."
+            if cluster.get("type") == "diversifier"
+            else "Correlation mix is moderate on available history.",
+        })
+    return out
+
+
+def _break_model_language(
+    *,
+    model: portfolio.Model,
+    stress_scenarios: list[dict[str, Any]],
+    concentration_warnings: list[dict[str, Any]],
+    liquidity_watchlist: list[dict[str, Any]],
+    benchmark_relative: dict[str, Any],
+    factor_exposure: dict[str, float],
+) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    growth = float(factor_exposure.get("growth") or 0.0)
+    if growth >= 30:
+        rows.append({
+            "driver": "Growth factor unwind",
+            "severity": "high" if growth >= 50 else "medium",
+            "language": f"A valuation reset in growth assets would pressure this model because growth exposure is {growth:.1f}%.",
+        })
+    if stress_scenarios:
+        worst = stress_scenarios[0]
+        rows.append({
+            "driver": str(worst.get("scenario") or "Stress scenario"),
+            "severity": str(worst.get("severity") or "watch"),
+            "language": f"The largest deterministic stress is {worst.get('scenario')} at {worst.get('portfolio_impact_pct')}%.",
+        })
+    top_warning = next((warning for warning in concentration_warnings if warning.get("type") == "single_name"), None)
+    if top_warning:
+        rows.append({
+            "driver": "Top holding failure",
+            "severity": str(top_warning.get("severity") or "medium"),
+            "language": str(top_warning.get("detail") or "A single holding drives concentrated model risk."),
+        })
+    if benchmark_relative.get("status") == "available":
+        rel_dd = benchmark_relative.get("relative_drawdown_pct")
+        beta = benchmark_relative.get("beta")
+        rows.append({
+            "driver": "Benchmark-relative drawdown",
+            "severity": "medium",
+            "language": f"Relative drawdown versus {benchmark_relative.get('benchmark_symbol')} is {rel_dd}% with beta {beta}; watch for persistent benchmark divergence.",
+        })
+    else:
+        rows.append({
+            "driver": "Benchmark evidence gap",
+            "severity": "medium",
+            "language": str(benchmark_relative.get("message") or "Benchmark overlap is unavailable, so relative drawdown should be verified before client use."),
+        })
+    flagged = [item for item in liquidity_watchlist if item.get("flag") != "normal"]
+    if flagged:
+        tickers = ", ".join(str(item.get("ticker")) for item in flagged[:4])
+        rows.append({
+            "driver": "Liquidity stress",
+            "severity": "medium",
+            "language": f"Liquidity proxies require review for {tickers}; verify with current provider data before implementation.",
+        })
+    if not rows:
+        rows.append({
+            "driver": "Risk review",
+            "severity": "info",
+            "language": f"{model.name} has no material deterministic break trigger, but advisor review is still required.",
+        })
+    return rows
+
+
+def _risk_posture(
+    stress_scenarios: list[dict[str, Any]],
+    concentration_warnings: list[dict[str, Any]],
+    liquidity_watchlist: list[dict[str, Any]],
+    volatility_budget: dict[str, Any],
+) -> str:
+    if volatility_budget.get("status") == "over_budget":
+        return "elevated"
+    if any(row.get("severity") == "high" for row in stress_scenarios + concentration_warnings):
+        return "elevated"
+    if any(row.get("flag") != "normal" for row in liquidity_watchlist):
+        return "watch"
+    return "review_ready"
+
+
+def _risk_pack_methodology() -> dict[str, bool]:
+    return {
+        "analysis_only": True,
+        "uses_live_or_uploaded_prices_only": True,
+        "no_trade_execution": True,
+        "scenario_stress_not_forecast": True,
+        "does_not_change_analytics": True,
     }
 
 

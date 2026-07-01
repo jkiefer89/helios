@@ -52,6 +52,7 @@ def build_snapshot(
     output_formats = ["html", "pdf", "print"]
     disclosure_blocks = _disclosure_blocks(report)
     signal_journal_payload = _dict(signal_journal_evidence)
+    client_risk_pack = _dict((sections.get("client_risk_pack") if isinstance(sections, dict) else {}) or {})
     audit_trail = _audit_trail(
         report=report,
         created_at=created_at,
@@ -82,6 +83,7 @@ def build_snapshot(
         "source_counts": source_counts,
         "model_metadata": _model_metadata(report) if target_kind == "model" else {},
         "signal_journal": signal_journal_payload,
+        "client_risk_pack": client_risk_pack,
         "warnings": _list(report.get("warnings")),
         "report": report,
         "ai_narrative": _text(ai_narrative)[:6000],
@@ -111,6 +113,7 @@ def build_snapshot(
             "no_return_guarantee": True,
             "report_timestamp": _text(report.get("timestamp")),
             "signal_journal": signal_journal_payload,
+            "client_risk_pack": client_risk_pack,
             "ai_narrative_status": ai_narrative_status or ("provided" if _text(ai_narrative) else "not_requested"),
             "ai_provider": ai_provider or {},
         },
@@ -203,6 +206,7 @@ def render_html(snapshot: dict[str, Any]) -> str:
         _disclosures_html(snapshot),
         _model_metadata_html(snapshot),
         _warnings_html(snapshot),
+        _client_risk_pack_html(snapshot),
         _signal_journal_html(snapshot),
         _ai_html(snapshot),
         "<section>",
@@ -232,6 +236,7 @@ def render_pdf(snapshot: dict[str, Any]) -> bytes:
         ("CLIENT-READY PDF PACKAGE", _rl_cover_page),
         ("EXECUTIVE SUMMARY", _rl_summary_page),
         ("PROVENANCE DASHBOARD", _rl_provenance_page),
+        ("CLIENT-GRADE RISK PACK", _rl_risk_pack_page),
         ("SIGNAL JOURNAL EVIDENCE", _rl_signal_journal_page),
         ("EVIDENCE DETAIL", _rl_evidence_page),
     ]
@@ -441,6 +446,59 @@ def _rl_signal_journal_page(pdf, snapshot: dict[str, Any], width: float, height:
         )
 
 
+def _rl_risk_pack_page(pdf, snapshot: dict[str, Any], width: float, height: float, page_no: int, total: int, section: str, colors) -> None:
+    _rl_header(pdf, width, height, section, colors)
+    _rl_text(pdf, "CLIENT-GRADE RISK PACK", 42, 674, 18, colors.HexColor("#f8fafc"), bold=True)
+    _rl_wrapped(
+        pdf,
+        "Stress scenarios, benchmark-relative drawdown, concentration warnings, liquidity flags, correlation clusters, and breakpoints are analysis-only evidence for advisor review.",
+        42,
+        648,
+        520,
+        9.5,
+        colors.HexColor("#c8d3df"),
+        max_lines=3,
+    )
+    pack = _risk_pack(snapshot)
+    if not pack or not pack.get("available"):
+        _rl_panel(
+            pdf,
+            42,
+            540,
+            width - 84,
+            78,
+            "RISK PACK LOCKED",
+            str((pack or {}).get("required_action") or "Eligible real model history is required before rendering a client-grade risk pack."),
+            colors,
+            accent="#ffd24a",
+        )
+        return
+    summary = pack.get("summary") if isinstance(pack.get("summary"), dict) else {}
+    drawdown = pack.get("benchmark_relative_drawdown") if isinstance(pack.get("benchmark_relative_drawdown"), dict) else {}
+    cards = [
+        ("Risk Posture", summary.get("risk_posture") or "review"),
+        ("Benchmark", summary.get("benchmark_symbol") or drawdown.get("benchmark_symbol") or "benchmark"),
+        ("Relative Drawdown", _fmt_optional_pdf_pct(drawdown.get("relative_drawdown_pct"))),
+        ("Beta", _fmt_pdf_value(drawdown.get("beta"))),
+    ]
+    _rl_card_grid(pdf, cards, 42, 566, 252, 58, colors)
+
+    y = 382
+    _rl_text(pdf, "STRESS SCENARIOS", 42, y, 12, colors.HexColor("#ffd24a"), bold=True)
+    y -= 22
+    for row in (pack.get("stress_scenarios") or [])[:4]:
+        text = f"{row.get('scenario')}: {row.get('portfolio_impact_pct')}% / {row.get('severity')} / {row.get('what_it_tests')}"
+        y = _rl_wrapped(pdf, text, 58, y, 490, 8.5, colors.HexColor("#c8d3df"), max_lines=2)
+        y -= 7
+    y = min(y, 230)
+    _rl_text(pdf, "WHAT WOULD BREAK THIS MODEL", 42, y, 12, colors.HexColor("#ffd24a"), bold=True)
+    y -= 22
+    for row in (pack.get("what_would_break_this_model") or [])[:5]:
+        text = f"{row.get('driver')}: {row.get('language')}"
+        y = _rl_wrapped(pdf, text, 58, y, 490, 8.3, colors.HexColor("#c8d3df"), max_lines=2)
+        y -= 7
+
+
 def _rl_evidence_page(pdf, snapshot: dict[str, Any], width: float, height: float, page_no: int, total: int, section: str, colors) -> None:
     _rl_header(pdf, width, height, section, colors)
     _rl_text(pdf, "EVIDENCE DETAIL", 42, 674, 18, colors.HexColor("#f8fafc"), bold=True)
@@ -638,6 +696,84 @@ def _warnings_html(snapshot: dict[str, Any]) -> str:
         return ""
     items = "".join(f"<li class=\"warn\">{_esc(item)}</li>" for item in warnings)
     return f"<section><h2>Caveats</h2><ul>{items}</ul></section>"
+
+
+def _client_risk_pack_html(snapshot: dict[str, Any]) -> str:
+    pack = _risk_pack(snapshot)
+    if not pack:
+        return ""
+    if not pack.get("available"):
+        return (
+            "<section><h2>Client Risk Pack</h2>"
+            f"<p class=\"warn\">{_esc(pack.get('required_action') or 'Eligible real model history is required before rendering risk-pack evidence.')}</p>"
+            "</section>"
+        )
+    summary = pack.get("summary") if isinstance(pack.get("summary"), dict) else {}
+    drawdown = pack.get("benchmark_relative_drawdown") if isinstance(pack.get("benchmark_relative_drawdown"), dict) else {}
+    liquidity = pack.get("liquidity_flags") if isinstance(pack.get("liquidity_flags"), dict) else {}
+    html_parts = [
+        "<section>",
+        "<h2>Client Risk Pack</h2>",
+        "<p class=\"muted\">Stress scenarios, benchmark-relative drawdown, concentration warnings, liquidity flags, correlation clusters, and breakpoints are analysis-only evidence for advisor review.</p>",
+        _render_dict({
+            "Risk Posture": summary.get("risk_posture"),
+            "Benchmark Relative Drawdown": _fmt_html_pct(drawdown.get("relative_drawdown_pct")),
+            "Benchmark": drawdown.get("benchmark_symbol"),
+            "Beta": drawdown.get("beta"),
+            "Tracking Error": _fmt_html_pct(drawdown.get("tracking_error_pct")),
+        }),
+        "<h3>Stress Scenarios</h3>",
+        _risk_pack_table(pack.get("stress_scenarios") or [], ("scenario", "portfolio_impact_pct", "severity", "what_it_tests")),
+        "<h3>Concentration Warnings</h3>",
+        _risk_pack_table(pack.get("concentration_warnings") or [], ("title", "severity", "detail")),
+        "<h3>Liquidity Watchlist</h3>",
+        _risk_pack_table(liquidity.get("items") or [], ("ticker", "weight_pct", "flag", "language")),
+        "<h3>Correlation Clusters</h3>",
+        _risk_pack_table(pack.get("correlation_clusters") or [], ("name", "type", "language")),
+        "<h3>What Would Break This Model</h3>",
+        _risk_pack_table(pack.get("what_would_break_this_model") or [], ("driver", "severity", "language")),
+        "</section>",
+    ]
+    return "".join(html_parts)
+
+
+def _risk_pack_table(rows: list[Any], columns: tuple[str, ...]) -> str:
+    if not rows:
+        return '<p class="muted">No rows available.</p>'
+    body = []
+    for row in rows[:12]:
+        if not isinstance(row, dict):
+            continue
+        body.append("<tr>" + "".join(f"<td>{_esc(_format_risk_cell(row.get(column)))}</td>" for column in columns) + "</tr>")
+    if not body:
+        return '<p class="muted">No rows available.</p>'
+    return (
+        "<table><thead><tr>"
+        + "".join(f"<th>{_esc(_label(column))}</th>" for column in columns)
+        + "</tr></thead><tbody>"
+        + "".join(body)
+        + "</tbody></table>"
+    )
+
+
+def _format_risk_cell(value: Any) -> str:
+    if isinstance(value, float):
+        return f"{value:.2f}"
+    if isinstance(value, list):
+        return ", ".join(_format_risk_cell(item) for item in value[:4])
+    if isinstance(value, dict):
+        return ", ".join(f"{_label(key)}: {_format_risk_cell(item)}" for key, item in list(value.items())[:4])
+    return str(value or "")
+
+
+def _risk_pack(snapshot: dict[str, Any]) -> dict[str, Any]:
+    public_pack = snapshot.get("client_risk_pack")
+    if isinstance(public_pack, dict) and public_pack:
+        return public_pack
+    report = snapshot.get("report") if isinstance(snapshot.get("report"), dict) else {}
+    sections = report.get("sections") if isinstance(report.get("sections"), dict) else {}
+    pack = sections.get("client_risk_pack")
+    return pack if isinstance(pack, dict) else {}
 
 
 def _signal_journal_html(snapshot: dict[str, Any]) -> str:

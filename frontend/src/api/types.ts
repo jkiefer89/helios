@@ -597,7 +597,61 @@ export interface RiskAnalyticsResponse extends ProvenancePayload {
     overlap_days?: number;
     message?: string;
   };
+  client_risk_pack: ClientRiskPack;
   methodology: Record<string, unknown>;
+}
+
+export interface ClientRiskPack {
+  available: boolean;
+  summary: {
+    model_id?: string;
+    model_name?: string;
+    risk_posture?: string;
+    benchmark_symbol?: string;
+    data_mode?: string;
+    source_counts?: Record<string, number>;
+  };
+  stress_scenarios: Array<{
+    scenario: string;
+    portfolio_impact_pct: number;
+    severity: string;
+    basis: string;
+    what_it_tests: string;
+  }>;
+  benchmark_relative_drawdown: {
+    status: string;
+    benchmark_symbol?: string;
+    relative_drawdown_pct?: number | null;
+    beta?: number | null;
+    correlation?: number | null;
+    tracking_error_pct?: number | null;
+    overlap_days?: number | null;
+    interpretation?: string;
+  };
+  concentration_warnings: Array<{ type: string; severity: string; title: string; detail: string }>;
+  liquidity_flags: {
+    items: Array<{
+      ticker?: string;
+      weight_pct?: number;
+      liquidity_score?: number;
+      flag?: string;
+      estimated_adv_usd?: number | null;
+      language?: string;
+    }>;
+    summary: { flagged_count: number; basis?: string };
+  };
+  correlation_clusters: Array<{
+    name?: string;
+    type?: string;
+    average_correlation?: number | null;
+    pairs?: Array<{ tickers: string[]; correlation: number }>;
+    language?: string;
+  }>;
+  what_would_break_this_model: Array<{ driver: string; severity: string; language: string }>;
+  required_action?: string;
+  missing_tickers?: string[];
+  methodology: Record<string, unknown>;
+  disclaimer: string;
 }
 
 export interface EvidenceLabWindow {
@@ -811,6 +865,7 @@ export interface ReportSnapshot {
   source_counts: Record<string, number>;
   model_metadata: Record<string, unknown>;
   signal_journal?: ReportSignalJournalEvidence;
+  client_risk_pack?: ClientRiskPack;
   warnings: string[];
   ai_narrative_included: boolean;
   ai_narrative_status: string;

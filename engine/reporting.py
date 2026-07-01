@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 from . import (
     forecast, indicators, opportunity, persistence, portfolio, portfolio_clinic,
-    provenance, sentiment, signals, strategy,
+    provenance, risk_exposure, sentiment, signals, strategy,
 )
 
 DISCLAIMER = (
@@ -139,6 +139,7 @@ def model_report(model: portfolio.Model) -> dict:
     )
     st = strategy.analyze_strategy(ps.close)
     metrics = indicators.metrics_summary(ps.close)
+    risk = risk_exposure.analyze_model_risk(model)
     warnings = list(ps.warnings) + list(clinic.get("warnings", [])) + list(sig.get("caveats", []))
     if ps.provenance.get("simulated_weight_pct", 0):
         warnings.append(
@@ -168,6 +169,7 @@ def model_report(model: portfolio.Model) -> dict:
                 "max_drawdown_pct": metrics["max_drawdown_pct"],
                 "warnings": warnings,
             },
+            "client_risk_pack": risk.get("client_risk_pack", {}),
             "forecast": {
                 "expected_return_pct": fc["expected_return_pct"],
                 "expected_vol_pct": fc["expected_vol_pct"],

@@ -424,6 +424,72 @@ def test_model_report_snapshot_includes_model_metadata_and_source_counts(monkeyp
     assert "No Return Guarantee" in html_text
 
 
+def test_model_report_snapshot_includes_client_grade_risk_pack(monkeypatch, tmp_path):
+    monkeypatch.setenv("HELIOS_DB_PATH", str(tmp_path / "helios.db"))
+    from engine import persistence
+
+    persistence.reset_store_for_tests()
+    client = _client()
+    for symbol, daily in (("QQQ", 0.0005), ("AAPL", 0.0014), ("LMT", 0.0006), ("GLD", 0.0002)):
+        series = price_series(days=320, daily=daily)
+        upload = client.post(
+            "/api/upload",
+            data={
+                "file": (BytesIO(
+                    f"Date,Close\n".encode("utf-8")
+                    + b"".join(f"{date.strftime('%Y-%m-%d')},{value}\n".encode("utf-8") for date, value in series.items())
+                ), f"{symbol}.csv"),
+                "symbol": symbol,
+                "name": f"{symbol} risk pack history",
+            },
+            content_type="multipart/form-data",
+        )
+        assert upload.status_code == 200
+    model_upload = client.post(
+        "/api/model/upload",
+        data={
+            "file": (BytesIO(b"Ticker,Weight\nAAPL,60\nLMT,25\nGLD,15\n"), "risk-pack-model.csv"),
+            "name": "Risk Pack Model",
+            "mandate": "pure_growth",
+        },
+        content_type="multipart/form-data",
+    )
+    assert model_upload.status_code == 200
+    model_id = model_upload.get_json()["id"]
+
+    report = client.get(f"/api/report/model?id={model_id}")
+
+    assert report.status_code == 200
+    report_body = report.get_json()
+    pack = report_body["sections"]["client_risk_pack"]
+    assert pack["available"] is True
+    assert pack["summary"]["model_id"] == model_id
+    assert pack["stress_scenarios"]
+    assert pack["benchmark_relative_drawdown"]["benchmark_symbol"] == "QQQ"
+    assert pack["concentration_warnings"]
+    assert pack["liquidity_flags"]["summary"]["basis"]
+    assert pack["correlation_clusters"]
+    assert pack["what_would_break_this_model"]
+    assert "analysis only" in pack["disclaimer"].lower()
+
+    save = client.post("/api/report/snapshots", json={"kind": "model", "id": model_id})
+
+    assert save.status_code == 200
+    snapshot = save.get_json()["snapshot"]
+    assert snapshot["client_risk_pack"]["available"] is True
+
+    html_text = client.get(snapshot["html_url"]).get_data(as_text=True)
+    assert "Client Risk Pack" in html_text
+    assert "What Would Break This Model" in html_text
+    assert "Benchmark Relative Drawdown" in html_text
+    assert "Growth multiple compression" in html_text
+
+    pdf = client.get(snapshot["pdf_url"])
+    assert pdf.status_code == 200
+    assert b"CLIENT-GRADE RISK PACK" in pdf.data
+    assert b"WHAT WOULD BREAK THIS MODEL" in pdf.data
+
+
 def test_report_snapshot_embeds_signal_journal_evidence_record(monkeypatch, tmp_path):
     monkeypatch.setenv("HELIOS_DB_PATH", str(tmp_path / "helios.db"))
     from engine import data, persistence, portfolio, signal_journal

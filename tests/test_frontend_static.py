@@ -231,6 +231,20 @@ def test_risk_analytics_view_is_dedicated_and_routed():
     assert "Benchmark-Relative Risk" in view_source
 
 
+def test_risk_analytics_view_exposes_client_grade_risk_pack():
+    view_source = (ROOT / "frontend" / "src" / "views" / "RiskAnalytics.tsx").read_text()
+    type_source = (ROOT / "frontend" / "src" / "api" / "types.ts").read_text()
+
+    assert "Client-Grade Risk Pack" in view_source
+    assert "What Would Break This Model" in view_source
+    assert "Benchmark-Relative Drawdown" in view_source
+    assert "Concentration Warnings" in view_source
+    assert "Liquidity Watchlist" in view_source
+    assert "Stress Scenarios" in view_source
+    assert "client_risk_pack" in view_source
+    assert "ClientRiskPack" in type_source
+
+
 def test_evidence_lab_view_is_dedicated_and_routed():
     app_source = (ROOT / "frontend" / "src" / "App.tsx").read_text()
     shell_source = (ROOT / "frontend" / "src" / "components" / "layout" / "AppShell.tsx").read_text()

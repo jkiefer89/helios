@@ -3174,6 +3174,83 @@ p {
   grid-template-columns: minmax(190px, 1.1fr) 90px minmax(220px, 1.4fr);
 }
 
+.risk-pack-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.9fr) minmax(0, 1fr);
+  gap: 0.9rem;
+  align-items: start;
+  margin-bottom: 0.95rem;
+}
+
+.risk-pack-grid h2,
+.risk-pack-panels h2,
+.risk-pack-clusters h2 {
+  margin: 0 0 0.55rem;
+  color: var(--text);
+  font-size: 0.8rem;
+  text-transform: uppercase;
+}
+
+.risk-break-list {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.risk-break-list article,
+.risk-pack-clusters article {
+  display: grid;
+  gap: 0.3rem;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 6px;
+  background: rgba(7, 12, 20, 0.5);
+  padding: 0.68rem;
+}
+
+.risk-break-list.compact article {
+  padding: 0.58rem;
+}
+
+.risk-break-list strong,
+.risk-break-list span,
+.risk-break-list p,
+.risk-pack-clusters strong,
+.risk-pack-clusters span {
+  display: block;
+}
+
+.risk-break-list span {
+  color: var(--blue);
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.risk-break-list p,
+.risk-pack-clusters span {
+  margin: 0;
+  color: var(--soft);
+  font-size: 0.74rem;
+  line-height: 1.4;
+}
+
+.risk-pack-table .terminal-table__head,
+.risk-pack-table .table-row {
+  grid-template-columns: minmax(190px, 1.25fr) 82px 90px;
+}
+
+.risk-pack-table small {
+  display: block;
+  margin-top: 0.25rem;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.risk-pack-clusters {
+  display: grid;
+  gap: 0.55rem;
+  margin-top: 0.9rem;
+}
+
 .liquidity-table .terminal-table__head,
 .liquidity-table .table-row {
   grid-template-columns: 90px 90px 80px 150px minmax(170px, 1fr);
@@ -4619,6 +4696,8 @@ p {
   .real-data-table .table-row,
   .risk-table .terminal-table__head,
   .risk-table .table-row,
+  .risk-pack-table .terminal-table__head,
+  .risk-pack-table .table-row,
   .liquidity-table .terminal-table__head,
   .liquidity-table .table-row {
     min-width: 720px;

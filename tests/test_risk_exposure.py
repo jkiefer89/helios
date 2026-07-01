@@ -58,6 +58,21 @@ def test_risk_exposure_engine_reports_portfolio_analytics_for_real_model():
     assert result["liquidity_flags"]["summary"]["flagged_count"] >= 0
     assert "beta" in result["benchmark_relative"]
     assert "active_vol_pct" in result["benchmark_relative"]
+    pack = result["client_risk_pack"]
+    assert pack["available"] is True
+    assert pack["summary"]["model_id"] == "RISK-MODEL"
+    assert pack["summary"]["benchmark_symbol"] == "SPY"
+    assert pack["stress_scenarios"]
+    assert any(row["scenario"] == "Growth multiple compression" for row in pack["stress_scenarios"])
+    assert pack["benchmark_relative_drawdown"]["benchmark_symbol"] == "SPY"
+    assert "relative_drawdown_pct" in pack["benchmark_relative_drawdown"]
+    assert pack["concentration_warnings"]
+    assert pack["liquidity_flags"]["summary"]["basis"]
+    assert pack["correlation_clusters"]
+    assert pack["what_would_break_this_model"]
+    assert any("growth" in row["driver"].lower() for row in pack["what_would_break_this_model"])
+    assert pack["methodology"]["analysis_only"] is True
+    assert pack["methodology"]["scenario_stress_not_forecast"] is True
     assert result["methodology"]["analysis_only"] is True
 
 
@@ -82,6 +97,8 @@ def test_risk_exposure_endpoint_blocks_missing_real_model_data(monkeypatch):
     body = resp.get_json()
     assert body["eligible_for_real_research"] is False
     assert body["risk_exposure_unavailable"] is True
+    assert body["client_risk_pack"]["available"] is False
+    assert "real price history" in body["client_risk_pack"]["required_action"].lower()
     assert "real price history" in body["required_action"].lower()
     assert body["methodology"]["analysis_only"] is True
 
@@ -119,4 +136,6 @@ def test_risk_exposure_endpoint_returns_real_payload_for_uploaded_model():
     assert body["eligible_for_real_research"] is True
     assert body["sector_exposure"]
     assert body["scenario_shocks"]
+    assert body["client_risk_pack"]["available"] is True
+    assert body["client_risk_pack"]["what_would_break_this_model"]
     assert body["benchmark_relative"]["benchmark_symbol"] == "SPY"
