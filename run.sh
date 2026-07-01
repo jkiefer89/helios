@@ -14,8 +14,9 @@ if [ ! -d ".venv" ]; then
   python3 -m venv .venv
   ./.venv/bin/python -m pip install --quiet --upgrade pip
 fi
-# Keep deps in sync (cheap when already satisfied).
-./.venv/bin/python -m pip install --quiet -r requirements.txt
+# Keep deps in sync (cheap when already satisfied). requirements.lock pins the
+# exact tested versions; requirements.txt holds the human-edited ranges.
+./.venv/bin/python -m pip install --quiet -r requirements.lock
 
 if [ "$1" = "--dev" ]; then
   exec ./.venv/bin/python app.py
