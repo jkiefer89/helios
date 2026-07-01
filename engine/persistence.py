@@ -10,6 +10,7 @@ import json
 import os
 import re
 import sqlite3
+import tempfile
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -287,7 +288,11 @@ class SQLiteStore:
         raw = self.path.read_bytes() if self.path.is_file() else b""
         if raw:
             if raw.startswith(ENCRYPTED_DB_MAGIC):
-                conn.deserialize(self._cipher.decrypt_bytes(raw[len(ENCRYPTED_DB_MAGIC):]))
+                conn = _load_sqlite_payload_into_memory(
+                    conn,
+                    self._cipher.decrypt_bytes(raw[len(ENCRYPTED_DB_MAGIC):]),
+                    self.path.parent,
+                )
                 conn.row_factory = sqlite3.Row
                 conn.execute("PRAGMA foreign_keys = ON")
             elif raw.startswith(SQLITE_HEADER):
@@ -1288,6 +1293,56 @@ def _normalise_price_frame(frame: pd.DataFrame) -> pd.DataFrame:
     keep = [col for col in ("open", "high", "low", "close", "volume") if col in out]
     out = out[keep]
     return out[~out["close"].isna()]
+
+
+def _deserialize_sqlite_payload(conn: sqlite3.Connection, payload: bytes) -> None:
+    conn.deserialize(payload)
+
+
+def _validate_loaded_sqlite_payload(conn: sqlite3.Connection) -> None:
+    conn.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
+
+
+def _load_sqlite_payload_into_memory(conn: sqlite3.Connection, payload: bytes, temp_dir: Path) -> sqlite3.Connection:
+    try:
+        _deserialize_sqlite_payload(conn, payload)
+        _validate_loaded_sqlite_payload(conn)
+        return conn
+    except sqlite3.OperationalError as exc:
+        if "unable to open database file" not in str(exc).lower():
+            raise
+        try:
+            conn.close()
+        except Exception:
+            pass
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=".helios-decrypted-", suffix=".sqlite", dir=str(temp_dir))
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    source: sqlite3.Connection | None = None
+    loaded = sqlite3.connect(":memory:", timeout=5, check_same_thread=False)
+    loaded.row_factory = sqlite3.Row
+    loaded.execute("PRAGMA foreign_keys = ON")
+    try:
+        tmp_path.write_bytes(payload)
+        try:
+            tmp_path.chmod(0o600)
+        except Exception:
+            pass
+        source = sqlite3.connect(str(tmp_path), timeout=5)
+        source.backup(loaded)
+        return loaded
+    except Exception:
+        loaded.close()
+        raise
+    finally:
+        if source is not None:
+            source.close()
+        for candidate in (tmp_path, tmp_path.with_name(f"{tmp_path.name}-wal"), tmp_path.with_name(f"{tmp_path.name}-shm")):
+            try:
+                candidate.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def _optional_float(value: Any) -> float | None:

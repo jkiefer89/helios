@@ -335,6 +335,54 @@ def test_local_persistence_encrypts_sensitive_payloads_when_key_configured(monke
     assert portfolio.all_models()[0].mandate_context == "client context should be sealed"
 
 
+def test_encrypted_snapshot_loader_falls_back_when_deserialize_cannot_open(monkeypatch, tmp_path):
+    source = tmp_path / "source.sqlite"
+    with sqlite3.connect(source) as conn:
+        conn.execute("CREATE TABLE marker(value TEXT NOT NULL)")
+        conn.execute("INSERT INTO marker(value) VALUES ('ok')")
+    payload = source.read_bytes()
+    target = sqlite3.connect(":memory:")
+
+    def fail_deserialize(_conn, _payload):
+        raise sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr(persistence, "_deserialize_sqlite_payload", fail_deserialize)
+
+    loaded = persistence._load_sqlite_payload_into_memory(target, payload, tmp_path)
+
+    value = loaded.execute("SELECT value FROM marker").fetchone()[0]
+    leftovers = list(tmp_path.glob(".helios-decrypted-*"))
+    loaded.close()
+
+    assert value == "ok"
+    assert leftovers == []
+
+
+def test_encrypted_snapshot_loader_validates_deserialize_before_accepting(monkeypatch, tmp_path):
+    source = tmp_path / "source.sqlite"
+    with sqlite3.connect(source) as conn:
+        conn.execute("CREATE TABLE marker(value TEXT NOT NULL)")
+        conn.execute("INSERT INTO marker(value) VALUES ('ok')")
+    payload = source.read_bytes()
+    target = sqlite3.connect(":memory:")
+
+    def false_success(_conn, _payload):
+        return None
+
+    def fail_validation(_conn):
+        raise sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr(persistence, "_deserialize_sqlite_payload", false_success)
+    monkeypatch.setattr(persistence, "_validate_loaded_sqlite_payload", fail_validation)
+
+    loaded = persistence._load_sqlite_payload_into_memory(target, payload, tmp_path)
+
+    value = loaded.execute("SELECT value FROM marker").fetchone()[0]
+    loaded.close()
+
+    assert value == "ok"
+
+
 def test_encryption_migrates_existing_plaintext_sqlite_file(monkeypatch, tmp_path):
     monkeypatch.setenv("HELIOS_DB_ENCRYPTION", "off")
     store = _use_db(monkeypatch, tmp_path)
