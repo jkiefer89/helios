@@ -3038,18 +3038,40 @@ p {
 
 .governance-actor-row {
   display: grid;
-  grid-template-columns: minmax(220px, 300px) minmax(0, 1fr);
+  grid-template-columns: minmax(180px, 240px) minmax(440px, 1.1fr) minmax(280px, 0.9fr);
   gap: 0.8rem;
   align-items: end;
 }
 
-.governance-actor-row label {
+.governance-actor-row label,
+.committee-identity-card label {
   display: grid;
   gap: 0.36rem;
   color: var(--muted);
   font-size: 0.72rem;
   font-weight: 800;
   text-transform: uppercase;
+}
+
+.committee-identity-card {
+  display: grid;
+  gap: 0.55rem;
+  border: 1px solid rgba(148, 163, 184, 0.15);
+  border-radius: 6px;
+  background: rgba(7, 12, 20, 0.42);
+  padding: 0.68rem;
+}
+
+.committee-identity-card > strong {
+  color: var(--soft);
+  font-size: 0.76rem;
+  text-transform: uppercase;
+}
+
+.committee-identity-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.55rem;
 }
 
 .governance-actor-row p {
@@ -3108,6 +3130,13 @@ p {
 
 .governance-packet-panel > header a {
   white-space: nowrap;
+}
+
+.packet-export-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  justify-content: flex-end;
 }
 
 .governance-log-grid {
@@ -4472,6 +4501,14 @@ p {
   .report-section-strategy {
     grid-column: auto;
   }
+
+  .governance-actor-row {
+    grid-template-columns: 1fr;
+  }
+
+  .committee-identity-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (min-width: 1181px) and (max-width: 1800px) {
@@ -4760,6 +4797,16 @@ p {
   .key-values,
   .key-values.dense {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .committee-identity-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .packet-export-links {
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: flex-start;
   }
 
   .terminal-table {

@@ -129,6 +129,15 @@ export interface ModelGovernanceRiskGate {
   violations: ModelGovernanceViolation[];
 }
 
+export interface ModelGovernanceCommitteeIdentity {
+  signer_name: string;
+  signer_role: string;
+  committee: string;
+  verification_method: string;
+  verified: boolean;
+  scope: string;
+}
+
 export interface ModelGovernanceRow {
   id: string;
   name: string;
@@ -159,6 +168,7 @@ export interface ModelGovernanceRow {
   holdings: Array<{ ticker: string; weight: number; weight_pct: number; source?: string }>;
   source: string;
   provenance: ModelTemplate["provenance"];
+  committee_identity?: ModelGovernanceCommitteeIdentity;
 }
 
 export interface ModelGovernanceEvent {
@@ -171,9 +181,11 @@ export interface ModelGovernanceEvent {
   note: string;
   approval_status: string;
   committee_note?: string;
+  committee_identity?: ModelGovernanceCommitteeIdentity;
   version_diff?: ModelGovernanceVersionDiff;
   risk_gate?: ModelGovernanceRiskGate;
   snapshot?: Record<string, unknown>;
+  metadata?: { committee_identity?: ModelGovernanceCommitteeIdentity; [key: string]: unknown };
 }
 
 export interface ModelEditHoldingInput {
@@ -216,6 +228,7 @@ export interface ModelGovernanceSnapshot {
   approval_status: string;
   holding_count: number;
   risk_limit_state: string;
+  committee_identity?: ModelGovernanceCommitteeIdentity;
 }
 
 export interface ModelGovernanceResponse {
@@ -248,7 +261,9 @@ export interface ModelGovernanceApprovalPacket {
     approval_updated_at?: string | null;
     can_approve: boolean;
     blocked_reason: string;
+    committee_identity?: ModelGovernanceCommitteeIdentity;
   };
+  committee_identity?: ModelGovernanceCommitteeIdentity;
   risk_gate: ModelGovernanceRiskGate;
   risk_limits: ModelTemplate["risk_limits"];
   version: number;
@@ -262,13 +277,14 @@ export interface ModelGovernanceApprovalPacket {
     risk_limit_violations?: ModelGovernanceViolation[];
     risk_gate?: ModelGovernanceRiskGate;
   };
-  committee_notes: Array<{ event_id: number; created_at: string; actor: string; action: string; note: string }>;
+  committee_notes: Array<{ event_id: number; created_at: string; actor: string; action: string; note: string; committee_identity?: ModelGovernanceCommitteeIdentity }>;
   snapshots: ModelGovernanceSnapshot[];
   audit_trail: ModelGovernanceEvent[];
   export: {
     formats: string[];
     json_url: string;
     html_url: string;
+    pdf_url: string;
   };
   disclaimer: string;
 }

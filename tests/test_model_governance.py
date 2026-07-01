@@ -5,6 +5,8 @@ from engine import persistence, portfolio
 def _use_db(monkeypatch, tmp_path):
     monkeypatch.setenv("HELIOS_DB_PATH", str(tmp_path / "helios.db"))
     monkeypatch.setenv("HELIOS_DB_ENCRYPTION", "off")
+    monkeypatch.delenv("HELIOS_GOVERNANCE_APPROVER_PIN", raising=False)
+    monkeypatch.delenv("HELIOS_GOVERNANCE_APPROVER_PIN_HASH", raising=False)
     persistence.reset_store_for_tests()
     store = persistence.get_store()
     assert store.available is True
@@ -215,7 +217,9 @@ def test_model_governance_approval_packet_exports_committee_evidence(monkeypatch
     assert packet["before_snapshot"]["holdings"]
     assert packet["after_snapshot"]["holdings"]
     assert packet["committee_notes"][0]["note"] == "Changed weights for approval packet evidence."
+    assert "pdf" in packet["export"]["formats"]
     assert packet["export"]["html_url"].endswith("/approval-packet.html")
+    assert packet["export"]["pdf_url"].endswith("/approval-packet.pdf")
     assert "analysis-only" in packet["disclaimer"].lower()
 
     html = client.get(packet["export"]["html_url"])
@@ -224,6 +228,92 @@ def test_model_governance_approval_packet_exports_committee_evidence(monkeypatch
     assert "text/html" in html.headers["Content-Type"]
     assert b"Model Approval Packet" in html.data
     assert b"Changed weights for approval packet evidence" in html.data
+
+    pdf = client.get(packet["export"]["pdf_url"])
+
+    assert pdf.status_code == 200
+    assert pdf.content_type == "application/pdf"
+    assert pdf.data.startswith(b"%PDF-")
+    assert b"MODEL APPROVAL PACKET" in pdf.data
+    assert b"LOCAL COMMITTEE IDENTITY" in pdf.data
+
+
+def test_model_governance_requires_verified_committee_identity_when_pin_configured(monkeypatch, tmp_path):
+    _use_db(monkeypatch, tmp_path)
+    monkeypatch.setenv("HELIOS_GOVERNANCE_APPROVER_PIN", "123456")
+    model = portfolio.parse_model_file(
+        b"Ticker,Weight\nAAPL,20\nMSFT,20\nGOOGL,20\nAMZN,20\nNVDA,20\n",
+        "verified-approval.csv",
+        "Verified Approval Model",
+        "balanced",
+        "Committee approval model with local identity verification.",
+    )
+    client = _client()
+
+    missing_identity = client.post(
+        f"/api/model-governance/{model.id}/events",
+        json={
+            "actor": "Advisor Console",
+            "approval_status": "approved",
+            "action": "approval_update",
+            "note": "Approved after local committee review.",
+        },
+    )
+
+    assert missing_identity.status_code == 400
+    assert "committee identity" in missing_identity.get_json()["error"].lower()
+
+    wrong_pin = client.post(
+        f"/api/model-governance/{model.id}/events",
+        json={
+            "actor": "Advisor Console",
+            "approval_status": "approved",
+            "action": "approval_update",
+            "note": "Approved after local committee review.",
+            "committee_identity": {
+                "signer_name": "Jordan Reviewer",
+                "signer_role": "Voting member",
+                "committee": "Investment Committee",
+                "secret": "000000",
+            },
+        },
+    )
+
+    assert wrong_pin.status_code == 400
+    assert "verification" in wrong_pin.get_json()["error"].lower()
+
+    approved = client.post(
+        f"/api/model-governance/{model.id}/events",
+        json={
+            "actor": "Advisor Console",
+            "approval_status": "approved",
+            "action": "approval_update",
+            "note": "Approved after local committee review.",
+            "committee_identity": {
+                "signer_name": "Jordan Reviewer",
+                "signer_role": "Voting member",
+                "committee": "Investment Committee",
+                "secret": "123456",
+            },
+        },
+    )
+
+    assert approved.status_code == 200
+    event = approved.get_json()["event"]
+    identity = event["metadata"]["committee_identity"]
+    assert identity == event["snapshot"]["committee_identity"]
+    assert identity["signer_name"] == "Jordan Reviewer"
+    assert identity["signer_role"] == "Voting member"
+    assert identity["committee"] == "Investment Committee"
+    assert identity["verification_method"] == "local_pin"
+    assert identity["verified"] is True
+    assert identity["scope"] == "local_workspace"
+    assert "secret" not in identity
+
+    packet = client.get(f"/api/model-governance/{model.id}/approval-packet").get_json()["packet"]
+
+    assert packet["committee_identity"]["signer_name"] == "Jordan Reviewer"
+    assert packet["committee_identity"]["verified"] is True
 
 
 def test_model_governance_is_unavailable_without_sqlite_persistence(monkeypatch):

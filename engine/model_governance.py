@@ -5,8 +5,12 @@ alter Helios analytics, trade labels, forecasts, scores, or provenance gates.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
+import os
 from collections import Counter
 from html import escape
+from io import BytesIO
 from typing import Any
 
 from . import data, mandate, model_library, persistence, portfolio
@@ -91,6 +95,7 @@ def record_event(
     note: str = "",
     approval_status: str = "",
     previous_model: portfolio.Model | None = None,
+    committee_identity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Archive a governance event for the current model state."""
     store = persistence.get_store()
@@ -114,6 +119,13 @@ def record_event(
             "status_code": 400,
             "warning": current["approval_blocked_reason"] or "Cannot approve model while risk-limit breaches are active.",
         }
+    identity, identity_error = _committee_identity(committee_identity, actor=safe_actor(actor), approval_status=status)
+    if identity_error:
+        return {
+            "recorded": False,
+            "status_code": 400,
+            "warning": identity_error,
+        }
     version = store.next_model_governance_version(model.id)
     snapshot = _snapshot(
         model,
@@ -122,17 +134,19 @@ def record_event(
         previous_model=previous_model,
         action=safe_action,
         note=safe_note,
+        committee_identity=identity,
     )
     event = store.record_model_governance_event(
         model_id=model.id,
         version=version,
-        actor=actor,
+        actor=safe_actor(actor),
         action=safe_action,
         note=safe_note,
         approval_status=status,
         snapshot=snapshot,
         metadata={
             "committee_note": safe_note,
+            "committee_identity": identity,
             "version_diff": snapshot.get("version_diff") or {},
             "risk_gate": snapshot.get("risk_gate") or {},
         },
@@ -217,6 +231,7 @@ def approval_packet(model: portfolio.Model) -> dict[str, Any]:
         (event.get("snapshot") for event in events if isinstance(event.get("snapshot"), dict) and event.get("snapshot")),
         {},
     )
+    committee_identity = _latest_committee_identity(events, latest_snapshot)
     before_snapshot = latest_snapshot.get("before_snapshot") or {}
     after_snapshot = latest_snapshot.get("after_snapshot") or _compact_model_snapshot(model, row["version"])
     version_diff = latest_snapshot.get("version_diff") or _empty_version_diff()
@@ -230,7 +245,9 @@ def approval_packet(model: portfolio.Model) -> dict[str, Any]:
             "approval_updated_at": row["approval_updated_at"],
             "can_approve": row["can_approve"],
             "blocked_reason": row["approval_blocked_reason"],
+            "committee_identity": committee_identity,
         },
+        "committee_identity": committee_identity,
         "risk_gate": _risk_gate(model),
         "risk_limits": row["risk_limits"],
         "version": row["version"],
@@ -244,6 +261,7 @@ def approval_packet(model: portfolio.Model) -> dict[str, Any]:
                 "actor": event["actor"],
                 "action": event["action"],
                 "note": event["note"],
+                "committee_identity": _event_committee_identity(event),
             }
             for event in events
             if event.get("note")
@@ -251,9 +269,10 @@ def approval_packet(model: portfolio.Model) -> dict[str, Any]:
         "snapshots": snapshot_summaries,
         "audit_trail": event_summaries,
         "export": {
-            "formats": ["json", "html"],
+            "formats": ["json", "html", "pdf"],
             "json_url": f"/api/model-governance/{model.id}/approval-packet",
             "html_url": f"/api/model-governance/{model.id}/approval-packet.html",
+            "pdf_url": f"/api/model-governance/{model.id}/approval-packet.pdf",
         },
         "disclaimer": _disclaimer(),
     }
@@ -266,6 +285,7 @@ def render_approval_packet_html(packet: dict[str, Any]) -> str:
     version_diff = packet.get("version_diff") if isinstance(packet.get("version_diff"), dict) else {}
     notes = packet.get("committee_notes") if isinstance(packet.get("committee_notes"), list) else []
     audit = packet.get("audit_trail") if isinstance(packet.get("audit_trail"), list) else []
+    identity = packet.get("committee_identity") if isinstance(packet.get("committee_identity"), dict) else {}
     holdings = (packet.get("after_snapshot") or {}).get("holdings") if isinstance(packet.get("after_snapshot"), dict) else []
     changed = version_diff.get("changed_weights") if isinstance(version_diff.get("changed_weights"), list) else []
     added = version_diff.get("added") if isinstance(version_diff.get("added"), list) else []
@@ -280,6 +300,18 @@ def render_approval_packet_html(packet: dict[str, Any]) -> str:
         "<section><h2>Approval Gate</h2>",
         f"<p class=\"{'ok' if risk_gate.get('can_approve') else 'warn'}\">{escape('Can approve' if risk_gate.get('can_approve') else risk_gate.get('blocked_reason') or 'Approval blocked')}</p>",
         "</section>",
+        "<section><h2>Local Committee Identity</h2>",
+        _html_table(
+            ["Signer", "Role", "Committee", "Verification", "Scope"],
+            [[
+                identity.get("signer_name") or "Not recorded",
+                identity.get("signer_role") or "Not recorded",
+                identity.get("committee") or "Not recorded",
+                "Verified local PIN" if identity.get("verified") else identity.get("verification_method") or "Local attestation",
+                identity.get("scope") or "local_workspace",
+            ]],
+        ),
+        "</section>",
         "<section><h2>Version Diff</h2>",
         f"<p>{escape(str(version_diff.get('summary') or 'No version diff recorded.'))}</p>",
         _html_table(["Ticker", "From", "To"], [[row.get("ticker"), row.get("from_weight_pct"), row.get("to_weight_pct")] for row in changed]),
@@ -290,7 +322,7 @@ def render_approval_packet_html(packet: dict[str, Any]) -> str:
         _html_table(["Ticker", "Weight"], [[row.get("ticker"), row.get("weight_pct")] for row in holdings if isinstance(row, dict)]),
         "</section>",
         "<section><h2>Committee Notes</h2>",
-        "".join(f"<article><strong>{escape(str(row.get('actor') or ''))}</strong><p>{escape(str(row.get('note') or ''))}</p></article>" for row in notes if isinstance(row, dict)) or "<p class=\"muted\">No committee notes recorded.</p>",
+        "".join(_html_committee_note(row) for row in notes if isinstance(row, dict)) or "<p class=\"muted\">No committee notes recorded.</p>",
         "</section>",
         "<section><h2>Audit Trail</h2>",
         _html_table(["Version", "Actor", "Action", "Status"], [[row.get("version"), row.get("actor"), row.get("action"), row.get("approval_status")] for row in audit if isinstance(row, dict)]),
@@ -298,6 +330,129 @@ def render_approval_packet_html(packet: dict[str, Any]) -> str:
         f"<p class=\"muted\">{escape(str(packet.get('disclaimer') or _disclaimer()))}</p>",
         "</body></html>",
     ])
+
+
+def render_approval_packet_pdf(packet: dict[str, Any]) -> bytes:
+    """Render a local committee approval packet PDF.
+
+    The packet is evidence for governance review only; it does not change model
+    calculations, approvals, or Helios provenance gates.
+    """
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import letter
+        from reportlab.pdfgen import canvas
+    except ImportError as exc:  # pragma: no cover - dependency is verified in CI.
+        raise RuntimeError("ReportLab is required for model approval PDF exports.") from exc
+
+    model = packet.get("model") if isinstance(packet.get("model"), dict) else {}
+    approval = packet.get("approval") if isinstance(packet.get("approval"), dict) else {}
+    risk_gate = packet.get("risk_gate") if isinstance(packet.get("risk_gate"), dict) else {}
+    version_diff = packet.get("version_diff") if isinstance(packet.get("version_diff"), dict) else {}
+    identity = packet.get("committee_identity") if isinstance(packet.get("committee_identity"), dict) else {}
+    notes = packet.get("committee_notes") if isinstance(packet.get("committee_notes"), list) else []
+    audit = packet.get("audit_trail") if isinstance(packet.get("audit_trail"), list) else []
+    holdings = (packet.get("after_snapshot") or {}).get("holdings") if isinstance(packet.get("after_snapshot"), dict) else []
+
+    buffer = BytesIO()
+    pdf = canvas.Canvas(buffer, pagesize=letter, pageCompression=0)
+    width, height = letter
+
+    def background(section: str, page_no: int, total: int) -> None:
+        pdf.setFillColor(colors.HexColor("#071019"))
+        pdf.rect(0, 0, width, height, stroke=0, fill=1)
+        pdf.setFillColor(colors.HexColor("#0d1622"))
+        pdf.rect(0, height - 84, width, 84, stroke=0, fill=1)
+        pdf.setStrokeColor(colors.HexColor("#263548"))
+        pdf.line(38, height - 84, width - 38, height - 84)
+        _pdf_text(pdf, "HELIOS PRO", 42, height - 42, 18, colors.HexColor("#e6edf7"), bold=True)
+        _pdf_text(pdf, "MODEL APPROVAL PACKET", 42, height - 60, 9, colors.HexColor("#55a7ff"), bold=True)
+        _pdf_text(pdf, section, width - 252, height - 44, 10, colors.HexColor("#ffd24a"), bold=True)
+        pdf.setStrokeColor(colors.HexColor("#263548"))
+        pdf.line(42, 62, width - 42, 62)
+        _pdf_text(pdf, "Analysis-only governance evidence. Not investment advice, order execution, or a return guarantee.", 42, 44, 7.5, colors.HexColor("#9fb2c8"))
+        _pdf_text(pdf, f"Page {page_no} of {total}", width - 104, 44, 8, colors.HexColor("#9fb2c8"))
+
+    total_pages = 3
+    background("COMMITTEE COVER", 1, total_pages)
+    y = 662
+    y = _pdf_wrapped(pdf, str(model.get("name") or "Model"), 42, y, 520, 22, colors.HexColor("#f8fafc"), bold=True, max_lines=2)
+    _pdf_text(pdf, f"Version {packet.get('version') or ''} / Status {approval.get('status') or ''}", 42, y - 12, 10, colors.HexColor("#9fb2c8"))
+    cards = [
+        ("Approval Gate", "Pass" if risk_gate.get("can_approve") else "Blocked"),
+        ("Risk State", risk_gate.get("state") or "unknown"),
+        ("Turnover", f"{version_diff.get('turnover_pct') or 0}%"),
+        ("Committee Notes", len(notes)),
+        ("Signer", identity.get("signer_name") or "Not recorded"),
+        ("Verification", "Verified local PIN" if identity.get("verified") else identity.get("verification_method") or "Local attestation"),
+    ]
+    _pdf_card_grid(pdf, cards, 42, y - 98, 252, 56, colors)
+    _pdf_panel(
+        pdf,
+        42,
+        130,
+        width - 84,
+        112,
+        "ADVISOR REVIEW REQUIRED",
+        str(packet.get("disclaimer") or _disclaimer()),
+        colors,
+        accent="#ffd24a",
+    )
+    pdf.showPage()
+
+    background("LOCAL COMMITTEE IDENTITY", 2, total_pages)
+    y = 660
+    _pdf_text(pdf, "LOCAL COMMITTEE IDENTITY", 42, y, 16, colors.HexColor("#f8fafc"), bold=True)
+    y -= 34
+    identity_rows = [
+        ("Signer", identity.get("signer_name") or "Not recorded"),
+        ("Role", identity.get("signer_role") or "Not recorded"),
+        ("Committee", identity.get("committee") or "Not recorded"),
+        ("Verification", "Verified local PIN" if identity.get("verified") else identity.get("verification_method") or "Local attestation"),
+        ("Scope", identity.get("scope") or "local_workspace"),
+    ]
+    for label, value in identity_rows:
+        _pdf_text(pdf, label.upper(), 42, y, 8, colors.HexColor("#9fb2c8"), bold=True)
+        y = _pdf_wrapped(pdf, str(value), 160, y, 380, 10, colors.HexColor("#e6edf7"), max_lines=2) - 14
+    _pdf_text(pdf, "VERSION DIFF", 42, y - 4, 13, colors.HexColor("#ffd24a"), bold=True)
+    y -= 28
+    y = _pdf_wrapped(pdf, str(version_diff.get("summary") or "No version diff recorded."), 42, y, 500, 9, colors.HexColor("#c8d3df"), max_lines=4) - 10
+    _pdf_text(pdf, "COMMITTEE NOTES", 42, y, 13, colors.HexColor("#ffd24a"), bold=True)
+    y -= 22
+    for row in notes[:5]:
+        if not isinstance(row, dict):
+            continue
+        note_identity = row.get("committee_identity") if isinstance(row.get("committee_identity"), dict) else {}
+        text = (
+            f"{row.get('actor') or 'Unknown'} / {row.get('action') or ''}: {row.get('note') or ''} "
+            f"Signer: {note_identity.get('signer_name') or identity.get('signer_name') or 'not recorded'}"
+        )
+        y = _pdf_wrapped(pdf, text, 58, y, 482, 8.5, colors.HexColor("#c8d3df"), max_lines=3) - 10
+    if not notes:
+        _pdf_text(pdf, "No committee notes recorded.", 58, y, 9, colors.HexColor("#9fb2c8"))
+    pdf.showPage()
+
+    background("HOLDINGS AND AUDIT TRAIL", 3, total_pages)
+    y = 660
+    _pdf_text(pdf, "CURRENT HOLDINGS", 42, y, 14, colors.HexColor("#ffd24a"), bold=True)
+    y -= 24
+    for row in holdings[:12]:
+        if not isinstance(row, dict):
+            continue
+        _pdf_text(pdf, f"{row.get('ticker') or ''}", 58, y, 9, colors.HexColor("#e6edf7"), bold=True)
+        _pdf_text(pdf, f"{row.get('weight_pct') or 0}%", 170, y, 9, colors.HexColor("#9fb2c8"))
+        y -= 16
+    y -= 12
+    _pdf_text(pdf, "AUDIT TRAIL", 42, y, 14, colors.HexColor("#ffd24a"), bold=True)
+    y -= 24
+    for row in audit[:10]:
+        if not isinstance(row, dict):
+            continue
+        text = f"v{row.get('version')} / {row.get('actor')} / {row.get('action')} / {row.get('approval_status')}"
+        y = _pdf_wrapped(pdf, text, 58, y, 482, 8.5, colors.HexColor("#c8d3df"), max_lines=2) - 8
+    pdf.showPage()
+    pdf.save()
+    return buffer.getvalue()
 
 
 def _model_row(model: portfolio.Model, events: list[dict[str, Any]]) -> dict[str, Any]:
@@ -461,6 +616,7 @@ def _snapshot(
     previous_model: portfolio.Model | None = None,
     action: str = "",
     note: str = "",
+    committee_identity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     before_snapshot = _compact_model_snapshot(previous_model, max(1, version - 1)) if previous_model is not None else {}
     after_snapshot = _compact_model_snapshot(model, version)
@@ -487,6 +643,7 @@ def _snapshot(
         "version_diff": _version_diff(previous_model, model) if previous_model is not None else _empty_version_diff(),
         "event_action": action,
         "committee_note": note,
+        "committee_identity": committee_identity or {},
         "provenance": _template_for_model(model).get("provenance", {
             "source_type": "client_model",
             "version": "",
@@ -551,6 +708,89 @@ def _version_diff(before: portfolio.Model | None, after: portfolio.Model) -> dic
     }
 
 
+def safe_actor(actor: Any) -> str:
+    value = str(actor or "").strip()
+    return value[:120] if value else DEFAULT_ACTOR
+
+
+def _committee_identity(
+    raw: dict[str, Any] | None,
+    *,
+    actor: str,
+    approval_status: str,
+) -> tuple[dict[str, Any], str]:
+    raw_identity = raw if isinstance(raw, dict) else {}
+    is_decision = approval_status in {"approved", "rejected"}
+    pin_configured = _governance_pin_configured()
+    if not is_decision and not raw_identity:
+        return {}, ""
+
+    signer_name = str(raw_identity.get("signer_name") or "").strip()
+    signer_role = str(raw_identity.get("signer_role") or "").strip()
+    committee = str(raw_identity.get("committee") or "").strip()
+    secret = str(raw_identity.get("secret") or raw_identity.get("pin") or "").strip()
+
+    if pin_configured:
+        if not signer_name or not signer_role or not committee or not secret:
+            return {}, "Committee identity and local approval PIN verification are required before approving or rejecting a model."
+        if not _verify_governance_secret(secret):
+            return {}, "Local committee identity verification failed."
+        verified = True
+        method = "local_pin"
+    else:
+        signer_name = signer_name or safe_actor(actor)
+        signer_role = signer_role or "Local workspace reviewer"
+        committee = committee or "Local Investment Committee"
+        verified = False
+        method = "local_attestation"
+
+    return {
+        "signer_name": signer_name[:120],
+        "signer_role": signer_role[:120],
+        "committee": committee[:160],
+        "verification_method": method,
+        "verified": verified,
+        "scope": "local_workspace",
+    }, ""
+
+
+def _governance_pin_configured() -> bool:
+    return bool(os.environ.get("HELIOS_GOVERNANCE_APPROVER_PIN") or os.environ.get("HELIOS_GOVERNANCE_APPROVER_PIN_HASH"))
+
+
+def _verify_governance_secret(secret: str) -> bool:
+    supplied_hash = hashlib.sha256(secret.encode("utf-8")).hexdigest()
+    configured_hash = str(os.environ.get("HELIOS_GOVERNANCE_APPROVER_PIN_HASH") or "").strip().lower()
+    if configured_hash:
+        return hmac.compare_digest(supplied_hash, configured_hash)
+    configured_pin = str(os.environ.get("HELIOS_GOVERNANCE_APPROVER_PIN") or "")
+    if not configured_pin:
+        return False
+    expected_hash = hashlib.sha256(configured_pin.encode("utf-8")).hexdigest()
+    return hmac.compare_digest(supplied_hash, expected_hash)
+
+
+def _event_committee_identity(event: dict[str, Any]) -> dict[str, Any]:
+    metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+    identity = metadata.get("committee_identity") if isinstance(metadata.get("committee_identity"), dict) else {}
+    if identity:
+        return identity
+    snapshot = event.get("snapshot") if isinstance(event.get("snapshot"), dict) else {}
+    identity = snapshot.get("committee_identity") if isinstance(snapshot.get("committee_identity"), dict) else {}
+    return identity if isinstance(identity, dict) else {}
+
+
+def _latest_committee_identity(events: list[dict[str, Any]], latest_snapshot: dict[str, Any]) -> dict[str, Any]:
+    snapshot_identity = latest_snapshot.get("committee_identity") if isinstance(latest_snapshot, dict) else {}
+    if isinstance(snapshot_identity, dict) and snapshot_identity:
+        return snapshot_identity
+    for event in events:
+        identity = _event_committee_identity(event)
+        if identity:
+            return identity
+    return {}
+
+
 def _empty_version_diff() -> dict[str, Any]:
     return {
         "added": [],
@@ -583,6 +823,87 @@ def _html_table(headers: list[str], rows: list[list[Any]]) -> str:
     return f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
 
 
+def _html_committee_note(row: dict[str, Any]) -> str:
+    identity = row.get("committee_identity") if isinstance(row.get("committee_identity"), dict) else {}
+    signer = identity.get("signer_name") if isinstance(identity, dict) else ""
+    verified = "verified local PIN" if identity.get("verified") else identity.get("verification_method") or "local attestation"
+    identity_copy = f"<small>{escape(str(signer or 'Signer not recorded'))} / {escape(str(verified))}</small>"
+    return (
+        f"<article><strong>{escape(str(row.get('actor') or ''))}</strong>"
+        f"{identity_copy}<p>{escape(str(row.get('note') or ''))}</p></article>"
+    )
+
+
+def _pdf_text(pdf: Any, text: str, x: float, y: float, size: float, color: Any, *, bold: bool = False) -> None:
+    pdf.setFillColor(color)
+    pdf.setFont("Helvetica-Bold" if bold else "Helvetica", size)
+    pdf.drawString(x, y, str(text))
+
+
+def _pdf_wrapped(
+    pdf: Any,
+    text: str,
+    x: float,
+    y: float,
+    width: float,
+    size: float,
+    color: Any,
+    *,
+    bold: bool = False,
+    max_lines: int = 4,
+) -> float:
+    words = str(text or "").split()
+    if not words:
+        return y
+    line = ""
+    lines: list[str] = []
+    max_chars = max(18, int(width / max(size * 0.52, 1)))
+    for word in words:
+        candidate = f"{line} {word}".strip()
+        if len(candidate) > max_chars and line:
+            lines.append(line)
+            line = word
+        else:
+            line = candidate
+    if line:
+        lines.append(line)
+    for idx, line_text in enumerate(lines[:max_lines]):
+        _pdf_text(pdf, line_text, x, y - idx * (size + 4), size, color, bold=bold)
+    return y - min(len(lines), max_lines) * (size + 4)
+
+
+def _pdf_card_grid(pdf: Any, cards: list[tuple[str, Any]], x: float, y: float, card_w: float, card_h: float, colors: Any) -> None:
+    for index, (label, value) in enumerate(cards):
+        col = index % 2
+        row = index // 2
+        cx = x + col * (card_w + 14)
+        cy = y - row * (card_h + 12)
+        pdf.setFillColor(colors.HexColor("#0b1522"))
+        pdf.setStrokeColor(colors.HexColor("#263548"))
+        pdf.roundRect(cx, cy, card_w, card_h, 6, stroke=1, fill=1)
+        _pdf_text(pdf, str(label).upper(), cx + 12, cy + card_h - 18, 7.5, colors.HexColor("#9fb2c8"), bold=True)
+        _pdf_wrapped(pdf, str(value), cx + 12, cy + card_h - 36, card_w - 24, 10, colors.HexColor("#e6edf7"), bold=True, max_lines=2)
+
+
+def _pdf_panel(
+    pdf: Any,
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    title: str,
+    body: str,
+    colors: Any,
+    *,
+    accent: str,
+) -> None:
+    pdf.setFillColor(colors.HexColor("#101b2a"))
+    pdf.setStrokeColor(colors.HexColor("#263548"))
+    pdf.roundRect(x, y, width, height, 8, stroke=1, fill=1)
+    _pdf_text(pdf, title, x + 16, y + height - 24, 10, colors.HexColor(accent), bold=True)
+    _pdf_wrapped(pdf, body, x + 16, y + height - 46, width - 32, 9, colors.HexColor("#c8d3df"), max_lines=4)
+
+
 def _snapshot_summary(event: dict[str, Any]) -> dict[str, Any]:
     snapshot = event.get("snapshot") or {}
     model = snapshot.get("model") or {}
@@ -598,6 +919,7 @@ def _snapshot_summary(event: dict[str, Any]) -> dict[str, Any]:
         "holding_count": len(snapshot.get("holdings") or []),
         "risk_limit_state": "breach" if snapshot.get("risk_limit_violations") else "within_limits",
         "version_diff": snapshot.get("version_diff") or _empty_version_diff(),
+        "committee_identity": _event_committee_identity(event),
     }
 
 
@@ -613,6 +935,7 @@ def _event_summary(event: dict[str, Any]) -> dict[str, Any]:
         "note": event["note"],
         "approval_status": event["approval_status"],
         "committee_note": snapshot.get("committee_note") or event.get("note") or "",
+        "committee_identity": _event_committee_identity(event),
         "version_diff": snapshot.get("version_diff") or _empty_version_diff(),
         "risk_gate": snapshot.get("risk_gate") or {},
     }

@@ -12,6 +12,7 @@ import type {
   ModelEditHoldingInput,
   ModelEditPreviewResponse,
   ModelEditSaveResponse,
+  ModelGovernanceCommitteeIdentity,
   ModelGovernanceApprovalPacket,
   ModelSummary,
   ModelGovernanceResponse,
@@ -66,7 +67,13 @@ export const api = {
   modelValidation: () => request<ModelValidationResponse>("/api/model-validation"),
   recordModelGovernanceEvent: (
     id: string,
-    payload: { actor?: string; action?: string; note?: string; approval_status?: string },
+    payload: {
+      actor?: string;
+      action?: string;
+      note?: string;
+      approval_status?: string;
+      committee_identity?: Partial<ModelGovernanceCommitteeIdentity> & { secret?: string };
+    },
   ) =>
     request<{ event: ModelGovernanceResponse["change_log"][number] & { snapshot?: Record<string, unknown> } }>(
       `/api/model-governance/${encodeURIComponent(id)}/events`,

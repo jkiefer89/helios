@@ -86,6 +86,9 @@ def test_models_view_exposes_governed_model_library():
     assert "Model Governance v2" in source
     assert "Reject" in source
     assert "Approval Packet" in source
+    assert "Export PDF" in source
+    assert "Committee Identity" in source
+    assert "Local approval PIN" in source
     assert "Version Diff" in source
     assert "Risk-limit blocked" in source
     assert "api.modelApprovalPacket" in source
@@ -94,6 +97,8 @@ def test_models_view_exposes_governed_model_library():
     assert "modelGovernance:" in client_source
     assert "ModelGovernanceResponse" in type_source
     assert "ModelGovernanceApprovalPacket" in type_source
+    assert "committee_identity" in type_source
+    assert "pdf_url" in type_source
 
 
 def test_models_view_exposes_native_model_editor():

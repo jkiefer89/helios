@@ -135,7 +135,18 @@ export default function App() {
 
   const onRecordModelGovernance = async (
     id: string,
-    payload: { actor?: string; action?: string; note?: string; approval_status?: string },
+    payload: {
+      actor?: string;
+      action?: string;
+      note?: string;
+      approval_status?: string;
+      committee_identity?: {
+        signer_name?: string;
+        signer_role?: string;
+        committee?: string;
+        secret?: string;
+      };
+    },
   ) => {
     try {
       const result = await api.recordModelGovernanceEvent(id, payload);

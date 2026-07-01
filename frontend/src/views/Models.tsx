@@ -23,7 +23,18 @@ export function Models({
   onImportTemplate: (slug: string) => Promise<void>;
   onRecordGovernance: (
     id: string,
-    payload: { actor?: string; action?: string; note?: string; approval_status?: string },
+    payload: {
+      actor?: string;
+      action?: string;
+      note?: string;
+      approval_status?: string;
+      committee_identity?: {
+        signer_name?: string;
+        signer_role?: string;
+        committee?: string;
+        secret?: string;
+      };
+    },
   ) => Promise<void>;
   onModelEdited: () => Promise<void>;
   onOpenModel: (id: string) => void;
@@ -31,6 +42,12 @@ export function Models({
 }) {
   const [importing, setImporting] = useState("");
   const [actor, setActor] = useState("Advisor Console");
+  const [committeeIdentity, setCommitteeIdentity] = useState({
+    signer_name: "Advisor Console",
+    signer_role: "Committee reviewer",
+    committee: "Investment Committee",
+    secret: "",
+  });
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [recording, setRecording] = useState("");
   const [editingId, setEditingId] = useState("");
@@ -85,14 +102,19 @@ export function Models({
   };
   const recordGovernance = async (id: string, action: string, approvalStatus = "") => {
     setRecording(`${id}:${action}`);
+    const isDecision = approvalStatus === "approved" || approvalStatus === "rejected";
     try {
       await onRecordGovernance(id, {
         actor,
         action,
         approval_status: approvalStatus,
         note: notes[id] || `${action.replace(/_/g, " ")} recorded from Model Governance workspace.`,
+        ...(isDecision ? { committee_identity: committeeIdentity } : {}),
       });
       setNotes((current) => ({ ...current, [id]: "" }));
+      if (isDecision) {
+        setCommitteeIdentity((current) => ({ ...current, secret: "" }));
+      }
     } finally {
       setRecording("");
     }
@@ -326,6 +348,45 @@ export function Models({
                 Actor
                 <input value={actor} onChange={(event) => setActor(event.target.value)} aria-label="Governance actor" />
               </label>
+              <div className="committee-identity-card" aria-label="Committee Identity">
+                <strong>Committee Identity</strong>
+                <div className="committee-identity-grid">
+                  <label>
+                    Signer name
+                    <input
+                      value={committeeIdentity.signer_name}
+                      onChange={(event) => setCommitteeIdentity((current) => ({ ...current, signer_name: event.target.value }))}
+                      aria-label="Committee signer name"
+                    />
+                  </label>
+                  <label>
+                    Signer role
+                    <input
+                      value={committeeIdentity.signer_role}
+                      onChange={(event) => setCommitteeIdentity((current) => ({ ...current, signer_role: event.target.value }))}
+                      aria-label="Committee signer role"
+                    />
+                  </label>
+                  <label>
+                    Committee
+                    <input
+                      value={committeeIdentity.committee}
+                      onChange={(event) => setCommitteeIdentity((current) => ({ ...current, committee: event.target.value }))}
+                      aria-label="Committee name"
+                    />
+                  </label>
+                  <label>
+                    Local approval PIN
+                    <input
+                      value={committeeIdentity.secret}
+                      type="password"
+                      autoComplete="off"
+                      onChange={(event) => setCommitteeIdentity((current) => ({ ...current, secret: event.target.value }))}
+                      aria-label="Local approval PIN"
+                    />
+                  </label>
+                </div>
+              </div>
               <p>{governance.disclaimer}</p>
             </div>
             <div className="terminal-table governance-table" tabIndex={0} aria-label="Scrollable model governance table" onKeyDown={scrollTableByKey}>
@@ -376,15 +437,26 @@ export function Models({
                     <h2>Approval Packet</h2>
                     <p>{approvalPacket.model.name} · v{approvalPacket.version} · {formatStatus(approvalPacket.approval.status)}</p>
                   </div>
-                  <a href={approvalPacket.export.html_url} target="_blank" rel="noreferrer">Export HTML</a>
+                  <div className="packet-export-links">
+                    <a href={approvalPacket.export.html_url} target="_blank" rel="noreferrer">Export HTML</a>
+                    <a href={approvalPacket.export.pdf_url} target="_blank" rel="noreferrer">Export PDF</a>
+                  </div>
                 </header>
                 <div className="metric-grid">
                   <div className="stat-tile"><span>Approval Gate</span><strong className={approvalPacket.risk_gate.can_approve ? "tone-positive" : "tone-warning"}>{approvalPacket.risk_gate.can_approve ? "Pass" : "Blocked"}</strong><small>{approvalPacket.risk_gate.blocked_reason || "Risk limits pass"}</small></div>
                   <div className="stat-tile"><span>Version Diff</span><strong>{fmtPct(approvalPacket.version_diff.turnover_pct)}</strong><small>{approvalPacket.version_diff.summary}</small></div>
                   <div className="stat-tile"><span>Committee Notes</span><strong>{approvalPacket.committee_notes.length}</strong><small>Approval/rejection/change notes</small></div>
-                  <div className="stat-tile"><span>Snapshots</span><strong>{approvalPacket.snapshots.length}</strong><small>Before / after archive</small></div>
+                  <div className="stat-tile"><span>Committee Identity</span><strong>{approvalPacket.committee_identity?.verified ? "Verified" : "Attested"}</strong><small>{approvalPacket.committee_identity?.signer_name || "Signer not recorded"}</small></div>
                 </div>
                 <div className="governance-log-grid">
+                  <section>
+                    <h2>Committee Identity</h2>
+                    <article>
+                      <strong>{approvalPacket.committee_identity?.signer_name || "Signer not recorded"}</strong>
+                      <span>{approvalPacket.committee_identity?.signer_role || "Local workspace reviewer"} / {approvalPacket.committee_identity?.committee || "Local Investment Committee"}</span>
+                      <p>{approvalPacket.committee_identity?.verified ? "Verified by local approval PIN." : "Local workspace attestation; configure a PIN to require verification."}</p>
+                    </article>
+                  </section>
                   <section>
                     <h2>Version Diff</h2>
                     {approvalPacket.version_diff.added.length === 0 && approvalPacket.version_diff.removed.length === 0 && approvalPacket.version_diff.changed_weights.length === 0 ? (

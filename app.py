@@ -1150,6 +1150,7 @@ def model_governance_event(model_id):
         action=str(payload.get("action") or ""),
         note=str(payload.get("note") or ""),
         approval_status=str(payload.get("approval_status") or ""),
+        committee_identity=payload.get("committee_identity") if isinstance(payload.get("committee_identity"), dict) else None,
     )
     if not result.get("recorded"):
         return err(result.get("warning") or "Could not record model governance event.", int(result.get("status_code") or 503))
@@ -1179,6 +1180,21 @@ def model_governance_approval_packet_html(model_id):
         model_governance.render_approval_packet_html(packet),
         mimetype="text/html",
         headers={"Content-Disposition": f'inline; filename="helios-model-approval-{model_id}.html"'},
+    )
+
+
+@app.route("/api/model-governance/<model_id>/approval-packet.pdf")
+def model_governance_approval_packet_pdf(model_id):
+    mdl = portfolio.get(model_id)
+    if mdl is None:
+        return err("Unknown model.", 404)
+    packet = model_governance.approval_packet(mdl)
+    if not packet.get("available", True):
+        return err(packet.get("warning") or "Model approval packet unavailable.", 503)
+    return Response(
+        model_governance.render_approval_packet_pdf(packet),
+        mimetype="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="helios-model-approval-{model_id}.pdf"'},
     )
 
 
