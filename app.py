@@ -62,7 +62,7 @@ def _load_local_env_file(path: Path | None = None) -> dict:
 _LOCAL_ENV_STATUS = _load_local_env_file()
 
 from engine import (
-    ai_copilot, backtest, data, evidence_lab, forecast, indicators, insights, mandate, model_governance, model_library, model_validation, opportunity, portfolio,
+    ai_copilot, analytics_cache, backtest, data, evidence_lab, forecast, indicators, insights, mandate, model_governance, model_library, model_validation, opportunity, portfolio,
     portfolio_clinic, persistence, provenance, regime, report_exports, reporting, risk_exposure, sentiment, signal_journal, signals, strategy,
 )
 
@@ -394,6 +394,10 @@ def _quick_instrument_screen(inst: data.Instrument) -> dict | None:
     close = inst.df["close"].dropna()
     if len(close) < 60:
         return None
+    cache_key = analytics_cache.series_key(f"{inst.symbol}:{inst.source}", close)
+    cached = analytics_cache.get("command_center_screen", cache_key)
+    if cached is not None:
+        return cached
     try:
         fc = forecast.forecast(close, horizon=21, n_paths=600)
         sent = sentiment.score_headlines(inst.headlines)
@@ -426,7 +430,7 @@ def _quick_instrument_screen(inst: data.Instrument) -> dict | None:
     if dir_acc is not None and dir_acc <= 0.50:
         warnings.append("Forecast edge is weak or below coin-flip on the out-of-sample window.")
 
-    return {
+    card = {
         "id": f"instrument:{inst.symbol}",
         "kind": "instrument",
         "symbol": inst.symbol,
@@ -445,6 +449,8 @@ def _quick_instrument_screen(inst: data.Instrument) -> dict | None:
         "reason": sig.get("headline_rationale", ""),
         "warnings": warnings[:3],
     }
+    analytics_cache.put("command_center_screen", cache_key, card)
+    return card
 
 
 def _command_center_payload() -> dict:
@@ -1099,6 +1105,7 @@ def model_library_import():
     mdl = model_library.import_template(slug)
     if not mdl:
         return err("Unknown model library template.", 404)
+    analytics_cache.invalidate()
     coverage = _model_coverage(mdl)
     return ok({
         "id": mdl.id,
@@ -1244,6 +1251,8 @@ def model_editor_save(model_id):
         return err(str(exc), 400)
     if not result.get("saved"):
         return err(result.get("warning") or "Could not save model edits.", 400)
+    # Reweighting can keep row count and last date unchanged, so drop memos.
+    analytics_cache.invalidate()
     return ok(result)
 
 
@@ -1266,6 +1275,7 @@ def model_upload():
         return err("Could not read that file. Expected columns for Ticker and (optionally) Weight.", 400)
     finally:
         _UPLOAD_SEMAPHORE.release()
+    analytics_cache.invalidate()
     coverage = _model_coverage(mdl)
     return ok({
         "id": mdl.id,
@@ -2185,7 +2195,7 @@ def _holdings_with_signals(ps: portfolio.PortfolioSeries, mdl: portfolio.Model) 
     for h in ps.holdings:
         try:
             psr = data.resolve_series(h["ticker"])
-            sc = signals.historical_signals(psr.close).iloc[-1]
+            sc = signals.latest_signal_score(psr.close)
             action = "BUY" if sc > 0.15 else "SELL" if sc < -0.05 else "HOLD"
         except Exception:
             action = "—"

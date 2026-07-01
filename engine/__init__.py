@@ -2,6 +2,7 @@
 
 Modules:
     data        - load / generate / fetch price history
+    analytics_cache - bounded memo cache for per-series analytics results
     indicators  - technical indicators & performance metrics
     forecast    - return forecasting with Monte-Carlo confidence cones
     mandate     - client-purpose presets and risk/return anchors
@@ -28,6 +29,7 @@ Modules:
 """
 
 __all__ = [
+    "analytics_cache",
     "data",
     "indicators",
     "forecast",
