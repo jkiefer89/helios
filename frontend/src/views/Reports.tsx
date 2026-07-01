@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
-import type { AIResult, DataStatusResponse, ModelSummary, ReportResponse, ReportSnapshot, SignalJournalEntry, TickerSummary } from "../api/types";
+import type { AIResult, DataStatusResponse, ModelSummary, ReportResponse, ReportSnapshot, ReportSnapshotStorage, SignalJournalEntry, TickerSummary } from "../api/types";
 import { AICopilotPanel, reportCopilotActions } from "../components/ai/AICopilotPanel";
 import { DataQualityBanner } from "../components/badges/DataModeBadge";
 import { Panel } from "../components/cards/Panel";
@@ -34,6 +34,8 @@ export function Reports({
   const [snapshotError, setSnapshotError] = useState("");
   const [savingSnapshot, setSavingSnapshot] = useState(false);
   const [aiNarrative, setAiNarrative] = useState("");
+  const [includeAiNarrative, setIncludeAiNarrative] = useState(true);
+  const [snapshotStorage, setSnapshotStorage] = useState<ReportSnapshotStorage | null>(null);
   const requestSeq = useRef(0);
   const options = useMemo(() => [
     ...tickers.map((ticker) => ({ value: `instrument:${ticker.symbol}`, label: `${ticker.symbol} · ${ticker.name}` })),
@@ -72,6 +74,7 @@ export function Reports({
     try {
       const history = await api.reportSnapshots();
       setSnapshots(history.snapshots);
+      setSnapshotStorage(history.storage);
       setSnapshotError(history.warning || "");
     } catch (err) {
       setSnapshots([]);
@@ -107,8 +110,10 @@ export function Reports({
         kind,
         id,
         ai_narrative: aiNarrative || undefined,
+        include_ai_narrative: includeAiNarrative,
       });
       setSnapshots((current) => [saved.snapshot, ...current.filter((row) => row.id !== saved.snapshot.id)]);
+      setSnapshotStorage(saved.storage);
     } catch (err) {
       setSnapshotError(err instanceof Error ? err.message : "Report snapshot could not be saved.");
     } finally {
@@ -122,6 +127,7 @@ export function Reports({
         <div><div className="section-label">Analysis-Only Report</div><h1>Evidence preview pack</h1><p>Every preview opens with data quality and analysis-only caveats.</p></div>
         <form className="toolbar" onSubmit={(event) => { event.preventDefault(); void build(); }}>
           <label>Target<TerminalSelect ariaLabel="Report target" value={target} onChange={setTarget} options={options} /></label>
+          <label className="check"><input type="checkbox" checked={includeAiNarrative} onChange={(event) => setIncludeAiNarrative(event.target.checked)} /> Include AI narrative when available</label>
           <button type="submit">Build preview</button>
           <button type="button" onClick={() => void saveSnapshot()} disabled={!payload || savingSnapshot}>
             {savingSnapshot ? "Saving..." : "Save snapshot"}
@@ -132,7 +138,7 @@ export function Reports({
       {error && <div className="notice danger">{error}</div>}
       {snapshotError && <div className="notice warning no-print">{snapshotError}</div>}
       <SignalJournalPanel entries={journalEntries} />
-      <ReportHistoryPanel snapshots={snapshots} />
+      <ReportHistoryPanel snapshots={snapshots} storage={snapshotStorage} />
       {!payload ? (
         <EmptyState title="Select a report target" body="Choose an instrument or model to build an analysis-only report." />
       ) : (
@@ -142,9 +148,9 @@ export function Reports({
   );
 }
 
-function ReportHistoryPanel({ snapshots }: { snapshots: ReportSnapshot[] }) {
+function ReportHistoryPanel({ snapshots, storage }: { snapshots: ReportSnapshot[]; storage: ReportSnapshotStorage | null }) {
   return (
-    <Panel title="Report History" meta={`${snapshots.length} saved`} className="no-print report-history-panel">
+    <Panel title="Report History" meta={`${snapshots.length} saved · ${storageLabel(storage)}`} className="no-print report-history-panel">
       {snapshots.length === 0 ? (
         <EmptyState title="No saved report snapshots" body="Build a report and save a snapshot to preserve the evidence pack with provenance." />
       ) : (
@@ -158,7 +164,7 @@ function ReportHistoryPanel({ snapshots }: { snapshots: ReportSnapshot[] }) {
               <span><strong>{snapshot.title}</strong><small>{snapshot.target_kind} · {snapshot.target_id}</small></span>
               <span>{snapshot.source || "unknown"}<small>{formatSourceCounts(snapshot.source_counts)}</small></span>
               <span>{snapshot.first_date || "—"} → {snapshot.last_date || "—"}<small>{snapshot.row_count} rows</small></span>
-              <span>{snapshot.ai_narrative_included ? "Included" : "Not included"}</span>
+              <span>{snapshot.ai_narrative_included ? "Included" : snapshot.ai_narrative_status || "Not included"}<small>{providerLabel(snapshot.ai_provider)}</small></span>
               <span className="report-export-links">
                 <a href={snapshot.html_url} target="_blank" rel="noreferrer">HTML Snapshot</a>
                 <a href={snapshot.pdf_url}>PDF Export</a>
@@ -255,6 +261,18 @@ function formatSourceCounts(sourceCounts: Record<string, number>) {
   const rows = Object.entries(sourceCounts || {});
   if (!rows.length) return "";
   return rows.map(([source, count]) => `${source}: ${count}`).join(" · ");
+}
+
+function storageLabel(storage: ReportSnapshotStorage | null) {
+  if (!storage) return "checking storage";
+  if (!storage.durable) return "history unavailable";
+  return storage.encrypted_at_rest ? "Encrypted local history" : "Local history";
+}
+
+function providerLabel(provider: Record<string, unknown>) {
+  const name = provider?.provider ? String(provider.provider) : "";
+  const model = provider?.model ? String(provider.model) : "";
+  return [name, model].filter(Boolean).join(" · ");
 }
 
 function PersistenceSnapshot({ dataStatus }: { dataStatus: DataStatusResponse | null }) {

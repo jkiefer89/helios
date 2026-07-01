@@ -360,6 +360,8 @@ export interface ReportSnapshot {
   model_metadata: Record<string, unknown>;
   warnings: string[];
   ai_narrative_included: boolean;
+  ai_narrative_status: string;
+  ai_provider: Record<string, unknown>;
   html_url: string;
   pdf_url: string;
   metadata?: Record<string, unknown>;
@@ -369,20 +371,33 @@ export interface ReportSnapshotSaveRequest {
   kind: "instrument" | "model" | string;
   id: string;
   ai_narrative?: string;
+  include_ai_narrative?: boolean;
 }
 
 export interface ReportSnapshotSaveResponse {
   snapshot: ReportSnapshot;
   html_url: string;
   pdf_url: string;
+  storage: ReportSnapshotStorage;
   disclaimer: string;
 }
 
 export interface ReportSnapshotHistoryResponse {
   snapshots: ReportSnapshot[];
   count: number;
+  storage: ReportSnapshotStorage;
   warning?: string;
   disclaimer: string;
+}
+
+export interface ReportSnapshotStorage {
+  backend: string;
+  scope: string;
+  durable: boolean;
+  configured: boolean;
+  encrypted_at_rest: boolean;
+  at_rest_format: string;
+  warning?: string;
 }
 
 export interface SignalJournalEntry {

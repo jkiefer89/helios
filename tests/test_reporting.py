@@ -156,11 +156,15 @@ def test_report_snapshot_history_exports_html_and_pdf_with_provenance(monkeypatc
     assert snapshot["html_url"].endswith(".html")
     assert snapshot["pdf_url"].endswith(".pdf")
     assert snapshot["ai_narrative_included"] is True
+    assert snapshot["ai_narrative_status"] == "provided"
+    assert body["storage"]["durable"] is True
+    assert body["storage"]["backend"] == "sqlite"
 
     history = client.get("/api/report/snapshots")
     assert history.status_code == 200
     history_body = history.get_json()
     assert history_body["count"] == 1
+    assert history_body["storage"]["durable"] is True
     assert history_body["snapshots"][0]["id"] == snapshot["id"]
     assert history_body["snapshots"][0]["row_count"] == 260
     persistence.reset_store_for_tests()
@@ -186,7 +190,70 @@ def test_report_snapshot_history_exports_html_and_pdf_with_provenance(monkeypatc
     assert pdf.status_code == 200
     assert pdf.content_type == "application/pdf"
     assert pdf.data.startswith(b"%PDF-")
+    assert b"HELIOS PRO" in pdf.data
+    assert b"Advisor-Grade Research Terminal" in pdf.data
     assert b"Helios Report Snapshot" in pdf.data
+    assert b"SOURCE AND PROVENANCE" in pdf.data
+    assert b"ADVISOR REVIEW REQUIRED" in pdf.data
+    assert pdf.data.count(b"/Type /Page ") >= 2
+
+
+def test_report_snapshot_can_generate_ai_narrative_when_provider_enabled(monkeypatch, tmp_path):
+    monkeypatch.setenv("HELIOS_DB_PATH", str(tmp_path / "helios.db"))
+    from engine import persistence
+
+    persistence.reset_store_for_tests()
+    client = _client()
+    upload = client.post(
+        "/api/upload",
+        data={
+            "file": (BytesIO(price_csv(days=260)), "ai-snapshot.csv"),
+            "symbol": "AISNAP",
+            "name": "AI Snapshot Upload",
+        },
+        content_type="multipart/form-data",
+    )
+    assert upload.status_code == 200
+
+    class FakeProvider:
+        def status(self):
+            return {"enabled": True, "available": True, "provider": "fake", "model": "unit-model"}
+
+        def write_advisor_report(self, payload, regenerate=False):
+            assert regenerate is True
+            assert payload["report"]["kind"] == "instrument"
+            assert "price_history" not in str(payload).lower()
+            return {
+                "summary": "AI narrative summary based only on Helios report facts.",
+                "key_points": ["Source and range were reviewed."],
+                "risks": ["Forecasts remain estimates."],
+                "what_would_invalidate": [],
+                "advisor_language": "Advisor language remains analysis-only and requires review.",
+                "compliance_caveats": ["Advisor review required before client use."],
+                "used_numbers": [],
+                "missing_information": [],
+                "data_quality_statement": "Real uploaded history is present.",
+                "provider": "fake",
+                "model": "unit-model",
+                "generated_at": "2026-06-30T12:00:00+00:00",
+                "needs_review": True,
+            }
+
+    monkeypatch.setattr(helios.ai_copilot, "get_provider", lambda: FakeProvider())
+
+    save = client.post(
+        "/api/report/snapshots",
+        json={"kind": "instrument", "id": "AISNAP", "include_ai_narrative": True},
+    )
+
+    assert save.status_code == 200
+    snapshot = save.get_json()["snapshot"]
+    assert snapshot["ai_narrative_included"] is True
+    assert snapshot["ai_narrative_status"] == "generated"
+    assert snapshot["ai_provider"]["provider"] == "fake"
+    html_text = client.get(snapshot["html_url"]).get_data(as_text=True)
+    assert "AI narrative summary based only on Helios report facts" in html_text
+    assert "Advisor Review Required" in html_text
 
 
 def test_model_report_snapshot_includes_model_metadata_and_source_counts(monkeypatch, tmp_path):

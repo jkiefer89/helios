@@ -21,6 +21,8 @@ def build_snapshot(
     target_id: str,
     report: dict[str, Any],
     ai_narrative: str = "",
+    ai_narrative_status: str = "",
+    ai_provider: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     data_quality = report.get("data_provenance") or {}
     sections = report.get("sections") or {}
@@ -53,12 +55,16 @@ def build_snapshot(
         "report": report,
         "ai_narrative": _text(ai_narrative)[:6000],
         "ai_narrative_included": bool(_text(ai_narrative)),
+        "ai_narrative_status": ai_narrative_status or ("provided" if _text(ai_narrative) else "not_requested"),
+        "ai_provider": ai_provider or {},
         "metadata": {
             "snapshot_version": 1,
             "analysis_only": True,
             "no_execution": True,
             "no_return_guarantee": True,
             "report_timestamp": _text(report.get("timestamp")),
+            "ai_narrative_status": ai_narrative_status or ("provided" if _text(ai_narrative) else "not_requested"),
+            "ai_provider": ai_provider or {},
         },
     }
     snapshot["html"] = render_html(snapshot)
@@ -71,7 +77,21 @@ def public_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     out["html_url"] = f"/api/report/snapshots/{snapshot_id}.html"
     out["pdf_url"] = f"/api/report/snapshots/{snapshot_id}.pdf"
     out["ai_narrative_included"] = bool(snapshot.get("ai_narrative"))
+    out["ai_narrative_status"] = snapshot.get("ai_narrative_status") or snapshot.get("metadata", {}).get("ai_narrative_status") or ("included" if snapshot.get("ai_narrative") else "not_included")
+    out["ai_provider"] = snapshot.get("ai_provider") or snapshot.get("metadata", {}).get("ai_provider") or {}
     return out
+
+
+def ai_result_to_narrative(result: dict[str, Any]) -> str:
+    parts = [
+        _text(result.get("summary")),
+        _text(result.get("advisor_language")),
+        _text(result.get("data_quality_statement")),
+        _bullet_block("Key points", result.get("key_points")),
+        _bullet_block("Risks", result.get("risks")),
+        _bullet_block("Compliance caveats", result.get("compliance_caveats")),
+    ]
+    return "\n\n".join(part for part in parts if part)
 
 
 def render_html(snapshot: dict[str, Any]) -> str:
@@ -113,6 +133,10 @@ def render_html(snapshot: dict[str, Any]) -> str:
         "<h2>Analysis-Only Caveat</h2>",
         f"<p>{_esc(report.get('disclaimer') or DISCLAIMER)}</p>",
         "</section>",
+        '<section class="caveat">',
+        "<h2>Advisor Review Required</h2>",
+        "<p>Reports and any AI narrative are evidence summaries for advisor review. Helios does not execute orders, provide investment advice, or guarantee returns.</p>",
+        "</section>",
         "<section>",
         "<h2>Source And Provenance</h2>",
         _render_dict(rows),
@@ -132,33 +156,164 @@ def render_html(snapshot: dict[str, Any]) -> str:
 
 
 def render_pdf(snapshot: dict[str, Any]) -> bytes:
-    lines = _pdf_lines(snapshot)
-    escaped_lines = [_pdf_escape(line) for line in lines[:52]]
-    text = "BT /F1 10 Tf 14 TL 50 780 Td " + " T* ".join(f"({line}) Tj" for line in escaped_lines) + " ET"
-    stream = text.encode("latin-1", "replace")
-    objects = [
-        b"<< /Type /Catalog /Pages 2 0 R >>",
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-        b"<< /Length " + str(len(stream)).encode("ascii") + b" >>\nstream\n" + stream + b"\nendstream",
-    ]
+    page_streams = _pdf_page_streams(snapshot)
+    objects: dict[int, bytes] = {
+        1: b"<< /Type /Catalog /Pages 2 0 R >>",
+        3: b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        4: b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>",
+    }
+    page_refs = []
+    obj_id = 5
+    for stream_text in page_streams:
+        page_obj = obj_id
+        content_obj = obj_id + 1
+        obj_id += 2
+        page_refs.append(f"{page_obj} 0 R")
+        stream = stream_text.encode("latin-1", "replace")
+        objects[page_obj] = (
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            f"/Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents {content_obj} 0 R >>"
+        ).encode("ascii")
+        objects[content_obj] = b"<< /Length " + str(len(stream)).encode("ascii") + b" >>\nstream\n" + stream + b"\nendstream"
+    objects[2] = f"<< /Type /Pages /Kids [{' '.join(page_refs)}] /Count {len(page_refs)} >>".encode("ascii")
     out = bytearray(b"%PDF-1.4\n")
-    offsets = [0]
-    for index, obj in enumerate(objects, start=1):
-        offsets.append(len(out))
+    offsets = {0: 0}
+    for index in sorted(objects):
+        obj = objects[index]
+        offsets[index] = len(out)
         out.extend(f"{index} 0 obj\n".encode("ascii"))
         out.extend(obj)
         out.extend(b"\nendobj\n")
     xref = len(out)
-    out.extend(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
+    max_obj = max(objects)
+    out.extend(f"xref\n0 {max_obj + 1}\n".encode("ascii"))
     out.extend(b"0000000000 65535 f \n")
-    for offset in offsets[1:]:
+    for index in range(1, max_obj + 1):
+        offset = offsets.get(index, 0)
         out.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
     out.extend(
-        f"trailer << /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode("ascii")
+        f"trailer << /Size {max_obj + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode("ascii")
     )
     return bytes(out)
+
+
+def _pdf_page_streams(snapshot: dict[str, Any]) -> list[str]:
+    return [_pdf_cover_page(snapshot), _pdf_evidence_page(snapshot)]
+
+
+def _pdf_cover_page(snapshot: dict[str, Any]) -> str:
+    cmds = [_pdf_rect(0, 0, 612, 792, (0.025, 0.055, 0.085))]
+    cmds.append(_pdf_rect(0, 724, 612, 68, (0.04, 0.075, 0.12)))
+    cmds.append(_pdf_text("HELIOS PRO", 42, 758, 18, bold=True))
+    cmds.append(_pdf_text("Advisor-Grade Research Terminal", 42, 740, 9, color=(0.70, 0.78, 0.88)))
+    cmds.append(_pdf_text("REPORT SNAPSHOT", 430, 754, 12, bold=True, color=(0.32, 0.65, 1.0)))
+    y = _pdf_wrapped(cmds, str(snapshot.get("title") or "Helios Report Snapshot"), 42, 682, 520, size=21, bold=True, max_lines=3)
+    y -= 18
+    cmds.append(_pdf_text("SOURCE AND PROVENANCE", 42, y, 11, bold=True, color=(1.0, 0.82, 0.24)))
+    y -= 18
+    cards = [
+        ("Source", snapshot.get("source") or "Unknown"),
+        ("Rows", snapshot.get("row_count") or 0),
+        ("First Date", snapshot.get("first_date") or "Unknown"),
+        ("Last Date", snapshot.get("last_date") or "Unknown"),
+        ("Mode", snapshot.get("data_mode") or "Unknown"),
+        ("Research Eligible", "Yes" if snapshot.get("eligible_for_real_research") else "No"),
+    ]
+    for index, (label, value) in enumerate(cards):
+        x = 42 + (index % 2) * 266
+        box_y = y - 66 - (index // 2) * 82
+        cmds.append(_pdf_rect(x, box_y, 246, 58, (0.055, 0.095, 0.145), stroke=(0.16, 0.25, 0.35)))
+        cmds.append(_pdf_text(label, x + 14, box_y + 36, 8, bold=True, color=(0.62, 0.70, 0.80)))
+        cmds.append(_pdf_text(str(value), x + 14, box_y + 16, 13, bold=True))
+    cmds.append(_pdf_rect(42, 198, 528, 76, (0.11, 0.10, 0.05), stroke=(0.56, 0.43, 0.09)))
+    cmds.append(_pdf_text("ADVISOR REVIEW REQUIRED", 58, 244, 12, bold=True, color=(1.0, 0.82, 0.24)))
+    _pdf_wrapped(
+        cmds,
+        "Analysis only. Helios provides evidence summaries and does not provide investment advice, order execution, or return guarantees.",
+        58,
+        224,
+        492,
+        size=9,
+        color=(0.86, 0.90, 0.96),
+        max_lines=3,
+    )
+    cmds.append(_pdf_text("Helios Report Snapshot", 42, 42, 9, color=(0.62, 0.70, 0.80)))
+    cmds.append(_pdf_text(str(snapshot.get("created_at") or ""), 430, 42, 9, color=(0.62, 0.70, 0.80)))
+    return "".join(cmds)
+
+
+def _pdf_evidence_page(snapshot: dict[str, Any]) -> str:
+    cmds = [_pdf_rect(0, 0, 612, 792, (0.025, 0.055, 0.085))]
+    cmds.append(_pdf_text("HELIOS PRO", 42, 760, 13, bold=True))
+    cmds.append(_pdf_text("Evidence Pack Details", 430, 760, 10, bold=True, color=(0.32, 0.65, 1.0)))
+    y = 718
+    y = _pdf_section(cmds, "MODEL METADATA", snapshot.get("model_metadata") or {}, 42, y)
+    y = _pdf_section(cmds, "SOURCE COUNTS", snapshot.get("source_counts") or {}, 42, y)
+    warnings = snapshot.get("warnings") or []
+    if warnings:
+        y = _pdf_section(cmds, "CAVEATS", {f"Caveat {i + 1}": warning for i, warning in enumerate(warnings[:6])}, 42, y)
+    if snapshot.get("ai_narrative"):
+        cmds.append(_pdf_text("AI NARRATIVE", 42, y, 11, bold=True, color=(1.0, 0.82, 0.24)))
+        y -= 18
+        y = _pdf_wrapped(cmds, str(snapshot["ai_narrative"]), 42, y, 520, size=9, max_lines=12)
+        y -= 14
+    cmds.append(_pdf_rect(42, max(y - 86, 64), 528, 72, (0.055, 0.095, 0.145), stroke=(0.16, 0.25, 0.35)))
+    cmds.append(_pdf_text("EXPORT CONTROLS", 58, max(y - 42, 108), 10, bold=True, color=(0.32, 0.65, 1.0)))
+    _pdf_wrapped(
+        cmds,
+        "This PDF is a frozen local snapshot of deterministic Helios report facts. Review the matching HTML snapshot for expanded sections and caveats.",
+        58,
+        max(y - 60, 90),
+        492,
+        size=8,
+        color=(0.70, 0.78, 0.88),
+        max_lines=3,
+    )
+    cmds.append(_pdf_text("ADVISOR REVIEW REQUIRED", 42, 42, 9, bold=True, color=(1.0, 0.82, 0.24)))
+    return "".join(cmds)
+
+
+def _pdf_section(cmds: list[str], title: str, rows: dict[str, Any], x: int, y: int) -> int:
+    if not rows:
+        return y
+    cmds.append(_pdf_text(title, x, y, 11, bold=True, color=(1.0, 0.82, 0.24)))
+    y -= 18
+    for key, value in list(rows.items())[:8]:
+        cmds.append(_pdf_text(_label(key), x, y, 8, bold=True, color=(0.62, 0.70, 0.80)))
+        y = _pdf_wrapped(cmds, str(value), x + 145, y, 375, size=8, max_lines=2)
+        y -= 6
+    return y - 12
+
+
+def _pdf_rect(x: int, y: int, width: int, height: int, fill: tuple[float, float, float], stroke: tuple[float, float, float] | None = None) -> str:
+    command = f"{fill[0]} {fill[1]} {fill[2]} rg {x} {y} {width} {height} re f\n"
+    if stroke:
+        command += f"{stroke[0]} {stroke[1]} {stroke[2]} RG {x} {y} {width} {height} re S\n"
+    return command
+
+
+def _pdf_text(text: str, x: int, y: int, size: int, *, bold: bool = False, color: tuple[float, float, float] = (0.90, 0.94, 0.98)) -> str:
+    font = "F2" if bold else "F1"
+    return f"BT /{font} {size} Tf {color[0]} {color[1]} {color[2]} rg {x} {y} Td ({_pdf_escape(str(text))}) Tj ET\n"
+
+
+def _pdf_wrapped(
+    cmds: list[str],
+    text: str,
+    x: int,
+    y: int,
+    width: int,
+    *,
+    size: int,
+    bold: bool = False,
+    color: tuple[float, float, float] = (0.90, 0.94, 0.98),
+    max_lines: int,
+) -> int:
+    chars = max(24, int(width / max(size * 0.52, 1)))
+    for line in textwrap.wrap(str(text), width=chars)[:max_lines]:
+        cmds.append(_pdf_text(line, x, y, size, bold=bold, color=color))
+        y -= int(size * 1.45)
+    return y
 
 
 def _pdf_lines(snapshot: dict[str, Any]) -> list[str]:
@@ -224,7 +379,7 @@ def _ai_html(snapshot: dict[str, Any]) -> str:
         return ""
     return (
         "<section><h2>AI Narrative</h2>"
-        "<p class=\"muted\">AI-generated narrative saved with this snapshot; calculations are from the Helios engine.</p>"
+        "<p class=\"muted\">AI-generated narrative saved with this snapshot; calculations are from the Helios engine. Advisor Review Required.</p>"
         f"<pre>{_esc(narrative)}</pre></section>"
     )
 
@@ -270,6 +425,13 @@ def _dict(value: Any) -> dict[str, Any]:
 
 def _list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
+
+
+def _bullet_block(title: str, rows: Any) -> str:
+    values = rows if isinstance(rows, list) else []
+    if not values:
+        return ""
+    return f"{title}:\n" + "\n".join(f"- {row}" for row in values)
 
 
 def _int(value: Any) -> int:

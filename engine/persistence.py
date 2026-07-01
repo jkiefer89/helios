@@ -1245,6 +1245,8 @@ def _signal_row(row: sqlite3.Row, store: SQLiteStore | None = None) -> dict[str,
 
 def _report_snapshot_row(row: sqlite3.Row, store: SQLiteStore, *, include_report: bool) -> dict[str, Any]:
     warnings = store._load_json(row["warnings_json"]).get("warnings") or []
+    metadata = store._load_json(row["metadata_json"])
+    ai_narrative = store._load_text(row["ai_narrative"])
     snapshot = {
         "id": row["snapshot_id"],
         "created_at": row["created_at"],
@@ -1262,9 +1264,11 @@ def _report_snapshot_row(row: sqlite3.Row, store: SQLiteStore, *, include_report
         "source_counts": store._load_json(row["source_counts_json"]),
         "model_metadata": store._load_json(row["model_metadata_json"]),
         "warnings": warnings if isinstance(warnings, list) else [],
-        "ai_narrative": store._load_text(row["ai_narrative"]),
-        "ai_narrative_included": bool(store._load_text(row["ai_narrative"])),
-        "metadata": store._load_json(row["metadata_json"]),
+        "ai_narrative": ai_narrative,
+        "ai_narrative_included": bool(ai_narrative),
+        "ai_narrative_status": metadata.get("ai_narrative_status") or ("included" if ai_narrative else "not_included"),
+        "ai_provider": metadata.get("ai_provider") or {},
+        "metadata": metadata,
     }
     if include_report:
         snapshot["report"] = store._load_json(row["report_json"])

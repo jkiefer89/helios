@@ -1280,11 +1280,13 @@ def report_model():
 @app.route("/api/report/snapshots", methods=["GET"])
 def report_snapshot_history():
     store = persistence.get_store()
+    storage = _report_snapshot_storage(store)
     if not store.available:
         return ok({
             "snapshots": [],
             "count": 0,
             "warning": store.warning or "Report history requires SQLite persistence.",
+            "storage": storage,
             "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
         })
     limit, error = _safe_int_arg("limit", 50, 1, 200)
@@ -1294,6 +1296,7 @@ def report_snapshot_history():
     return ok({
         "snapshots": snapshots,
         "count": len(snapshots),
+        "storage": storage,
         "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
     })
 
@@ -1307,15 +1310,23 @@ def save_report_snapshot():
     kind = str(body.get("kind") or "").strip().lower()
     target_id = str(body.get("id") or body.get("target_id") or "").strip()
     ai_narrative = str(body.get("ai_narrative") or "").strip()
+    include_ai_narrative = bool(body.get("include_ai_narrative"))
     try:
         report = _report_for_snapshot(kind, target_id)
     except ValueError as exc:
         return err(str(exc), 400)
+    ai_narrative, ai_meta = _report_snapshot_ai_narrative(
+        report,
+        provided_narrative=ai_narrative,
+        include_ai_narrative=include_ai_narrative,
+    )
     snapshot = report_exports.build_snapshot(
         target_kind=kind,
         target_id=target_id,
         report=report,
         ai_narrative=ai_narrative,
+        ai_narrative_status=ai_meta["status"],
+        ai_provider=ai_meta["provider"],
     )
     result = store.save_report_snapshot(snapshot)
     if not result.get("saved"):
@@ -1325,6 +1336,7 @@ def save_report_snapshot():
         "snapshot": public,
         "html_url": public["html_url"],
         "pdf_url": public["pdf_url"],
+        "storage": _report_snapshot_storage(store),
         "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
     })
 
@@ -1366,6 +1378,72 @@ def _report_for_snapshot(kind: str, target_id: str) -> dict:
             raise ValueError("Unknown model.")
         return reporting.model_report(mdl)
     raise ValueError("Report snapshot kind must be 'instrument' or 'model'.")
+
+
+def _report_snapshot_ai_narrative(
+    report: dict,
+    *,
+    provided_narrative: str,
+    include_ai_narrative: bool,
+) -> tuple[str, dict]:
+    if provided_narrative:
+        return provided_narrative, {
+            "status": "provided",
+            "provider": {"source": "current_session", "needs_review": True},
+        }
+    if not include_ai_narrative:
+        return "", {"status": "not_requested", "provider": {}}
+    provider = ai_copilot.get_provider()
+    status = provider.status()
+    provider_meta = {
+        "provider": status.get("provider") or "",
+        "model": status.get("model") or "",
+        "available": bool(status.get("available")),
+        "needs_review": True,
+    }
+    if not status.get("available"):
+        return "", {"status": "provider_unavailable", "provider": provider_meta}
+    try:
+        result = provider.write_advisor_report({
+            "report": report,
+            "title": report.get("title"),
+            "preview_locked": not bool(report.get("eligible_for_real_research")),
+            "analysis_only_disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+        }, regenerate=True)
+    except ai_copilot.AIError as exc:
+        safe_status = exc.status or status
+        return "", {
+            "status": "provider_error",
+            "provider": {
+                "provider": safe_status.get("provider") or provider_meta["provider"],
+                "model": safe_status.get("model") or provider_meta["model"],
+                "available": bool(safe_status.get("available")),
+                "needs_review": True,
+            },
+        }
+    provider_meta.update({
+        "provider": result.get("provider") or provider_meta["provider"],
+        "model": result.get("model") or provider_meta["model"],
+        "needs_review": bool(result.get("needs_review", True)),
+    })
+    return report_exports.ai_result_to_narrative(result), {
+        "status": "generated",
+        "provider": provider_meta,
+    }
+
+
+def _report_snapshot_storage(store) -> dict:
+    status = store.status()
+    encryption = status.get("encryption") or {}
+    return {
+        "backend": "sqlite",
+        "scope": "local",
+        "durable": bool(status.get("available")),
+        "configured": bool(status.get("configured")),
+        "encrypted_at_rest": bool(encryption.get("enabled")),
+        "at_rest_format": encryption.get("at_rest_format") or "sqlite",
+        "warning": status.get("warning") or "",
+    }
 
 
 @app.route("/assets/<path:filename>")

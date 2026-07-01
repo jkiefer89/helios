@@ -122,7 +122,7 @@ the backend's demo, mixed, or blocked provenance state.
 | **Long-horizon projection** | 5–90 day tactical signal **plus** 6-month / 1-year / 3-year / 5-year strategic value cones (terminal value, CAGR bands, probability of meeting the mandate, drawdown-breach odds) |
 | **Conviction rationale** | Every signal explains itself: per-component clauses with the actual numbers, the mandate tilt, the vol penalty, and honesty caveats |
 | **Signal Journal** | Instrument/model analysis signals are logged locally with input date range, score, action, benchmark, provenance and paper forward result status |
-| **Report Export + History** | Advisor report snapshots are saved locally with HTML/PDF exports, source/date range/row counts, model metadata, caveats and any already-generated AI narrative |
+| **Report Export + History** | Advisor report snapshots are saved locally with branded HTML/PDF exports, source/date range/row counts, model metadata, caveats and optional AI narrative |
 | **Insights** | 12 rule-based suggestions per model — concentration, mandate fit, drawdown, correlation, forecast skill, data honesty — each with a concrete action |
 
 ### Data quality modes
@@ -167,12 +167,17 @@ are never silently promoted into live market data.
 
 The **Reports** workspace can save an analysis-only snapshot of the current
 instrument or model report. Saved snapshots are local persistence records and
-can be reopened as an escaped HTML page or downloaded as a PDF evidence pack.
+can be reopened as an escaped HTML page or downloaded as a branded PDF evidence
+pack. The history API reports whether the local snapshot store is durable and
+encrypted at rest.
 Snapshots include the report source, input date range, row count, source counts,
 model metadata where applicable, warnings/caveats, and the analysis-only
 disclaimer. If the optional AI Copilot has already generated a narrative in the
-current report session, the saved snapshot can include that narrative; saving a
-snapshot never triggers an AI provider call.
+current report session, the saved snapshot can include that narrative. If the
+advisor leaves **Include AI narrative when available** enabled and a provider is
+configured, save can generate a sanitized report narrative at snapshot time.
+Provider failures do not block deterministic report saving, and every exported
+AI narrative remains marked for advisor review.
 
 For a no-upload live workflow, enable automatic polling before startup:
 
@@ -346,9 +351,9 @@ static/styles.css     legacy dashboard theme
 | `GET /api/report/instrument` | Analysis-only advisor report for an instrument |
 | `GET /api/report/model` | Analysis-only advisor report for a model |
 | `GET /api/report/snapshots` | list saved local report snapshots and export links |
-| `POST /api/report/snapshots` | save a deterministic report snapshot; optional AI narrative is included only when supplied by the current session |
+| `POST /api/report/snapshots` | save a deterministic report snapshot; optional AI narrative can be supplied or generated from sanitized payloads when explicitly requested |
 | `GET /api/report/snapshots/<id>.html` | escaped HTML export for a saved report snapshot |
-| `GET /api/report/snapshots/<id>.pdf` | PDF export for a saved report snapshot |
+| `GET /api/report/snapshots/<id>.pdf` | branded PDF evidence-pack export for a saved report snapshot |
 | `GET /api/mandates` | list mandate presets for the model-import form |
 | `GET /api/models` | list imported portfolio models |
 | `GET /api/model-library` | governed starter model templates with mandate, benchmark, rebalance, risk-limit and provenance metadata |
