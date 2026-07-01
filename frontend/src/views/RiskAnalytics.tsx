@@ -222,6 +222,7 @@ function ClientGradeRiskPack({ pack }: { pack?: ClientRiskPack }) {
               <article key={`${row.driver}-${row.severity}`}>
                 <strong>{row.driver}</strong>
                 <span className={row.severity === "high" ? "tone-negative" : row.severity === "medium" ? "tone-warning" : ""}>{titleCase(row.severity)}</span>
+                <small>Breakpoint Evidence: {row.trigger} · {row.evidence}</small>
                 <p>{row.language}</p>
               </article>
             ))}
@@ -238,6 +239,19 @@ function ClientGradeRiskPack({ pack }: { pack?: ClientRiskPack }) {
                 <strong>{row.scenario}<small>{row.what_it_tests}</small></strong>
                 <span className={row.portfolio_impact_pct < 0 ? "tone-negative" : "tone-positive"}>{fmtPct(row.portfolio_impact_pct)}</span>
                 <span>{titleCase(row.severity)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div>
+          <h2>Historical Stress Replay</h2>
+          <div className="terminal-table risk-pack-table" tabIndex={0} aria-label="Historical stress replay">
+            <div className="terminal-table__head"><span>Observed Window</span><span>Impact</span><span>Evidence</span></div>
+            {pack.historical_stress_replay.slice(0, 5).map((row) => (
+              <div className="table-row" key={`${row.scenario}-${row.window_days}`}>
+                <strong>{row.scenario}<small>{row.start_date} to {row.end_date}</small></strong>
+                <span className={row.portfolio_impact_pct < 0 ? "tone-negative" : "tone-positive"}>{fmtPct(row.portfolio_impact_pct)}</span>
+                <span>{titleCase(row.basis)}</span>
               </div>
             ))}
           </div>
@@ -260,7 +274,7 @@ function ClientGradeRiskPack({ pack }: { pack?: ClientRiskPack }) {
             {pack.liquidity_flags.items.slice(0, 5).map((row) => (
               <article key={`${row.ticker}-${row.flag}`}>
                 <strong>{row.ticker || "Holding"}</strong>
-                <span>{titleCase(row.flag || "review")} · {fmtPct(row.weight_pct)}</span>
+                <span>{titleCase(row.flag || "review")} · {fmtPct(row.weight_pct)} · Observed ADV {row.observed_adv_usd ? fmtMoney(row.observed_adv_usd) : "unavailable"}</span>
                 <p>{row.language}</p>
               </article>
             ))}

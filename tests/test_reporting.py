@@ -465,11 +465,15 @@ def test_model_report_snapshot_includes_client_grade_risk_pack(monkeypatch, tmp_
     assert pack["available"] is True
     assert pack["summary"]["model_id"] == model_id
     assert pack["stress_scenarios"]
+    assert pack["historical_stress_replay"]
+    assert pack["historical_stress_replay"][0]["basis"] == "observed_model_history"
     assert pack["benchmark_relative_drawdown"]["benchmark_symbol"] == "QQQ"
     assert pack["concentration_warnings"]
     assert pack["liquidity_flags"]["summary"]["basis"]
     assert pack["correlation_clusters"]
     assert pack["what_would_break_this_model"]
+    assert all(row["evidence"] for row in pack["what_would_break_this_model"])
+    assert all(row["trigger"] for row in pack["what_would_break_this_model"])
     assert "analysis only" in pack["disclaimer"].lower()
 
     save = client.post("/api/report/snapshots", json={"kind": "model", "id": model_id})
@@ -480,13 +484,16 @@ def test_model_report_snapshot_includes_client_grade_risk_pack(monkeypatch, tmp_
 
     html_text = client.get(snapshot["html_url"]).get_data(as_text=True)
     assert "Client Risk Pack" in html_text
+    assert "Historical Stress Replay" in html_text
     assert "What Would Break This Model" in html_text
     assert "Benchmark Relative Drawdown" in html_text
+    assert "Observed Model History" in html_text
     assert "Growth multiple compression" in html_text
 
     pdf = client.get(snapshot["pdf_url"])
     assert pdf.status_code == 200
     assert b"CLIENT-GRADE RISK PACK" in pdf.data
+    assert b"HISTORICAL STRESS REPLAY" in pdf.data
     assert b"WHAT WOULD BREAK THIS MODEL" in pdf.data
 
 

@@ -12,8 +12,11 @@ def _client():
     return helios.app.test_client()
 
 
-def _register_upload(symbol: str, series):
-    data.register(data.Instrument(symbol, symbol, pd.DataFrame({"close": series}, index=series.index), "upload", []))
+def _register_upload(symbol: str, series, volume: int | None = None):
+    frame = pd.DataFrame({"close": series}, index=series.index)
+    if volume is not None:
+        frame["volume"] = volume
+    data.register(data.Instrument(symbol, symbol, frame, "upload", []))
 
 
 def test_risk_exposure_engine_reports_portfolio_analytics_for_real_model():
@@ -24,10 +27,10 @@ def test_risk_exposure_engine_reports_portfolio_analytics_for_real_model():
     tech = price_series(days=320, start=100, daily=0.0015)
     defense = price_series(days=320, start=90, daily=0.0008)
     gold = price_series(days=320, start=80, daily=0.0003)
-    _register_upload("SPY", base)
-    _register_upload("AAPL", tech)
-    _register_upload("LMT", defense)
-    _register_upload("GLD", gold)
+    _register_upload("SPY", base, volume=80_000_000)
+    _register_upload("AAPL", tech, volume=40_000_000)
+    _register_upload("LMT", defense, volume=1_400_000)
+    _register_upload("GLD", gold, volume=7_000_000)
     model = portfolio.Model(
         id="RISK-MODEL",
         name="Risk Model",
@@ -63,16 +66,25 @@ def test_risk_exposure_engine_reports_portfolio_analytics_for_real_model():
     assert pack["summary"]["model_id"] == "RISK-MODEL"
     assert pack["summary"]["benchmark_symbol"] == "SPY"
     assert pack["stress_scenarios"]
+    assert pack["historical_stress_replay"]
+    assert pack["historical_stress_replay"][0]["basis"] == "observed_model_history"
+    assert pack["historical_stress_replay"][0]["window_days"] in {21, 63}
     assert any(row["scenario"] == "Growth multiple compression" for row in pack["stress_scenarios"])
     assert pack["benchmark_relative_drawdown"]["benchmark_symbol"] == "SPY"
     assert "relative_drawdown_pct" in pack["benchmark_relative_drawdown"]
     assert pack["concentration_warnings"]
     assert pack["liquidity_flags"]["summary"]["basis"]
+    assert pack["liquidity_flags"]["summary"]["observed_count"] == 3
+    assert pack["liquidity_flags"]["items"][0]["adv_source"] == "observed_60d_dollar_volume"
+    assert pack["liquidity_flags"]["items"][0]["observed_adv_usd"] > 0
     assert pack["correlation_clusters"]
     assert pack["what_would_break_this_model"]
+    assert all(row["evidence"] for row in pack["what_would_break_this_model"])
+    assert all(row["trigger"] for row in pack["what_would_break_this_model"])
     assert any("growth" in row["driver"].lower() for row in pack["what_would_break_this_model"])
     assert pack["methodology"]["analysis_only"] is True
-    assert pack["methodology"]["scenario_stress_not_forecast"] is True
+    assert pack["methodology"]["uses_observed_volume_when_available"] is True
+    assert pack["methodology"]["includes_historical_stress_replay"] is True
     assert result["methodology"]["analysis_only"] is True
 
 

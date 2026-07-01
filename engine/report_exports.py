@@ -486,15 +486,22 @@ def _rl_risk_pack_page(pdf, snapshot: dict[str, Any], width: float, height: floa
     y = 382
     _rl_text(pdf, "STRESS SCENARIOS", 42, y, 12, colors.HexColor("#ffd24a"), bold=True)
     y -= 22
-    for row in (pack.get("stress_scenarios") or [])[:4]:
+    for row in (pack.get("stress_scenarios") or [])[:3]:
         text = f"{row.get('scenario')}: {row.get('portfolio_impact_pct')}% / {row.get('severity')} / {row.get('what_it_tests')}"
+        y = _rl_wrapped(pdf, text, 58, y, 490, 8.5, colors.HexColor("#c8d3df"), max_lines=2)
+        y -= 7
+    y = min(y, 288)
+    _rl_text(pdf, "HISTORICAL STRESS REPLAY", 42, y, 12, colors.HexColor("#ffd24a"), bold=True)
+    y -= 22
+    for row in (pack.get("historical_stress_replay") or [])[:3]:
+        text = f"{row.get('scenario')}: {row.get('portfolio_impact_pct')}% / {row.get('start_date')} to {row.get('end_date')} / Observed Model History"
         y = _rl_wrapped(pdf, text, 58, y, 490, 8.5, colors.HexColor("#c8d3df"), max_lines=2)
         y -= 7
     y = min(y, 230)
     _rl_text(pdf, "WHAT WOULD BREAK THIS MODEL", 42, y, 12, colors.HexColor("#ffd24a"), bold=True)
     y -= 22
     for row in (pack.get("what_would_break_this_model") or [])[:5]:
-        text = f"{row.get('driver')}: {row.get('language')}"
+        text = f"{row.get('driver')}: {row.get('trigger')} / {row.get('evidence')} / {row.get('language')}"
         y = _rl_wrapped(pdf, text, 58, y, 490, 8.3, colors.HexColor("#c8d3df"), max_lines=2)
         y -= 7
 
@@ -724,14 +731,16 @@ def _client_risk_pack_html(snapshot: dict[str, Any]) -> str:
         }),
         "<h3>Stress Scenarios</h3>",
         _risk_pack_table(pack.get("stress_scenarios") or [], ("scenario", "portfolio_impact_pct", "severity", "what_it_tests")),
+        "<h3>Historical Stress Replay</h3>",
+        _risk_pack_table(pack.get("historical_stress_replay") or [], ("scenario", "portfolio_impact_pct", "window_days", "basis", "start_date", "end_date")),
         "<h3>Concentration Warnings</h3>",
         _risk_pack_table(pack.get("concentration_warnings") or [], ("title", "severity", "detail")),
         "<h3>Liquidity Watchlist</h3>",
-        _risk_pack_table(liquidity.get("items") or [], ("ticker", "weight_pct", "flag", "language")),
+        _risk_pack_table(liquidity.get("items") or [], ("ticker", "weight_pct", "flag", "observed_adv_usd", "adv_source", "language")),
         "<h3>Correlation Clusters</h3>",
         _risk_pack_table(pack.get("correlation_clusters") or [], ("name", "type", "language")),
         "<h3>What Would Break This Model</h3>",
-        _risk_pack_table(pack.get("what_would_break_this_model") or [], ("driver", "severity", "language")),
+        _risk_pack_table(pack.get("what_would_break_this_model") or [], ("driver", "severity", "trigger", "evidence", "language")),
         "</section>",
     ]
     return "".join(html_parts)
@@ -763,6 +772,8 @@ def _format_risk_cell(value: Any) -> str:
         return ", ".join(_format_risk_cell(item) for item in value[:4])
     if isinstance(value, dict):
         return ", ".join(f"{_label(key)}: {_format_risk_cell(item)}" for key, item in list(value.items())[:4])
+    if isinstance(value, str) and "_" in value:
+        return _label(value)
     return str(value or "")
 
 

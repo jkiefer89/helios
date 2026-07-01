@@ -618,6 +618,16 @@ export interface ClientRiskPack {
     basis: string;
     what_it_tests: string;
   }>;
+  historical_stress_replay: Array<{
+    scenario: string;
+    window_days: number;
+    portfolio_impact_pct: number;
+    start_date?: string;
+    end_date?: string;
+    basis: string;
+    severity: string;
+    what_it_tests: string;
+  }>;
   benchmark_relative_drawdown: {
     status: string;
     benchmark_symbol?: string;
@@ -636,9 +646,12 @@ export interface ClientRiskPack {
       liquidity_score?: number;
       flag?: string;
       estimated_adv_usd?: number | null;
+      observed_adv_usd?: number | null;
+      adv_source?: string;
+      adv_observation_days?: number;
       language?: string;
     }>;
-    summary: { flagged_count: number; basis?: string };
+    summary: { flagged_count: number; observed_count?: number; proxy_count?: number; basis?: string };
   };
   correlation_clusters: Array<{
     name?: string;
@@ -647,7 +660,7 @@ export interface ClientRiskPack {
     pairs?: Array<{ tickers: string[]; correlation: number }>;
     language?: string;
   }>;
-  what_would_break_this_model: Array<{ driver: string; severity: string; language: string }>;
+  what_would_break_this_model: Array<{ driver: string; severity: string; trigger: string; evidence: string; language: string }>;
   required_action?: string;
   missing_tickers?: string[];
   methodology: Record<string, unknown>;

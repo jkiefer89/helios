@@ -241,8 +241,13 @@ def test_risk_analytics_view_exposes_client_grade_risk_pack():
     assert "Concentration Warnings" in view_source
     assert "Liquidity Watchlist" in view_source
     assert "Stress Scenarios" in view_source
+    assert "Historical Stress Replay" in view_source
+    assert "Observed ADV" in view_source
+    assert "Breakpoint Evidence" in view_source
     assert "client_risk_pack" in view_source
     assert "ClientRiskPack" in type_source
+    assert "historical_stress_replay" in type_source
+    assert "observed_adv_usd" in type_source
 
 
 def test_evidence_lab_view_is_dedicated_and_routed():

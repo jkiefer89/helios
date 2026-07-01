@@ -161,6 +161,7 @@ def analyze_model_risk(model: portfolio.Model) -> dict[str, Any]:
         "benchmark_relative": benchmark_relative,
         "client_risk_pack": _client_risk_pack(
             model=model,
+            close=ps.close,
             data_provenance=p,
             benchmark_symbol=benchmark_symbol,
             benchmark_relative=benchmark_relative,
@@ -246,6 +247,7 @@ def _blocked_client_risk_pack(model: portfolio.Model, reason: str, missing_ticke
             "benchmark_symbol": signal_journal.benchmark_for_model(model),
         },
         "stress_scenarios": [],
+        "historical_stress_replay": [],
         "benchmark_relative_drawdown": {
             "status": "blocked",
             "benchmark_symbol": signal_journal.benchmark_for_model(model),
@@ -269,6 +271,7 @@ def _blocked_client_risk_pack(model: portfolio.Model, reason: str, missing_ticke
 def _client_risk_pack(
     *,
     model: portfolio.Model,
+    close: pd.Series,
     data_provenance: dict[str, Any],
     benchmark_symbol: str,
     benchmark_relative: dict[str, Any],
@@ -282,6 +285,7 @@ def _client_risk_pack(
     correlation_clusters: list[dict[str, Any]],
 ) -> dict[str, Any]:
     stress = _stress_pack_rows(scenario_shocks)
+    historical = _historical_stress_replay(close)
     concentration_warnings = _concentration_warnings(concentration, sector_exposure, volatility_budget)
     liquidity_watchlist = _liquidity_watchlist(liquidity)
     clusters = _cluster_pack_rows(correlation_clusters)
@@ -305,6 +309,7 @@ def _client_risk_pack(
             "source_counts": data_provenance.get("source_counts") or {},
         },
         "stress_scenarios": stress,
+        "historical_stress_replay": historical,
         "benchmark_relative_drawdown": _benchmark_drawdown_pack(benchmark_relative, benchmark_symbol),
         "concentration_warnings": concentration_warnings,
         "liquidity_flags": {
@@ -330,6 +335,33 @@ def _stress_pack_rows(scenarios: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "what_it_tests": _scenario_language(str(scenario.get("scenario") or "")),
         })
     return rows
+
+
+def _historical_stress_replay(close: pd.Series) -> list[dict[str, Any]]:
+    clean = close.dropna()
+    returns = indicators.daily_returns(clean).dropna()
+    rows = []
+    for window in (21, 63):
+        rolling = (1 + returns).rolling(window).apply(np.prod, raw=True) - 1
+        rolling = rolling.dropna()
+        if rolling.empty:
+            continue
+        end_date = rolling.idxmin()
+        end_loc = clean.index.get_indexer([end_date], method="nearest")[0]
+        start_loc = max(0, end_loc - window + 1)
+        start_date = clean.index[start_loc]
+        value = float(rolling.loc[end_date] * 100)
+        rows.append({
+            "scenario": f"Worst observed {window}d window",
+            "window_days": window,
+            "portfolio_impact_pct": round(value, 2),
+            "start_date": str(pd.Timestamp(start_date).date()),
+            "end_date": str(pd.Timestamp(end_date).date()),
+            "basis": "observed_model_history",
+            "severity": "high" if value <= -8 else "medium" if value <= -4 else "watch" if value < 0 else "offset",
+            "what_it_tests": "Replays the model's actual worst realized rolling return on eligible real history.",
+        })
+    return sorted(rows, key=lambda row: float(row.get("portfolio_impact_pct") or 0.0))
 
 
 def _scenario_language(name: str) -> str:
@@ -432,8 +464,15 @@ def _liquidity_watchlist(liquidity: dict[str, Any]) -> list[dict[str, Any]]:
             "liquidity_score": item.get("liquidity_score"),
             "flag": item.get("flag"),
             "estimated_adv_usd": item.get("estimated_adv_usd"),
-            "language": "Verify liquidity with current provider/venue data before any implementation."
+            "observed_adv_usd": item.get("observed_adv_usd"),
+            "adv_source": item.get("adv_source"),
+            "adv_observation_days": item.get("adv_observation_days"),
+            "language": "Observed live/uploaded dollar volume is thin; review implementation capacity outside Helios."
+            if item.get("adv_source") == "observed_60d_dollar_volume" and item.get("flag") != "normal"
+            else "Verify liquidity with current provider/venue data before any implementation."
             if item.get("flag") != "normal"
+            else "Observed live/uploaded dollar volume supports normal liquidity review; execution capacity remains outside Helios."
+            if item.get("adv_source") == "observed_60d_dollar_volume"
             else "Large-cap liquidity proxy is normal; still verify before execution outside Helios.",
         }
         for item in watchlist
@@ -473,6 +512,8 @@ def _break_model_language(
         rows.append({
             "driver": "Growth factor unwind",
             "severity": "high" if growth >= 50 else "medium",
+            "trigger": "Growth factor exposure >= 30%",
+            "evidence": f"Current growth exposure is {growth:.1f}%.",
             "language": f"A valuation reset in growth assets would pressure this model because growth exposure is {growth:.1f}%.",
         })
     if stress_scenarios:
@@ -480,13 +521,17 @@ def _break_model_language(
         rows.append({
             "driver": str(worst.get("scenario") or "Stress scenario"),
             "severity": str(worst.get("severity") or "watch"),
-            "language": f"The largest deterministic stress is {worst.get('scenario')} at {worst.get('portfolio_impact_pct')}%.",
+            "trigger": "Largest client risk-pack stress scenario",
+            "evidence": f"{worst.get('scenario')} impact is {worst.get('portfolio_impact_pct')}%.",
+            "language": f"The largest modeled stress is {worst.get('scenario')} at {worst.get('portfolio_impact_pct')}%.",
         })
     top_warning = next((warning for warning in concentration_warnings if warning.get("type") == "single_name"), None)
     if top_warning:
         rows.append({
             "driver": "Top holding failure",
             "severity": str(top_warning.get("severity") or "medium"),
+            "trigger": "Single-name concentration warning",
+            "evidence": str(top_warning.get("detail") or "A single holding drives concentrated model risk."),
             "language": str(top_warning.get("detail") or "A single holding drives concentrated model risk."),
         })
     if benchmark_relative.get("status") == "available":
@@ -495,12 +540,16 @@ def _break_model_language(
         rows.append({
             "driver": "Benchmark-relative drawdown",
             "severity": "medium",
+            "trigger": "Observed benchmark-relative drawdown and beta",
+            "evidence": f"Relative drawdown {rel_dd}% and beta {beta} versus {benchmark_relative.get('benchmark_symbol')}.",
             "language": f"Relative drawdown versus {benchmark_relative.get('benchmark_symbol')} is {rel_dd}% with beta {beta}; watch for persistent benchmark divergence.",
         })
     else:
         rows.append({
             "driver": "Benchmark evidence gap",
             "severity": "medium",
+            "trigger": "Benchmark history unavailable or insufficient overlap",
+            "evidence": str(benchmark_relative.get("message") or "Benchmark overlap is unavailable."),
             "language": str(benchmark_relative.get("message") or "Benchmark overlap is unavailable, so relative drawdown should be verified before client use."),
         })
     flagged = [item for item in liquidity_watchlist if item.get("flag") != "normal"]
@@ -509,12 +558,16 @@ def _break_model_language(
         rows.append({
             "driver": "Liquidity stress",
             "severity": "medium",
+            "trigger": "Liquidity watchlist contains non-normal flags",
+            "evidence": f"Flagged liquidity tickers: {tickers}.",
             "language": f"Liquidity proxies require review for {tickers}; verify with current provider data before implementation.",
         })
     if not rows:
         rows.append({
             "driver": "Risk review",
             "severity": "info",
+            "trigger": "No material deterministic break trigger",
+            "evidence": "Current pack did not trigger concentration, liquidity, benchmark, or factor breakpoints.",
             "language": f"{model.name} has no material deterministic break trigger, but advisor review is still required.",
         })
     return rows
@@ -541,6 +594,8 @@ def _risk_pack_methodology() -> dict[str, bool]:
         "uses_live_or_uploaded_prices_only": True,
         "no_trade_execution": True,
         "scenario_stress_not_forecast": True,
+        "uses_observed_volume_when_available": True,
+        "includes_historical_stress_replay": True,
         "does_not_change_analytics": True,
     }
 
@@ -694,22 +749,54 @@ def _scenario_shocks(model: portfolio.Model, factors: dict[str, float]) -> list[
 def _liquidity_flags(model: portfolio.Model) -> dict[str, Any]:
     items = []
     for holding in model.holdings:
-        score = _liquidity_score(holding.ticker)
+        observed = _observed_liquidity(holding.ticker)
+        score = int(observed.get("liquidity_score") or _liquidity_score(holding.ticker))
         flag = "unknown_liquidity" if score < 45 else "watch" if score < 65 else "normal"
+        fallback_adv = _LIQUIDITY_AVG_DAILY_DOLLAR_VOLUME.get(holding.ticker)
+        adv_source = observed.get("adv_source") or ("static_public_proxy" if fallback_adv is not None else "unavailable")
         items.append({
             "ticker": holding.ticker,
             "weight_pct": round(float(holding.weight) * 100, 2),
             "liquidity_score": score,
             "flag": flag,
-            "estimated_adv_usd": _LIQUIDITY_AVG_DAILY_DOLLAR_VOLUME.get(holding.ticker),
+            "estimated_adv_usd": observed.get("observed_adv_usd") or fallback_adv,
+            "observed_adv_usd": observed.get("observed_adv_usd"),
+            "adv_source": adv_source,
+            "adv_observation_days": observed.get("adv_observation_days") or 0,
         })
     flagged = [item for item in items if item["flag"] != "normal"]
+    observed_count = sum(1 for item in items if item.get("adv_source") == "observed_60d_dollar_volume")
+    proxy_count = sum(1 for item in items if item.get("adv_source") == "static_public_proxy")
     return {
         "items": sorted(items, key=lambda item: (item["flag"] == "normal", -item["weight_pct"])),
         "summary": {
             "flagged_count": len(flagged),
-            "basis": "static public-liquidity proxy; verify with current venue/provider data before trading",
+            "observed_count": observed_count,
+            "proxy_count": proxy_count,
+            "basis": "observed live/uploaded dollar volume where available; static public proxy only when volume is absent",
         },
+    }
+
+
+def _observed_liquidity(ticker: str) -> dict[str, Any]:
+    inst = data.get(ticker)
+    if inst is None or not provenance.is_real_source(inst.source):
+        return {}
+    if "close" not in inst.df or "volume" not in inst.df:
+        return {}
+    frame = inst.df[["close", "volume"]].dropna().tail(60)
+    if len(frame) < 20:
+        return {}
+    dollar_volume = pd.to_numeric(frame["close"], errors="coerce") * pd.to_numeric(frame["volume"], errors="coerce")
+    dollar_volume = dollar_volume.replace([np.inf, -np.inf], np.nan).dropna()
+    if len(dollar_volume) < 20:
+        return {}
+    observed_adv = float(dollar_volume.mean())
+    return {
+        "observed_adv_usd": round(observed_adv, 2),
+        "adv_observation_days": int(len(dollar_volume)),
+        "adv_source": "observed_60d_dollar_volume",
+        "liquidity_score": _liquidity_score_from_adv(observed_adv),
     }
 
 
@@ -754,6 +841,10 @@ def _liquidity_score(ticker: str) -> int:
     adv = _LIQUIDITY_AVG_DAILY_DOLLAR_VOLUME.get(str(ticker).upper())
     if adv is None:
         return 40
+    return _liquidity_score_from_adv(float(adv))
+
+
+def _liquidity_score_from_adv(adv: float) -> int:
     if adv >= 5_000_000_000:
         return 95
     if adv >= 1_000_000_000:

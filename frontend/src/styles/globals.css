@@ -3212,6 +3212,7 @@ p {
 
 .risk-break-list strong,
 .risk-break-list span,
+.risk-break-list small,
 .risk-break-list p,
 .risk-pack-clusters strong,
 .risk-pack-clusters span {
@@ -3223,6 +3224,12 @@ p {
   font-size: 0.72rem;
   font-weight: 800;
   text-transform: uppercase;
+}
+
+.risk-break-list small {
+  color: var(--muted);
+  font-size: 0.7rem;
+  line-height: 1.35;
 }
 
 .risk-break-list p,
