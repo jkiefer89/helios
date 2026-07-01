@@ -3,7 +3,7 @@ import { api } from "../api/client";
 import type { AnalysisResponse, DataMode, ModelSummary, ProvenancePayload, TickerSummary } from "../api/types";
 import { DataQualityBanner, SourcePill } from "../components/badges/DataModeBadge";
 import { Panel, StatTile } from "../components/cards/Panel";
-import { HistogramChart, LineChart } from "../components/charts/Charts";
+import { DrawdownChart, HistogramChart, PriceTrendChart } from "../components/charts/Charts";
 import { EmptyState } from "../components/empty-states/EmptyState";
 import { TerminalSelect } from "../components/forms/TerminalSelect";
 import { fmtAuto, fmtNumber, fmtPct, titleCase } from "../utils/format";
@@ -121,14 +121,10 @@ function AnalysisPayload({ payload }: { payload: AnalysisResponse }) {
       </section>
       <section className="dashboard-grid">
         <Panel title={`Price and Trend${panelSuffix}`} className="span-2">
-          <LineChart labels={payload.series.dates} series={[
-            { label: "Close", values: payload.series.close, tone: "info" },
-            { label: "SMA 50", values: payload.series.sma50 || [], tone: "positive" },
-            { label: "SMA 200", values: payload.series.sma200 || [], tone: "warning" },
-          ]} />
+          <PriceTrendChart labels={payload.series.dates} close={payload.series.close} sma50={payload.series.sma50 || []} sma200={payload.series.sma200 || []} />
         </Panel>
         <Panel title={`Drawdown${panelSuffix}`}>
-          <LineChart labels={payload.series.dates} series={[{ label: "Drawdown", values: drawdown, tone: "negative" }]} height={150} />
+          <DrawdownChart labels={payload.series.dates} values={drawdown} height={160} />
         </Panel>
         <Panel title={`Daily Return Distribution${panelSuffix}`}>
           <HistogramChart values={dailyReturns} label="Daily return %" buckets={9} tone={eligible ? "info" : "warning"} />

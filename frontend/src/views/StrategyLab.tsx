@@ -4,7 +4,7 @@ import type { ModelSummary, StrategyResponse, TickerSummary } from "../api/types
 import { AICopilotPanel, strategyCopilotActions } from "../components/ai/AICopilotPanel";
 import { DataQualityBanner } from "../components/badges/DataModeBadge";
 import { Panel, StatTile } from "../components/cards/Panel";
-import { ChartSummary, LineChart } from "../components/charts/Charts";
+import { ChartSummary, DrawdownChart, EquityCurveChart, RollingSharpeChart } from "../components/charts/Charts";
 import { EmptyState } from "../components/empty-states/EmptyState";
 import { TerminalSelect } from "../components/forms/TerminalSelect";
 import { fmtAuto, fmtNumber, fmtPct, fmtTimestamp, titleCase } from "../utils/format";
@@ -143,14 +143,11 @@ export function StrategyLab({
               { label: "Strategy max drawdown", value: fmtPct(payload.strategy?.max_drawdown_pct), tone: "negative" },
               { label: "Exposure", value: fmtPct(Number(payload.trade_stats?.exposure_pct)), tone: "info" },
             ]} />
-            <LineChart labels={payload.dates || []} series={[
-              { label: "Signal strategy", values: payload.strategy_curve || [], tone: "positive" },
-              { label: "Buy-and-hold", values: payload.benchmark_curve || [], tone: "neutral" },
-            ]} />
+            <EquityCurveChart labels={payload.dates || []} strategy={payload.strategy_curve || []} benchmark={payload.benchmark_curve || []} />
           </Panel>
           <section className="dashboard-grid">
-            <Panel title="Drawdown"><LineChart labels={payload.dates || []} series={[{ label: "Drawdown", values: payload.drawdown_curve || [], tone: "negative" }]} height={140} /></Panel>
-            <Panel title="Rolling Sharpe"><LineChart labels={payload.dates || []} series={[{ label: "Rolling Sharpe", values: payload.rolling_sharpe_curve || [], tone: "warning" }]} height={140} /></Panel>
+            <Panel title="Drawdown"><DrawdownChart labels={payload.dates || []} values={payload.drawdown_curve || []} height={160} /></Panel>
+            <Panel title="Rolling Sharpe"><RollingSharpeChart labels={payload.dates || []} values={payload.rolling_sharpe_curve || []} height={160} /></Panel>
           </section>
           <section className="dashboard-grid">
             <Panel title="Assumptions, Costs, and Slippage">

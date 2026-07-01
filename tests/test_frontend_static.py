@@ -35,6 +35,68 @@ def test_react_terminal_exposes_richer_chart_components():
     assert "ChartSummary" in strategy_source
 
 
+def test_react_terminal_uses_helios_echarts_foundation():
+    package_json = (ROOT / "frontend" / "package.json").read_text()
+    package_lock = (ROOT / "frontend" / "package-lock.json").read_text()
+    vite_config = (ROOT / "frontend" / "vite.config.ts").read_text()
+    chart_source = (ROOT / "frontend" / "src" / "components" / "charts" / "Charts.tsx").read_text()
+    wrapper_source = (ROOT / "frontend" / "src" / "components" / "charts" / "HeliosEChart.tsx").read_text()
+    theme_source = (ROOT / "frontend" / "src" / "components" / "charts" / "chartTheme.ts").read_text()
+    states_source = (ROOT / "frontend" / "src" / "components" / "charts" / "chartStates.tsx").read_text()
+    equity_adapter = (ROOT / "frontend" / "src" / "components" / "charts" / "adapters" / "equity.ts").read_text()
+    drawdown_adapter = (ROOT / "frontend" / "src" / "components" / "charts" / "adapters" / "drawdown.ts").read_text()
+    sharpe_adapter = (ROOT / "frontend" / "src" / "components" / "charts" / "adapters" / "rollingSharpe.ts").read_text()
+    price_adapter = (ROOT / "frontend" / "src" / "components" / "charts" / "adapters" / "priceTrend.ts").read_text()
+    forecast_adapter = (ROOT / "frontend" / "src" / "components" / "charts" / "adapters" / "forecastCone.ts").read_text()
+    analysis_source = (ROOT / "frontend" / "src" / "views" / "Analysis.tsx").read_text()
+    strategy_source = (ROOT / "frontend" / "src" / "views" / "StrategyLab.tsx").read_text()
+
+    assert '"echarts"' in package_json
+    assert '"echarts-for-react"' in package_json
+    assert '"node_modules/echarts"' in package_lock
+    assert '"node_modules/echarts-for-react"' in package_lock
+    assert "chunkSizeWarningLimit" in vite_config
+    assert "ReactECharts" in wrapper_source
+    assert "lazy(() => import(\"./HeliosEChart\")" in chart_source
+    assert "<Suspense" in chart_source
+    assert 'renderer = "svg"' in wrapper_source
+    assert "opts={{ renderer }}" in wrapper_source
+    assert "HELIOS_CHART_THEME" in theme_source
+    assert "HELIOS_CHART_FORMATTERS" in theme_source
+    assert "axisTooltipFormatter" in theme_source
+    assert "chartAlpha" in theme_source
+    assert "ChartState" in states_source
+    assert "LoadingChartState" in states_source
+    assert "ErrorChartState" in states_source
+    assert "LockedChartState" in states_source
+    assert "minHeight" in states_source
+    assert "equityCurveOption" in equity_adapter
+    assert "drawdownOption" in drawdown_adapter
+    assert "rollingSharpeOption" in sharpe_adapter
+    assert "priceTrendOption" in price_adapter
+    assert "forecastConeOption" in forecast_adapter
+    assert "ForecastConePoint" in forecast_adapter
+    assert "EquityCurveChart" in chart_source
+    assert "DrawdownChart" in chart_source
+    assert "RollingSharpeChart" in chart_source
+    assert "PriceTrendChart" in chart_source
+    assert "LoadingChartState" in chart_source
+    assert "minHeight={height}" in chart_source
+    assert "points.map((point) => point.close)" in chart_source
+    assert "points.map((point) => point.strategy)" in chart_source
+    assert "rgba(" not in equity_adapter
+    assert "rgba(" not in drawdown_adapter
+    assert "rgba(" not in forecast_adapter
+    assert "\"{value}\"" not in equity_adapter
+    assert "\"{value}\"" not in drawdown_adapter
+    assert "\"{value}\"" not in sharpe_adapter
+    assert "\"{value}\"" not in price_adapter
+    assert "\"{value}\"" not in forecast_adapter
+    assert "PriceTrendChart" in analysis_source
+    assert "EquityCurveChart" in strategy_source
+    assert "RollingSharpeChart" in strategy_source
+
+
 def test_react_terminal_uses_live_aware_data_honesty_copy():
     command_source = (ROOT / "frontend" / "src" / "views" / "CommandCenter.tsx").read_text()
     opportunity_source = (ROOT / "frontend" / "src" / "views" / "OpportunityRadar.tsx").read_text()

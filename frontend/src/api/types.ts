@@ -618,10 +618,10 @@ export interface StrategyResponse extends ProvenancePayload {
   methodology?: Record<string, unknown>;
   assumptions?: Record<string, number | string | boolean>;
   dates?: string[];
-  strategy_curve?: number[];
-  benchmark_curve?: number[];
-  drawdown_curve?: number[];
-  rolling_sharpe_curve?: number[];
+  strategy_curve?: Array<number | null>;
+  benchmark_curve?: Array<number | null>;
+  drawdown_curve?: Array<number | null>;
+  rolling_sharpe_curve?: Array<number | null>;
   beat_benchmark?: boolean;
 }
 

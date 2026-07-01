@@ -3809,6 +3809,42 @@ p {
   min-width: 0;
 }
 
+.helios-echart {
+  position: relative;
+  min-width: 0;
+  width: 100%;
+}
+
+.helios-echart canvas,
+.helios-echart svg {
+  display: block;
+}
+
+.chart-state {
+  display: grid;
+  align-content: center;
+  gap: 0.25rem;
+  min-height: 140px;
+}
+
+.chart-state strong,
+.chart-state span {
+  display: block;
+}
+
+.chart-state--loading {
+  border-style: dashed;
+}
+
+.chart-state--error {
+  border-color: rgba(255, 92, 103, 0.38);
+}
+
+.chart-state--locked,
+.chart-state--demo {
+  border-style: dashed;
+}
+
 .line-chart svg {
   display: block;
   width: 100%;
