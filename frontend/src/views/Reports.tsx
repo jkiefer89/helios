@@ -317,7 +317,24 @@ function PersistenceSnapshot({ dataStatus }: { dataStatus: DataStatusResponse | 
 function ReportValue({ value, labelKey = "" }: { value: unknown; labelKey?: string }) {
   if (value == null) return <span className="muted">—</span>;
   if (Array.isArray(value)) {
-    return value.length ? <ul className="report-list">{value.map((item, index) => <li key={index}><ReportValue value={item} labelKey={labelKey} /></li>)}</ul> : <span className="muted">None</span>;
+    if (!value.length) return <span className="muted">None</span>;
+    const tableKeys = uniformObjectKeys(value);
+    if (tableKeys) {
+      const columns = { gridTemplateColumns: `repeat(${tableKeys.length}, minmax(96px, 1fr))` };
+      return (
+        <div className="report-array-table" role="table" aria-label={`${titleCase(labelKey || "items")} table`}>
+          <div className="report-array-table__head" role="row" style={columns}>
+            {tableKeys.map((key) => <span role="columnheader" key={key}>{titleCase(key)}</span>)}
+          </div>
+          {value.map((item, index) => (
+            <div className="report-array-table__row" role="row" key={index} style={columns}>
+              {tableKeys.map((key) => <span role="cell" key={key}><ReportValue value={(item as Record<string, unknown>)[key]} labelKey={key} /></span>)}
+            </div>
+          ))}
+        </div>
+      );
+    }
+    return <ul className="report-list">{value.map((item, index) => <li key={index}><ReportValue value={item} labelKey={labelKey} /></li>)}</ul>;
   }
   if (typeof value === "object") {
     return (
@@ -343,6 +360,22 @@ function reportTitle(payload: ReportResponse) {
 
 function looksLikeTimestamp(value: string) {
   return /^\d{4}-\d{2}-\d{2}T/.test(value) || /^\d{4}-\d{2}-\d{2}\s+\d{2}:/.test(value);
+}
+
+// Arrays of three-plus uniform flat objects (e.g. per-ticker liquidity rows)
+// render as a compact table; anything nested falls back to the recursive
+// renderer so no payload shape is ever dropped.
+function uniformObjectKeys(rows: unknown[]): string[] | null {
+  if (rows.length < 3) return null;
+  const keys: string[] = [];
+  for (const row of rows) {
+    if (!row || typeof row !== "object" || Array.isArray(row)) return null;
+    for (const [key, nested] of Object.entries(row as Record<string, unknown>)) {
+      if (nested !== null && typeof nested === "object") return null;
+      if (!keys.includes(key)) keys.push(key);
+    }
+  }
+  return keys.length >= 2 && keys.length <= 10 ? keys : null;
 }
 
 function cssName(key: string) {

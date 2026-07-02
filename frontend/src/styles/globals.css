@@ -7247,3 +7247,78 @@ button.locked-table-row:hover {
   top: 85px;
   height: calc(100vh - 85px);
 }
+
+/* --------------------------------------------------------------------------
+   Report deep-nested payloads (long real-data reports)
+   -------------------------------------------------------------------------- */
+
+.report-grid > * {
+  min-width: 0;
+}
+
+/* Nested definition lists stack label-over-value instead of compounding
+   fixed label columns until they clip off the sheet edge. */
+.report-dl .report-dl {
+  border-left: 2px solid var(--line);
+  padding-left: 0.6rem;
+  margin-top: 0.2rem;
+}
+
+.report-dl .report-dl div {
+  grid-template-columns: 1fr;
+  gap: 0.12rem;
+}
+
+.report-list .report-list {
+  padding-left: 0.85rem;
+}
+
+/* Uniform object arrays (per-ticker packs) render as a compact table. */
+.report-array-table {
+  display: grid;
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(6, 9, 15, 0.55);
+}
+
+.report-array-table__head,
+.report-array-table__row {
+  display: grid;
+  gap: 0.5rem;
+  align-items: baseline;
+  padding: 0.42rem 0.6rem;
+}
+
+.report-array-table__head {
+  border-bottom: 1px solid var(--line-strong);
+  background: linear-gradient(180deg, #101724, #0b1119);
+}
+
+.report-array-table__head span {
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 0.56rem;
+  font-weight: 650;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.report-array-table__row {
+  border-bottom: 1px solid rgba(158, 176, 202, 0.07);
+  color: var(--soft);
+  font-size: 0.72rem;
+}
+
+.report-array-table__row:last-child {
+  border-bottom: 0;
+}
+
+.report-array-table__row > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
