@@ -50,4 +50,4 @@ jobs:
         run: node --check static/app.js
 
       - name: Run offline tests
-        run: python -m pytest
+        run: python -m pytest --cov=engine --cov=app --cov-report=term-missing
