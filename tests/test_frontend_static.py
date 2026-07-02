@@ -46,15 +46,19 @@ def test_react_terminal_uses_helios_echarts_foundation():
     strategy_source = (ROOT / "frontend" / "src" / "views" / "StrategyLab.tsx").read_text()
 
     assert '"echarts"' in package_json
-    assert '"echarts-for-react"' in package_json
+    # echarts-for-react is intentionally absent: the CJS wrapper broke under
+    # Vite 8's ESM interop (React error #130); HeliosEChart drives echarts/core.
+    assert '"echarts-for-react"' not in package_json
     assert '"node_modules/echarts"' in package_lock
-    assert '"node_modules/echarts-for-react"' in package_lock
+    assert '"node_modules/echarts-for-react"' not in package_lock
     assert "chunkSizeWarningLimit" in vite_config
-    assert "ReactECharts" in wrapper_source
+    assert "echarts.init" in wrapper_source
+    assert "chart.dispose()" in wrapper_source
+    assert "ResizeObserver" in wrapper_source
     assert "lazy(() => import(\"./HeliosEChart\")" in chart_source
     assert "<Suspense" in chart_source
     assert 'renderer = "svg"' in wrapper_source
-    assert "opts={{ renderer }}" in wrapper_source
+    assert "{ renderer }" in wrapper_source
     assert "HELIOS_CHART_THEME" in theme_source
     assert "HELIOS_CHART_FORMATTERS" in theme_source
     assert "axisTooltipFormatter" in theme_source
