@@ -9,13 +9,25 @@
 set -e
 cd "$(dirname "$0")"
 
+# Recreate an unhealthy venv (e.g. broken after a system Python upgrade).
+if [ -d ".venv" ] && ! ./.venv/bin/python -c 'import flask' >/dev/null 2>&1; then
+  echo "⚠  Existing .venv is unhealthy (python or flask broken) — recreating it…"
+  rm -rf .venv
+fi
 if [ ! -d ".venv" ]; then
   echo "Creating virtual environment…"
   python3 -m venv .venv
   ./.venv/bin/python -m pip install --quiet --upgrade pip
 fi
-# Keep deps in sync (cheap when already satisfied).
-./.venv/bin/python -m pip install --quiet -r requirements.txt
+# Keep deps in sync (cheap when already satisfied). requirements.lock pins the
+# exact tested versions; requirements.txt holds the human-edited ranges.
+./.venv/bin/python -m pip install --quiet -r requirements.lock
+
+if [ ! -f "frontend/dist/index.html" ] && ! command -v npm >/dev/null 2>&1; then
+  echo "⚠  React frontend is not built (frontend/dist missing) and npm is not installed."
+  echo "   Helios will fall back to the legacy dashboard. To build the React UI,"
+  echo "   install Node.js and run:  cd frontend && npm install && npm run build"
+fi
 
 if [ "$1" = "--dev" ]; then
   exec ./.venv/bin/python app.py

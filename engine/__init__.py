@@ -2,6 +2,7 @@
 
 Modules:
     data        - load / generate / fetch price history
+    analytics_cache - bounded memo cache for per-series analytics results
     indicators  - technical indicators & performance metrics
     forecast    - return forecasting with Monte-Carlo confidence cones
     mandate     - client-purpose presets and risk/return anchors
@@ -16,6 +17,8 @@ Modules:
     portfolio_clinic - model diagnostics and hypothetical rebalance suggestions
     reporting   - printable advisor report composition
     report_exports - saved advisor report snapshots and export renderers
+    report_snapshots - snapshot composition, versioning, and narrative orchestration
+    data_quality - freshness/coverage dashboard and research-readiness evidence
     provenance  - demo/real/mixed data eligibility gates
     persistence - local SQLite store for live/uploaded data
     ai_copilot  - optional narrative provider layer over sanitized Helios facts
@@ -25,9 +28,16 @@ Modules:
     risk_exposure - portfolio-level risk, exposure, stress, and benchmark analytics
     signal_journal - local signal audit log and paper-performance tracking
     evidence_lab - rolling walk-forward out-of-sample signal evidence
+    edgar       - SEC EDGAR client: ticker->registrant, N-PORT holdings, former names
+    holdings    - fund look-through and model-level exposure roll-up
+    figi        - OpenFIGI CUSIP->ticker bridge for N-PORT holdings
+    fundamentals - per-holding forward fundamentals (yfinance / FMP provider seam)
+    macro       - forward macro & sector valuation anchors with offline fallbacks
+    cma         - building-block forward capital-market-assumption expected returns
 """
 
 __all__ = [
+    "analytics_cache",
     "data",
     "indicators",
     "forecast",
@@ -43,6 +53,8 @@ __all__ = [
     "portfolio_clinic",
     "reporting",
     "report_exports",
+    "report_snapshots",
+    "data_quality",
     "provenance",
     "persistence",
     "ai_copilot",
@@ -52,4 +64,10 @@ __all__ = [
     "risk_exposure",
     "signal_journal",
     "evidence_lab",
+    "edgar",
+    "holdings",
+    "figi",
+    "fundamentals",
+    "macro",
+    "cma",
 ]

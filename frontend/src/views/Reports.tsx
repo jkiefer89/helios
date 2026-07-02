@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
 import type { AIResult, DataStatusResponse, ModelSummary, ReportResponse, ReportSnapshot, ReportSnapshotStorage, SignalJournalEntry, TickerSummary } from "../api/types";
 import { AICopilotPanel, reportCopilotActions } from "../components/ai/AICopilotPanel";
@@ -6,6 +6,7 @@ import { DataQualityBanner } from "../components/badges/DataModeBadge";
 import { Panel } from "../components/cards/Panel";
 import { EmptyState } from "../components/empty-states/EmptyState";
 import { TerminalSelect } from "../components/forms/TerminalSelect";
+import { useViewFetch } from "../hooks/useViewFetch";
 import { fmtAuto, fmtNumber, fmtPct, fmtTimestamp, titleCase } from "../utils/format";
 
 export function Reports({
@@ -27,10 +28,9 @@ export function Reports({
 }) {
   const defaultTarget = selectedModel ? `model:${selectedModel}` : selectedInstrument ? `instrument:${selectedInstrument}` : tickers[0] ? `instrument:${tickers[0].symbol}` : "";
   const [target, setTarget] = useState(defaultTarget);
-  const [payload, setPayload] = useState<ReportResponse | null>(null);
+  const { payload, error, isLoading, load, isCurrentTarget } = useViewFetch<ReportResponse>({ failureMessage: "Report build failed." });
   const [journalEntries, setJournalEntries] = useState<SignalJournalEntry[]>([]);
   const [snapshots, setSnapshots] = useState<ReportSnapshot[]>([]);
-  const [error, setError] = useState("");
   const [snapshotError, setSnapshotError] = useState("");
   const [savingSnapshot, setSavingSnapshot] = useState(false);
   const [aiNarrative, setAiNarrative] = useState("");
@@ -40,39 +40,26 @@ export function Reports({
   const [reviewer, setReviewer] = useState("");
   const [reportPurpose, setReportPurpose] = useState("advisor_review");
   const [snapshotStorage, setSnapshotStorage] = useState<ReportSnapshotStorage | null>(null);
-  const requestSeq = useRef(0);
   const options = useMemo(() => [
     ...tickers.map((ticker) => ({ value: `instrument:${ticker.symbol}`, label: `${ticker.symbol} · ${ticker.name}` })),
     ...models.map((model) => ({ value: `model:${model.id}`, label: `${model.name} · model` })),
   ], [tickers, models]);
 
-  const build = async (requestedTarget = target || defaultTarget) => {
+  const build = useCallback((requestedTarget: string) => {
     const [kind, id] = requestedTarget.split(":");
     if (!kind || !id) return;
-    const requestId = requestSeq.current + 1;
-    requestSeq.current = requestId;
-    try {
-      setError("");
-      setSnapshotError("");
-      setAiNarrative("");
-      setPayload(null);
-      if (kind === "model") onSelectModel(id);
-      else onSelectInstrument(id);
-      const nextPayload = kind === "model" ? await api.reportModel(id) : await api.reportInstrument(id);
-      if (requestId !== requestSeq.current) return;
-      setPayload(nextPayload);
-    } catch (err) {
-      if (requestId !== requestSeq.current) return;
-      setPayload(null);
-      setError(err instanceof Error ? err.message : "Report build failed.");
-    }
-  };
+    setSnapshotError("");
+    setAiNarrative("");
+    if (kind === "model") onSelectModel(id);
+    else onSelectInstrument(id);
+    void load(requestedTarget, () => kind === "model" ? api.reportModel(id) : api.reportInstrument(id));
+  }, [load, onSelectInstrument, onSelectModel]);
 
   useEffect(() => {
-    if (!defaultTarget) return;
+    if (!defaultTarget || isCurrentTarget(defaultTarget)) return;
     setTarget(defaultTarget);
-    void build(defaultTarget);
-  }, [defaultTarget]);
+    build(defaultTarget);
+  }, [build, defaultTarget, isCurrentTarget]);
 
   const loadSnapshots = useCallback(async () => {
     try {
@@ -133,7 +120,7 @@ export function Reports({
     <div className="view-stack report-view">
       <header className="view-head no-print">
         <div><div className="section-label">Analysis-Only Report</div><h1>Institutional Report System</h1><p>Advisor/client-ready reports with saved history, versioning, audit trails, disclosure blocks, and print/PDF layouts.</p></div>
-        <form className="toolbar" onSubmit={(event) => { event.preventDefault(); void build(); }}>
+        <form className="toolbar" onSubmit={(event) => { event.preventDefault(); build(target || defaultTarget); }}>
           <label>Target<TerminalSelect ariaLabel="Report target" value={target} onChange={setTarget} options={options} /></label>
           <label className="check"><input type="checkbox" checked={includeAiNarrative} onChange={(event) => setIncludeAiNarrative(event.target.checked)} /> Include AI narrative when available</label>
           <button type="submit">Build preview</button>
@@ -155,11 +142,13 @@ export function Reports({
           ]} /></label>
         </div>
       </Panel>
-      {error && <div className="notice danger">{error}</div>}
-      {snapshotError && <div className="notice warning no-print">{snapshotError}</div>}
+      {error && <div className="notice danger" role="alert">{error}</div>}
+      {snapshotError && <div className="notice warning no-print" role="alert">{snapshotError}</div>}
       <SignalJournalPanel entries={journalEntries} />
       <ReportHistoryPanel snapshots={snapshots} storage={snapshotStorage} />
-      {!payload ? (
+      {isLoading ? (
+        <div className="loading" role="status">Building the analysis-only report preview...</div>
+      ) : !payload ? (
         <EmptyState title="Select a report target" body="Choose an instrument or model to build an analysis-only report." />
       ) : (
         <ReportSheet payload={payload} dataStatus={dataStatus} onAiNarrative={setAiNarrative} />
@@ -301,12 +290,6 @@ function storageLabel(storage: ReportSnapshotStorage | null) {
   if (!storage) return "checking storage";
   if (!storage.durable) return "history unavailable";
   return storage.encrypted_at_rest ? "Encrypted local history" : "Local history";
-}
-
-function providerLabel(provider: Record<string, unknown>) {
-  const name = provider?.provider ? String(provider.provider) : "";
-  const model = provider?.model ? String(provider.model) : "";
-  return [name, model].filter(Boolean).join(" · ");
 }
 
 function PersistenceSnapshot({ dataStatus }: { dataStatus: DataStatusResponse | null }) {

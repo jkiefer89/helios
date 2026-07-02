@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from . import evidence_lab, model_governance, portfolio
+from ._common import avg as _avg
 
 
 def dashboard(
@@ -260,12 +261,6 @@ def _number(value: Any, *, default: float | None) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return default
-
-
-def _avg(values: list[float]) -> float | None:
-    if not values:
-        return None
-    return sum(values) / len(values)
 
 
 def _clamp(value: float, low: float, high: float) -> float:

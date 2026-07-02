@@ -217,10 +217,59 @@ def historical_signals(close: pd.Series) -> pd.Series:
     """Per-day trend+momentum score over history (for chart markers & backtest).
 
     Uses only causally-available indicators (no forward-looking forecast) so it
-    is honest for backtesting.
+    is honest for backtesting. Vectorized, and exactly equivalent to the
+    per-row reference `_historical_signals_loop` (asserted in tests).
+    """
+    f = ind.indicator_frame(close)
+    n = len(f)
+    if n == 0:
+        return pd.Series(np.zeros(0), index=close.index)
+    px = f["close"].to_numpy(dtype=float)
+    sma50 = f["sma50"].to_numpy(dtype=float)
+    sma200 = f["sma200"].to_numpy(dtype=float)
+    macd_hist = f["macd_hist"].to_numpy(dtype=float)
+    rsi = f["rsi"].to_numpy(dtype=float)
+
+    trend = np.zeros(n)
+    both_smas = np.isfinite(sma50) & np.isfinite(sma200)
+    trend[both_smas] += np.where(sma50[both_smas] > sma200[both_smas], 0.5, -0.5)
+    px_vs_sma = np.isfinite(px) & np.isfinite(sma50)
+    trend[px_vs_sma] += np.where(px[px_vs_sma] > sma50[px_vs_sma], 0.25, -0.25)
+    has_macd = np.isfinite(macd_hist)
+    trend[has_macd] += 0.25 * np.sign(macd_hist[has_macd])
+    trend = np.clip(trend, -1.0, 1.0)
+
+    momentum = np.zeros(n)
+    has_rsi = np.isfinite(rsi)
+    r = rsi[has_rsi]
+    momentum[has_rsi] = np.where(
+        r < 30, (30 - r) / 30,
+        np.where(r > 70, -(r - 70) / 30, (r - 50) / 50 * 0.4),
+    )
+    return pd.Series(0.6 * trend + 0.4 * momentum, index=close.index)
+
+
+def _historical_signals_loop(close: pd.Series) -> pd.Series:
+    """Per-row reference implementation of `historical_signals`.
+
+    Kept only as the regression oracle for the vectorized version; the two
+    must return frame-equal results on any input.
     """
     f = ind.indicator_frame(close)
     scores = np.zeros(len(f))
     for i in range(len(f)):
         scores[i] = 0.6 * _trend_score(f, i) + 0.4 * _momentum_score(f, i)
     return pd.Series(scores, index=close.index)
+
+
+def latest_signal_score(close: pd.Series) -> float:
+    """Trend+momentum score for the most recent session only.
+
+    Equals `historical_signals(close).iloc[-1]` without materializing the full
+    per-day history (used where only the latest signal is needed).
+    """
+    f = ind.indicator_frame(close)
+    if not len(f):
+        raise ValueError("Need at least one price row for a signal score.")
+    i = len(f) - 1
+    return float(0.6 * _trend_score(f, i) + 0.4 * _momentum_score(f, i))

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
 import type { ModelSummary, StrategyResponse, TickerSummary } from "../api/types";
 import { AICopilotPanel, strategyCopilotActions } from "../components/ai/AICopilotPanel";
@@ -7,6 +7,7 @@ import { Panel, StatTile } from "../components/cards/Panel";
 import { ChartSummary, DrawdownChart, EquityCurveChart, RollingSharpeChart } from "../components/charts/Charts";
 import { EmptyState } from "../components/empty-states/EmptyState";
 import { TerminalSelect } from "../components/forms/TerminalSelect";
+import { useViewFetch } from "../hooks/useViewFetch";
 import { fmtAuto, fmtNumber, fmtPct, fmtTimestamp, titleCase } from "../utils/format";
 
 export function StrategyLab({
@@ -28,9 +29,7 @@ export function StrategyLab({
   const [target, setTarget] = useState(defaultTarget);
   const [costBps, setCostBps] = useState(5);
   const [slippageBps, setSlippageBps] = useState(0);
-  const [payload, setPayload] = useState<StrategyResponse | null>(null);
-  const [error, setError] = useState("");
-  const requestSeq = useRef(0);
+  const { payload, error, isLoading, load, isCurrentTarget } = useViewFetch<StrategyResponse>({ failureMessage: "Strategy Lab failed." });
   const options = useMemo(() => [
     ...tickers.map((ticker) => ({ value: `instrument:${ticker.symbol}`, label: `${ticker.symbol} · ${ticker.name}` })),
     ...models.map((model) => ({ value: `model:${model.id}`, label: `${model.name} · model` })),
@@ -52,46 +51,34 @@ export function StrategyLab({
     };
   }, [costBps, payload, selectedInstrumentMeta, slippageBps, target]);
 
-  const run = async (requestedTarget = target || defaultTarget) => {
+  const run = useCallback((requestedTarget: string) => {
     const [kind, id] = requestedTarget.split(":");
     if (!kind || !id) return;
-    const requestId = requestSeq.current + 1;
-    requestSeq.current = requestId;
-    try {
-      setError("");
-      setPayload(null);
-      if (kind === "model") onSelectModel(id);
-      else onSelectInstrument(id);
-      const result = kind === "model"
-        ? await api.strategyModel(id, costBps, slippageBps)
-        : await api.strategyInstrument(id, costBps, slippageBps);
-      if (requestId !== requestSeq.current) return;
-      setPayload(result);
-    } catch (err) {
-      if (requestId !== requestSeq.current) return;
-      setPayload(null);
-      setError(err instanceof Error ? err.message : "Strategy Lab failed.");
-    }
-  };
+    if (kind === "model") onSelectModel(id);
+    else onSelectInstrument(id);
+    void load(requestedTarget, () => kind === "model"
+      ? api.strategyModel(id, costBps, slippageBps)
+      : api.strategyInstrument(id, costBps, slippageBps));
+  }, [costBps, load, onSelectInstrument, onSelectModel, slippageBps]);
 
   useEffect(() => {
-    if (!defaultTarget) return;
+    if (!defaultTarget || isCurrentTarget(defaultTarget)) return;
     setTarget(defaultTarget);
-    void run(defaultTarget);
-  }, [defaultTarget]);
+    run(defaultTarget);
+  }, [defaultTarget, isCurrentTarget, run]);
 
   return (
     <div className="view-stack">
       <header className="view-head">
         <div><div className="section-label">Strategy Lab</div><h1>No-lookahead signal evidence</h1><p>Runs the existing Helios signal against buy-and-hold after explicit costs and slippage.</p></div>
-        <form className="toolbar" onSubmit={(event) => { event.preventDefault(); void run(); }}>
+        <form className="toolbar" onSubmit={(event) => { event.preventDefault(); run(target || defaultTarget); }}>
           <label>Target<TerminalSelect ariaLabel="Strategy target" value={target} onChange={setTarget} options={options} /></label>
           <label>Cost bps<input type="number" min={0} max={500} value={costBps} onChange={(event) => setCostBps(Number(event.target.value))} /></label>
           <label>Slippage<input type="number" min={0} max={500} value={slippageBps} onChange={(event) => setSlippageBps(Number(event.target.value))} /></label>
           <button type="submit">Run</button>
         </form>
       </header>
-      {error && <div className="notice danger">{error}</div>}
+      {error && <div className="notice danger" role="alert">{error}</div>}
       {selectedInstrumentMeta && (
         <div className="source-context-strip">
           <span><b>Source</b>{selectedInstrumentMeta.source}</span>
@@ -168,6 +155,8 @@ export function StrategyLab({
             actions={strategyCopilotActions}
           />
         </>
+      ) : isLoading ? (
+        <div className="loading" role="status">Running no-lookahead strategy evidence...</div>
       ) : <EmptyState title="Select a target" body="Choose an instrument or model to run Strategy Lab." />}
     </div>
   );

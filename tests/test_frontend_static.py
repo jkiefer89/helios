@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import app as helios
+from helios_web import core as web_core
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -67,8 +68,10 @@ def test_react_terminal_uses_helios_echarts_foundation():
     assert "chartAlpha" in theme_source
     assert "ChartState" in states_source
     assert "LoadingChartState" in states_source
-    assert "ErrorChartState" in states_source
-    assert "LockedChartState" in states_source
+    # Dead chart-state wrapper exports were removed; kinds stay on ChartState.
+    assert "ErrorChartState" not in states_source
+    assert "LockedChartState" not in states_source
+    assert '"empty" | "loading" | "error" | "locked"' in states_source
     assert "minHeight" in states_source
     assert "equityCurveOption" in equity_adapter
     assert "drawdownOption" in drawdown_adapter
@@ -97,6 +100,62 @@ def test_react_terminal_uses_helios_echarts_foundation():
     assert "RollingSharpeChart" in strategy_source
 
 
+def test_react_analysis_view_reaches_legacy_parity():
+    analysis_source = (ROOT / "frontend" / "src" / "views" / "Analysis.tsx").read_text()
+    chart_source = (ROOT / "frontend" / "src" / "components" / "charts" / "Charts.tsx").read_text()
+    wrapper_source = (ROOT / "frontend" / "src" / "components" / "charts" / "HeliosEChart.tsx").read_text()
+    price_adapter = (ROOT / "frontend" / "src" / "components" / "charts" / "adapters" / "priceTrend.ts").read_text()
+    forecast_adapter = (ROOT / "frontend" / "src" / "components" / "charts" / "adapters" / "forecastCone.ts").read_text()
+    rsi_adapter = (ROOT / "frontend" / "src" / "components" / "charts" / "adapters" / "rsi.ts").read_text()
+    macd_adapter = (ROOT / "frontend" / "src" / "components" / "charts" / "adapters" / "macd.ts").read_text()
+    type_source = (ROOT / "frontend" / "src" / "api" / "types.ts").read_text()
+
+    # The placeholder key/value dumps and stale header copy are gone.
+    assert "Legacy analytics payloads rendered in the React terminal" not in analysis_source
+    assert "KeyObject" not in analysis_source
+
+    # Forecast cone: tactical horizon plus 6M/1Y/3Y/5Y strategic presets.
+    assert "ForecastConeChart" in chart_source
+    assert "forecastConeOption" in chart_source
+    assert "ForecastConeChart" in analysis_source
+    assert 'LONG_HORIZON_PRESETS = ["6M", "1Y", "3Y", "5Y"]' in analysis_source
+    assert "available_long" in analysis_source
+    assert "Strategic Value Projection ($10,000 base)" in analysis_source
+    assert "drawdown tolerance" in analysis_source
+    assert "prob_breach_maxdd" in analysis_source
+    assert "p05" in forecast_adapter and "p95" in forecast_adapter
+    assert "rgba(" not in rsi_adapter
+    assert "rgba(" not in macd_adapter
+
+    # Indicator panels and price-chart overlays.
+    assert "RsiChart" in chart_source and "MacdChart" in chart_source
+    assert "rsiOption" in rsi_adapter and "macdOption" in macd_adapter
+    assert "RsiChart" in analysis_source and "MacdChart" in analysis_source
+    assert "bbUpper" in price_adapter and "PriceTrendMarker" in price_adapter
+    assert "bb_upper" in analysis_source and "markers" in analysis_source
+    assert "EChartsBarChart" in wrapper_source and "EChartsScatterChart" in wrapper_source
+
+    # Designed evidence panels replacing the raw dumps.
+    assert "Signal Component Breakdown" in analysis_source
+    assert "weight-chip" in analysis_source
+    assert "clause-list" in analysis_source
+    assert "News Sentiment" in analysis_source
+    assert "Mandate Fit" in analysis_source
+    assert "Model Insights" in analysis_source
+    assert "suggested_action" in analysis_source
+    assert "EquityCurveChart" in analysis_source
+
+    # The API types now expose the full backend analysis contract.
+    assert "AnalysisSeries" in type_source
+    assert "TacticalForecast" in type_source
+    assert "LongForecast" in type_source
+    assert "SignalComponent" in type_source
+    assert "SentimentPayload" in type_source
+    assert "ModelInsight" in type_source
+    assert "macd_hist" in type_source
+    assert "SignalMarker" in type_source
+
+
 def test_react_terminal_uses_live_aware_data_honesty_copy():
     command_source = (ROOT / "frontend" / "src" / "views" / "CommandCenter.tsx").read_text()
     opportunity_source = (ROOT / "frontend" / "src" / "views" / "OpportunityRadar.tsx").read_text()
@@ -108,7 +167,8 @@ def test_react_terminal_uses_live_aware_data_honesty_copy():
     assert "Real data active" in command_source
     assert "Research unlocked" in command_source
     assert "Loading real-data rankings" in opportunity_source
-    assert "setIsLoading(true)" in opportunity_source
+    assert "useViewFetch" in opportunity_source
+    assert "isLoading" in opportunity_source
 
 
 def test_ai_copilot_disabled_state_is_non_actionable_and_not_repetitive():
@@ -132,6 +192,7 @@ def test_real_data_onboarding_copy_switches_when_live_histories_exist():
 
 def test_models_view_exposes_governed_model_library():
     source = (ROOT / "frontend" / "src" / "views" / "Models.tsx").read_text()
+    app_source = (ROOT / "frontend" / "src" / "App.tsx").read_text()
     client_source = (ROOT / "frontend" / "src" / "api" / "client.ts").read_text()
     type_source = (ROOT / "frontend" / "src" / "api" / "types.ts").read_text()
 
@@ -155,7 +216,7 @@ def test_models_view_exposes_governed_model_library():
     assert "Risk-limit blocked" in source
     assert "api.modelApprovalPacket" in source
     assert "modelApprovalPacket:" in client_source
-    assert "api.modelGovernance" in source
+    assert "api.modelGovernance" in app_source
     assert "modelGovernance:" in client_source
     assert "ModelGovernanceResponse" in type_source
     assert "ModelGovernanceApprovalPacket" in type_source
@@ -354,13 +415,86 @@ def test_evidence_lab_view_is_dedicated_and_routed():
     assert "Signal Journal" in view_source
 
 
+def test_payload_views_share_the_view_fetch_hook():
+    hook_source = (ROOT / "frontend" / "src" / "hooks" / "useViewFetch.ts").read_text()
+    views_dir = ROOT / "frontend" / "src" / "views"
+
+    assert "requestSeq" in hook_source
+    assert "isCurrentTarget" in hook_source
+    assert "keepPayloadWhileLoading" in hook_source
+    for view in ["Analysis", "StrategyLab", "Reports", "PortfolioClinic", "RiskAnalytics", "EvidenceLab", "OpportunityRadar"]:
+        source = (views_dir / f"{view}.tsx").read_text()
+        assert "useViewFetch" in source, view
+        assert "isLoading" in source, view
+        assert "requestSeq" not in source, view
+
+
+def test_payload_views_guard_against_selection_sync_double_fetch():
+    views_dir = ROOT / "frontend" / "src" / "views"
+    for view, target in [
+        ("Analysis", "defaultTarget"),
+        ("StrategyLab", "defaultTarget"),
+        ("Reports", "defaultTarget"),
+        ("PortfolioClinic", "defaultModelId"),
+        ("RiskAnalytics", "defaultModelId"),
+        ("EvidenceLab", "defaultTarget"),
+    ]:
+        source = (views_dir / f"{view}.tsx").read_text()
+        assert f"isCurrentTarget({target})" in source, view
+
+
+def test_react_app_is_wrapped_in_an_error_boundary():
+    main_source = (ROOT / "frontend" / "src" / "main.tsx").read_text()
+    boundary_source = (ROOT / "frontend" / "src" / "components" / "layout" / "ErrorBoundary.tsx").read_text()
+
+    assert "<ErrorBoundary>" in main_source
+    assert "getDerivedStateFromError" in boundary_source
+    assert "window.location.reload()" in boundary_source
+
+
+def test_react_app_syncs_view_and_selection_to_location_hash():
+    app_source = (ROOT / "frontend" / "src" / "App.tsx").read_text()
+    shell_source = (ROOT / "frontend" / "src" / "components" / "layout" / "AppShell.tsx").read_text()
+
+    assert "parseHash" in app_source
+    assert "buildHash" in app_source
+    assert 'window.addEventListener("hashchange"' in app_source
+    assert "isViewId" in shell_source
+
+
+def test_react_terminal_exposes_accessible_status_and_search_semantics():
+    shell_source = (ROOT / "frontend" / "src" / "components" / "layout" / "AppShell.tsx").read_text()
+    views_dir = ROOT / "frontend" / "src" / "views"
+
+    assert '<div className="notice" role="status" aria-live="polite">' in shell_source
+    assert 'role="combobox"' in shell_source
+    assert 'aria-autocomplete="list"' in shell_source
+    assert "aria-activedescendant=" in shell_source
+    assert 'role="listbox"' in shell_source
+    assert 'role="option"' in shell_source
+    for view in sorted(views_dir.glob("*.tsx")):
+        source = view.read_text()
+        assert '<div className="notice danger">' not in source, view.name
+
+
+def test_frontend_eslint_is_configured():
+    package_json = (ROOT / "frontend" / "package.json").read_text()
+    package_lock = (ROOT / "frontend" / "package-lock.json").read_text()
+    eslint_config = (ROOT / "frontend" / "eslint.config.js").read_text()
+
+    assert '"lint": "eslint ."' in package_json
+    assert '"node_modules/eslint"' in package_lock
+    assert "typescript-eslint" in eslint_config
+    assert "react-hooks/exhaustive-deps" in eslint_config
+
+
 def test_flask_serves_react_build_when_present(tmp_path, monkeypatch):
     dist = tmp_path / "dist"
     assets = dist / "assets"
     assets.mkdir(parents=True)
     (dist / "index.html").write_text("<!doctype html><div id=\"root\"></div>", encoding="utf-8")
     (assets / "app.js").write_text("console.log('helios')", encoding="utf-8")
-    monkeypatch.setattr(helios, "FRONTEND_DIST", dist)
+    monkeypatch.setattr(web_core, "FRONTEND_DIST", dist)
     helios.app.config.update(TESTING=True, PROPAGATE_EXCEPTIONS=False)
     client = helios.app.test_client()
 
@@ -377,7 +511,7 @@ def test_flask_serves_react_build_when_present(tmp_path, monkeypatch):
 
 
 def test_flask_falls_back_to_legacy_when_react_build_absent(tmp_path, monkeypatch):
-    monkeypatch.setattr(helios, "FRONTEND_DIST", tmp_path / "missing-dist")
+    monkeypatch.setattr(web_core, "FRONTEND_DIST", tmp_path / "missing-dist")
     helios.app.config.update(TESTING=True, PROPAGATE_EXCEPTIONS=False)
     client = helios.app.test_client()
 

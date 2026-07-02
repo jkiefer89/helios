@@ -21,6 +21,8 @@ from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 
+from . import analytics_cache
+
 # Cap user-added instruments so repeated uploads/fetches can't grow memory
 # without bound. Keep it high enough for a serious multi-theme research
 # universe plus model holdings; samples are never counted against this limit.
@@ -110,6 +112,8 @@ def register(inst: Instrument) -> None:
         user_keys = [k for k, v in _STORE.items() if v.source != "sample"]
         for stale in user_keys[:-MAX_USER_INSTRUMENTS] if len(user_keys) > MAX_USER_INSTRUMENTS else []:
             _STORE.pop(stale, None)
+    # Any store change (upload, live fetch, refresh) invalidates memoized analytics.
+    analytics_cache.invalidate()
 
 
 # --------------------------------------------------------------------------- #

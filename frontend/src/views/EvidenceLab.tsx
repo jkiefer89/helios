@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
 import type { EvidenceLabResponse, ModelSummary, TickerSummary } from "../api/types";
 import { DataQualityBanner } from "../components/badges/DataModeBadge";
@@ -6,6 +6,7 @@ import { Panel, StatTile } from "../components/cards/Panel";
 import { ChartSummary, LineChart, MiniBars } from "../components/charts/Charts";
 import { EmptyState } from "../components/empty-states/EmptyState";
 import { TerminalSelect } from "../components/forms/TerminalSelect";
+import { useViewFetch } from "../hooks/useViewFetch";
 import { fmtNumber, fmtPct, titleCase } from "../utils/format";
 
 type TargetKind = "model" | "instrument";
@@ -35,10 +36,7 @@ export function EvidenceLab({
   const [target, setTarget] = useState(defaultTarget);
   const [horizon, setHorizon] = useState("21");
   const [trainWindow, setTrainWindow] = useState("252");
-  const [payload, setPayload] = useState<EvidenceLabResponse | null>(null);
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
-  const requestSeq = useRef(0);
+  const { payload, error, isLoading, load, isCurrentTarget } = useViewFetch<EvidenceLabResponse>({ failureMessage: "Evidence Lab failed." });
 
   const targetOptions = [
     ...models.map((model) => ({ value: `model:${model.id}`, label: `${model.name} · model` })),
@@ -46,39 +44,25 @@ export function EvidenceLab({
   ];
   const selected = parseTarget(target);
 
-  const run = async (requestedTarget = target) => {
+  const run = useCallback((requestedTarget: string) => {
     const parsed = parseTarget(requestedTarget);
     if (!parsed) return;
-    const requestId = requestSeq.current + 1;
-    requestSeq.current = requestId;
-    setLoading(true);
-    setError("");
-    try {
-      if (parsed.kind === "model") onSelectModel(parsed.id);
-      if (parsed.kind === "instrument") onSelectInstrument(parsed.id);
-      const result = await api.evidenceLab({
-        kind: parsed.kind,
-        id: parsed.id,
-        horizon: parseBoundedInt(horizon, 21),
-        trainWindow: parseBoundedInt(trainWindow, 252),
-        step: 21,
-      });
-      if (requestId !== requestSeq.current) return;
-      setPayload(result);
-    } catch (err) {
-      if (requestId !== requestSeq.current) return;
-      setPayload(null);
-      setError(err instanceof Error ? err.message : "Evidence Lab failed.");
-    } finally {
-      if (requestId === requestSeq.current) setLoading(false);
-    }
-  };
+    if (parsed.kind === "model") onSelectModel(parsed.id);
+    if (parsed.kind === "instrument") onSelectInstrument(parsed.id);
+    void load(requestedTarget, () => api.evidenceLab({
+      kind: parsed.kind,
+      id: parsed.id,
+      horizon: parseBoundedInt(horizon, 21),
+      trainWindow: parseBoundedInt(trainWindow, 252),
+      step: 21,
+    }));
+  }, [horizon, load, onSelectInstrument, onSelectModel, trainWindow]);
 
   useEffect(() => {
-    if (!defaultTarget) return;
+    if (!defaultTarget || isCurrentTarget(defaultTarget)) return;
     setTarget(defaultTarget);
-    void run(defaultTarget);
-  }, [defaultTarget]);
+    run(defaultTarget);
+  }, [defaultTarget, isCurrentTarget, run]);
 
   const labels = useMemo(() => payload?.windows.map((row) => row.signal_date) || [], [payload]);
   const chartSeries = useMemo(() => payload ? [
@@ -100,15 +84,16 @@ export function EvidenceLab({
           <h1>Walk-forward evidence</h1>
           <p>Rolling out-of-sample paper evidence for model and instrument signals: hit rate, alpha, false positives, regimes, decay, and confidence bands.</p>
         </div>
-        <form className="toolbar" onSubmit={(event) => { event.preventDefault(); void run(); }}>
+        <form className="toolbar" onSubmit={(event) => { event.preventDefault(); run(target); }}>
           <label>Target<TerminalSelect ariaLabel="Evidence Lab target" value={target} onChange={setTarget} options={targetOptions} disabled={targetOptions.length === 0} /></label>
           <label>Horizon<input value={horizon} onChange={(event) => setHorizon(event.currentTarget.value)} inputMode="numeric" /></label>
           <label>Train rows<input value={trainWindow} onChange={(event) => setTrainWindow(event.currentTarget.value)} inputMode="numeric" /></label>
-          <button type="submit" disabled={!selected || loading}>{loading ? "Running..." : "Run evidence"}</button>
+          <button type="submit" disabled={!selected || isLoading}>{isLoading ? "Running..." : "Run evidence"}</button>
         </form>
       </header>
 
-      {error && <div className="notice danger">{error}</div>}
+      {error && <div className="notice danger" role="alert">{error}</div>}
+      {isLoading && <div className="loading" role="status">Running walk-forward evidence windows...</div>}
       {targetOptions.length === 0 && (
         <Panel title="Evidence Lab Gate" meta="target required">
           <EmptyState title="No models or instruments" body="Fetch live data or import a model before running walk-forward evidence." />

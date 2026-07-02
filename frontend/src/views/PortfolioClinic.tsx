@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
 import type { ClinicResponse, ModelSummary } from "../api/types";
 import { AICopilotPanel, clinicCopilotActions } from "../components/ai/AICopilotPanel";
@@ -7,6 +7,7 @@ import { Panel, StatTile } from "../components/cards/Panel";
 import { DonutChart, MiniBars } from "../components/charts/Charts";
 import { EmptyState } from "../components/empty-states/EmptyState";
 import { TerminalSelect } from "../components/forms/TerminalSelect";
+import { useViewFetch } from "../hooks/useViewFetch";
 import { fmtAuto, fmtNumber, fmtPct, titleCase } from "../utils/format";
 
 export function PortfolioClinic({
@@ -20,9 +21,7 @@ export function PortfolioClinic({
 }) {
   const defaultModelId = selectedModel || models[0]?.id || "";
   const [modelId, setModelId] = useState(defaultModelId);
-  const [payload, setPayload] = useState<ClinicResponse | null>(null);
-  const [error, setError] = useState("");
-  const requestSeq = useRef(0);
+  const { payload, error, isLoading, load, isCurrentTarget } = useViewFetch<ClinicResponse>({ failureMessage: "Portfolio Clinic failed." });
   const modelOptions = models.length > 0
     ? models.map((model) => ({ value: model.id, label: `${model.name} · ${model.mandate_label}` }))
     : [{ value: "", label: "No models imported" }];
@@ -36,40 +35,29 @@ export function PortfolioClinic({
     };
   }, [payload, selectedModelSummary]);
 
-  const run = async (requestedModelId = modelId) => {
+  const run = useCallback((requestedModelId: string) => {
     if (!requestedModelId) return;
-    const requestId = requestSeq.current + 1;
-    requestSeq.current = requestId;
-    try {
-      setError("");
-      setPayload(null);
-      onSelectModel(requestedModelId);
-      const result = await api.clinic(requestedModelId);
-      if (requestId !== requestSeq.current) return;
-      setPayload(result);
-    } catch (err) {
-      if (requestId !== requestSeq.current) return;
-      setPayload(null);
-      setError(err instanceof Error ? err.message : "Portfolio Clinic failed.");
-    }
-  };
+    onSelectModel(requestedModelId);
+    void load(requestedModelId, () => api.clinic(requestedModelId));
+  }, [load, onSelectModel]);
 
   useEffect(() => {
-    if (!defaultModelId) return;
+    if (!defaultModelId || isCurrentTarget(defaultModelId)) return;
     setModelId(defaultModelId);
-    void run(defaultModelId);
-  }, [defaultModelId]);
+    run(defaultModelId);
+  }, [defaultModelId, isCurrentTarget, run]);
 
   return (
     <div className="view-stack">
       <header className="view-head">
         <div><div className="section-label">Portfolio Clinic</div><h1>Model diagnostics and hypothetical improvements</h1><p>Long-only, mandate-aware diagnostics. Suggestions are research prompts, not orders.</p></div>
-        <form className="toolbar" onSubmit={(event) => { event.preventDefault(); void run(); }}>
+        <form className="toolbar" onSubmit={(event) => { event.preventDefault(); run(modelId); }}>
           <label>Model<TerminalSelect ariaLabel="Portfolio Clinic model" value={modelId} onChange={setModelId} options={modelOptions} disabled={models.length === 0} /></label>
           <button type="submit" disabled={models.length === 0}>Diagnose</button>
         </form>
       </header>
-      {error && <div className="notice danger">{error}</div>}
+      {error && <div className="notice danger" role="alert">{error}</div>}
+      {isLoading && <div className="loading" role="status">Running mandate-aware model diagnostics...</div>}
       {selectedModelSummary && (
         <div className="source-context-strip">
           <span><b>Coverage</b>{selectedModelSummary.real_coverage_count || 0}/{selectedModelSummary.n_holdings} holdings</span>

@@ -10,7 +10,7 @@ import type {
   OpportunitiesResponse,
   TickerSummary,
 } from "./api/types";
-import { AppShell, type ViewId } from "./components/layout/AppShell";
+import { AppShell, isViewId, type ViewId } from "./components/layout/AppShell";
 import { CommandCenter } from "./views/CommandCenter";
 import { OpportunityRadar } from "./views/OpportunityRadar";
 import { StrategyLab } from "./views/StrategyLab";
@@ -24,16 +24,42 @@ import { SignalJournal } from "./views/SignalJournal";
 import { RiskAnalytics } from "./views/RiskAnalytics";
 import { EvidenceLab } from "./views/EvidenceLab";
 
+interface HashRoute {
+  view: ViewId;
+  kind?: "instrument" | "model";
+  id?: string;
+}
+
+// Minimal hash routing (#/view or #/view/instrument|model/id) without a router library.
+function parseHash(hash: string): HashRoute | null {
+  const [view, kind, id] = hash.replace(/^#\/?/, "").split("/").map((part) => decodeURIComponent(part));
+  if (!view || !isViewId(view)) return null;
+  if ((kind === "instrument" || kind === "model") && id) return { view, kind, id };
+  return { view };
+}
+
+function buildHash(view: ViewId, selectedInstrument: string, selectedModel: string): string {
+  if (selectedModel) return `#/${view}/model/${encodeURIComponent(selectedModel)}`;
+  if (selectedInstrument) return `#/${view}/instrument/${encodeURIComponent(selectedInstrument)}`;
+  return `#/${view}`;
+}
+
 export default function App() {
-  const [activeView, setActiveView] = useState<ViewId>("command");
+  const [activeView, setActiveView] = useState<ViewId>(() => parseHash(window.location.hash)?.view || "command");
   const [tickers, setTickers] = useState<TickerSummary[]>([]);
   const [models, setModels] = useState<ModelSummary[]>([]);
   const [modelGovernance, setModelGovernance] = useState<ModelGovernanceResponse | null>(null);
   const [modelLibrary, setModelLibrary] = useState<ModelTemplate[]>([]);
   const [mandates, setMandates] = useState<MandateSummary[]>([]);
   const [liveAvailable, setLiveAvailable] = useState(false);
-  const [selectedInstrument, setSelectedInstrument] = useState<string>("");
-  const [selectedModel, setSelectedModel] = useState<string>("");
+  const [selectedInstrument, setSelectedInstrument] = useState<string>(() => {
+    const route = parseHash(window.location.hash);
+    return route?.kind === "instrument" ? route.id || "" : "";
+  });
+  const [selectedModel, setSelectedModel] = useState<string>(() => {
+    const route = parseHash(window.location.hash);
+    return route?.kind === "model" ? route.id || "" : "";
+  });
   const [command, setCommand] = useState<CommandCenterResponse | null>(null);
   const [dataStatus, setDataStatus] = useState<DataStatusResponse | null>(null);
   const [opportunities, setOpportunities] = useState<OpportunitiesResponse | null>(null);
@@ -78,6 +104,32 @@ export default function App() {
       cancelled = true;
     };
   }, []);
+
+  // Restore view + selection on back/forward and hand-edited hashes.
+  useEffect(() => {
+    const applyHash = () => {
+      const route = parseHash(window.location.hash);
+      if (!route) return;
+      setActiveView(route.view);
+      if (route.kind === "instrument" && route.id) {
+        setSelectedInstrument(route.id);
+        setSelectedModel("");
+      } else if (route.kind === "model" && route.id) {
+        setSelectedModel(route.id);
+        setSelectedInstrument("");
+      }
+    };
+    window.addEventListener("hashchange", applyHash);
+    return () => window.removeEventListener("hashchange", applyHash);
+  }, []);
+
+  // Keep the hash in sync with the active view and selection.
+  useEffect(() => {
+    const nextHash = buildHash(activeView, selectedInstrument, selectedModel);
+    if (window.location.hash === nextHash) return;
+    if (!window.location.hash) window.history.replaceState(null, "", nextHash);
+    else window.location.hash = nextHash;
+  }, [activeView, selectedInstrument, selectedModel]);
 
   const dataMode = useMemo(() => ({
     mode: command?.data_mode,

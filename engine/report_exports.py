@@ -8,11 +8,21 @@ from __future__ import annotations
 
 import html
 import secrets
-import textwrap
 from io import BytesIO
 from datetime import datetime, timezone
 from typing import Any
 
+from .pdf_layout import (
+    card_grid as _rl_card_grid,
+    draw_text as _rl_text,
+    draw_wrapped as _rl_wrapped,
+    fmt_optional_pct as _fmt_optional_pdf_pct,
+    fmt_value as _fmt_pdf_value,
+    header as _rl_header,
+    page_background as _rl_background,
+    panel as _rl_panel,
+)
+from . import pdf_layout
 from .reporting import DISCLAIMER
 
 
@@ -248,22 +258,6 @@ def render_pdf(snapshot: dict[str, Any]) -> bytes:
         pdf.showPage()
     pdf.save()
     return buffer.getvalue()
-
-
-def _rl_background(pdf, width: float, height: float, colors) -> None:
-    pdf.setFillColor(colors.HexColor("#071019"))
-    pdf.rect(0, 0, width, height, stroke=0, fill=1)
-    pdf.setFillColor(colors.HexColor("#0d1622"))
-    pdf.rect(0, height - 82, width, 82, stroke=0, fill=1)
-    pdf.setStrokeColor(colors.HexColor("#263548"))
-    pdf.setLineWidth(1)
-    pdf.line(36, height - 82, width - 36, height - 82)
-
-
-def _rl_header(pdf, width: float, height: float, section: str, colors) -> None:
-    _rl_text(pdf, "HELIOS PRO", 42, height - 42, 18, colors.HexColor("#e6edf7"), bold=True)
-    _rl_text(pdf, "Advisor-Grade Research Terminal", 42, height - 58, 8.5, colors.HexColor("#9fb2c8"), bold=True)
-    _rl_text(pdf, section, width - 260, height - 42, 10, colors.HexColor("#55a7ff"), bold=True)
 
 
 def _rl_cover_page(pdf, snapshot: dict[str, Any], width: float, height: float, page_no: int, total: int, section: str, colors) -> None:
@@ -530,71 +524,7 @@ def _rl_evidence_page(pdf, snapshot: dict[str, Any], width: float, height: float
 
 
 def _rl_footer(pdf, snapshot: dict[str, Any], width: float, page_no: int, total: int, section: str, colors) -> None:
-    pdf.setStrokeColor(colors.HexColor("#263548"))
-    pdf.line(42, 66, width - 42, 66)
-    _rl_text(pdf, "Analysis only - not investment advice, order execution, or a return guarantee.", 42, 46, 7.5, colors.HexColor("#9fb2c8"))
-    _rl_text(pdf, f"Page {page_no} of {total}", width - 104, 46, 8, colors.HexColor("#c8d3df"), bold=True)
-    _rl_text(pdf, str(snapshot.get("version_label") or "v1"), width - 104, 34, 7, colors.HexColor("#9fb2c8"))
-
-
-def _rl_card_grid(pdf, cards: list[tuple[str, Any]], x: float, y: float, card_width: float, card_height: float, colors) -> None:
-    for index, (label, value) in enumerate(cards):
-        col = index % 2
-        row = index // 2
-        _rl_card(pdf, x + col * (card_width + 24), y - row * (card_height + 20), card_width, card_height, str(label), str(value), colors)
-
-
-def _rl_card(pdf, x: float, y: float, width: float, height: float, label: str, value: str, colors) -> None:
-    pdf.setFillColor(colors.HexColor("#0d1622"))
-    pdf.setStrokeColor(colors.HexColor("#263548"))
-    pdf.roundRect(x, y, width, height, 8, stroke=1, fill=1)
-    _rl_text(pdf, label.upper(), x + 14, y + height - 20, 7.5, colors.HexColor("#9fb2c8"), bold=True)
-    _rl_wrapped(pdf, value, x + 14, y + height - 38, width - 28, 10.5, colors.HexColor("#f8fafc"), bold=True, max_lines=2)
-
-
-def _rl_panel(pdf, x: float, y: float, width: float, height: float, title: str, body: str, colors, *, accent: str) -> None:
-    pdf.setFillColor(colors.HexColor("#111827"))
-    pdf.setStrokeColor(colors.HexColor("#263548"))
-    pdf.roundRect(x, y, width, height, 8, stroke=1, fill=1)
-    pdf.setFillColor(colors.HexColor(accent))
-    pdf.rect(x, y, 4, height, stroke=0, fill=1)
-    _rl_text(pdf, title, x + 16, y + height - 22, 10.5, colors.HexColor(accent), bold=True)
-    max_lines = max(1, int((height - 42) / 12))
-    _rl_wrapped(pdf, body, x + 16, y + height - 42, width - 32, 8.8, colors.HexColor("#c8d3df"), max_lines=max_lines)
-
-
-def _rl_text(pdf, text: Any, x: float, y: float, size: float, color, *, bold: bool = False) -> None:
-    pdf.setFillColor(color)
-    pdf.setFont("Helvetica-Bold" if bold else "Helvetica", size)
-    pdf.drawString(x, y, _pdf_clean(text))
-
-
-def _rl_wrapped(pdf, text: Any, x: float, y: float, width: float, size: float, color, *, bold: bool = False, max_lines: int) -> float:
-    chars = max(24, int(width / max(size * 0.50, 1)))
-    lines = textwrap.wrap(_pdf_clean(text), width=chars)[:max_lines]
-    if not lines:
-        lines = [""]
-    leading = size * 1.38
-    for line in lines:
-        _rl_text(pdf, line, x, y, size, color, bold=bold)
-        y -= leading
-    return y
-
-
-def _fmt_pdf_value(value: Any, *, suffix: str = "") -> str:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return "Research locked" if value is None else str(value)
-    return f"{number:.1f}{suffix}"
-
-
-def _fmt_optional_pdf_pct(value: Any) -> str:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return "Pending"
-    return f"{number:.1f}%"
+    pdf_layout.footer(pdf, width, page_no, total, colors, version_label=str(snapshot.get("version_label") or "v1"))
 
 
 def _fmt_html_pct(value: Any) -> str:
@@ -603,10 +533,6 @@ def _fmt_html_pct(value: Any) -> str:
     except (TypeError, ValueError):
         return "Pending"
     return f"{number:.2f}%"
-
-
-def _pdf_clean(value: Any) -> str:
-    return str(value or "").replace("\u2014", "-").replace("\u2013", "-").replace("\u2011", "-")
 
 
 def _model_metadata(report: dict[str, Any]) -> dict[str, Any]:

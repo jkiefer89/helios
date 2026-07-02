@@ -5,6 +5,8 @@ import pytest
 
 import app as helios
 from engine import data, persistence, portfolio
+from helios_web import core as web_core
+from helios_web import data as web_data
 from tests.conftest import price_csv, price_series
 
 
@@ -82,7 +84,7 @@ def test_auto_live_config_defaults_to_core_universe(monkeypatch):
     monkeypatch.delenv("HELIOS_AUTO_LIVE_SYMBOLS", raising=False)
     monkeypatch.setenv("HELIOS_DB_PATH", ".helios/test-auto-live.db")
 
-    config = helios._auto_live_config()
+    config = web_data._auto_live_config()
 
     assert config["enabled"] is True
     assert config["source"] == "core"
@@ -92,7 +94,7 @@ def test_auto_live_config_defaults_to_core_universe(monkeypatch):
 def test_auto_live_config_can_be_explicitly_disabled(monkeypatch):
     monkeypatch.setenv("HELIOS_AUTO_LIVE_SYMBOLS", "off")
 
-    config = helios._auto_live_config()
+    config = web_data._auto_live_config()
 
     assert config["enabled"] is False
     assert config["symbols"] == []
@@ -105,7 +107,7 @@ def test_auto_live_config_parses_core_universe_and_interval(monkeypatch):
     monkeypatch.setenv("HELIOS_AUTO_LIVE_MAX_WORKERS", "99")
     monkeypatch.setenv("HELIOS_AUTO_LIVE_PERIOD", "1y")
 
-    config = helios._auto_live_config()
+    config = web_data._auto_live_config()
 
     assert config["enabled"] is True
     assert config["period"] == "1y"
@@ -365,3 +367,168 @@ def test_model_analyze_unavailable_long_horizon_clears_stale_label(client, monke
     assert horizon["kind"] == "short"
     assert horizon["value"] == 21
     assert horizon["label"] is None
+
+
+# --------------------------------------------------------------------------- #
+# CSRF protection (Sec-Fetch-Site / Origin checks in the before_request hook)
+# --------------------------------------------------------------------------- #
+def test_cross_site_post_is_rejected_with_generic_403(client):
+    resp = client.post("/api/live", json={"symbol": "AAPL"},
+                       headers={"Sec-Fetch-Site": "cross-site"})
+
+    assert resp.status_code == 403
+    assert b"Forbidden" in resp.data
+
+
+def test_same_origin_and_direct_posts_are_allowed(client, monkeypatch):
+    monkeypatch.setattr(data, "HAS_YF", False)
+    for headers in ({}, {"Sec-Fetch-Site": "same-origin"}, {"Sec-Fetch-Site": "none"}):
+        resp = client.post("/api/live", json={"symbol": "AAPL"}, headers=headers)
+        # Reaches the handler (yfinance unavailable), not the CSRF gate.
+        assert resp.status_code == 400
+        assert "yfinance" in resp.get_json()["error"]
+
+
+def test_mismatched_origin_post_is_rejected(client):
+    resp = client.post("/api/live", json={"symbol": "AAPL"},
+                       headers={"Origin": "https://evil.example"})
+
+    assert resp.status_code == 403
+
+
+def test_matching_origin_post_is_allowed(client, monkeypatch):
+    monkeypatch.setattr(data, "HAS_YF", False)
+    resp = client.post("/api/live", json={"symbol": "AAPL"},
+                       headers={"Origin": "http://localhost"})
+
+    assert resp.status_code == 400
+    assert "yfinance" in resp.get_json()["error"]
+
+
+def test_cross_site_get_requests_remain_allowed(client):
+    resp = client.get("/api/tickers", headers={"Sec-Fetch-Site": "cross-site"})
+
+    assert resp.status_code == 200
+
+
+# --------------------------------------------------------------------------- #
+# Basic-auth brute-force throttle
+# --------------------------------------------------------------------------- #
+def _basic_auth_header(username: str, password: str) -> dict:
+    import base64
+
+    token = base64.b64encode(f"{username}:{password}".encode()).decode()
+    return {"Authorization": f"Basic {token}"}
+
+
+@pytest.fixture()
+def auth_client(monkeypatch):
+    monkeypatch.setattr(web_core, "AUTH_ENABLED", True)
+    monkeypatch.setattr(web_core, "AUTH_USER", "advisor")
+    monkeypatch.setattr(web_core, "AUTH_PASSWORD", "correct-horse-battery")
+    monkeypatch.setattr(web_core, "_AUTH_FAILURE_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr(web_core, "_AUTH_FAILURES", {})
+    helios.app.config.update(TESTING=True, PROPAGATE_EXCEPTIONS=False)
+    return helios.app.test_client()
+
+
+def test_failed_basic_auth_sleeps_and_logs(auth_client, monkeypatch, caplog):
+    sleeps = []
+    monkeypatch.setattr(web_core, "_AUTH_FAILURE_DELAY_SECONDS", 0.3)
+    monkeypatch.setattr(web_core.time, "sleep", sleeps.append)
+
+    with caplog.at_level("WARNING"):
+        resp = auth_client.get("/api/tickers", headers=_basic_auth_header("advisor", "wrong"))
+
+    assert resp.status_code == 401
+    assert sleeps == [0.3]
+    assert any("Failed Basic-auth" in record.message for record in caplog.records)
+
+
+def test_missing_credentials_challenge_does_not_count_as_failure(auth_client):
+    resp = auth_client.get("/api/tickers")
+
+    assert resp.status_code == 401
+    assert web_core._AUTH_FAILURES == {}
+
+
+def test_repeated_auth_failures_lock_out_the_remote_ip(auth_client):
+    for _ in range(web_core._AUTH_LOCKOUT_THRESHOLD):
+        assert auth_client.get(
+            "/api/tickers", headers=_basic_auth_header("advisor", "wrong")
+        ).status_code == 401
+
+    locked = auth_client.get("/api/tickers", headers=_basic_auth_header("advisor", "wrong"))
+    assert locked.status_code == 429
+
+    # Even correct credentials are refused while the lockout is active.
+    still_locked = auth_client.get(
+        "/api/tickers", headers=_basic_auth_header("advisor", "correct-horse-battery"))
+    assert still_locked.status_code == 429
+
+
+def test_lockout_expires_and_success_clears_failures(auth_client, monkeypatch):
+    for _ in range(web_core._AUTH_LOCKOUT_THRESHOLD):
+        auth_client.get("/api/tickers", headers=_basic_auth_header("advisor", "wrong"))
+    monkeypatch.setattr(web_core, "_AUTH_LOCKOUT_SECONDS", 0.0)
+
+    resp = auth_client.get(
+        "/api/tickers", headers=_basic_auth_header("advisor", "correct-horse-battery"))
+
+    assert resp.status_code == 200
+    assert web_core._AUTH_FAILURES == {}
+
+
+# --------------------------------------------------------------------------- #
+# Upload guardrails
+# --------------------------------------------------------------------------- #
+def test_upload_is_rejected_when_parse_semaphore_is_saturated(client):
+    make_csv = price_csv
+    acquired = []
+    while web_core._UPLOAD_SEMAPHORE.acquire(blocking=False):
+        acquired.append(True)
+    try:
+        resp = client.post(
+            "/api/upload",
+            data={"file": (BytesIO(make_csv(days=90)), "busy.csv"), "symbol": "BUSY"},
+            content_type="multipart/form-data",
+        )
+        assert resp.status_code == 429
+        assert "busy" in resp.get_json()["error"].lower()
+    finally:
+        for _ in acquired:
+            web_core._UPLOAD_SEMAPHORE.release()
+
+    ok_resp = client.post(
+        "/api/upload",
+        data={"file": (BytesIO(make_csv(days=90)), "busy.csv"), "symbol": "BUSY"},
+        content_type="multipart/form-data",
+    )
+    assert ok_resp.status_code == 200
+
+
+def test_analyze_sanitizes_ticker_and_requires_symbol(client):
+    lower = client.get("/api/analyze?ticker=aapl&horizon=10")
+    assert lower.status_code == 200
+    assert lower.get_json()["symbol"] == "AAPL"
+
+    injected = client.get("/api/analyze?ticker=aa%20pl%24%0a&horizon=10")
+    assert injected.status_code == 200
+    assert injected.get_json()["symbol"] == "AAPL"
+
+    missing = client.get("/api/analyze")
+    assert missing.status_code == 400
+    assert "ticker" in missing.get_json()["error"].lower()
+
+
+# --------------------------------------------------------------------------- #
+# CSP scoping — CDN exception only for the legacy dashboard pages
+# --------------------------------------------------------------------------- #
+def test_csp_allows_cdn_only_on_legacy_dashboard(client):
+    legacy = client.get("/legacy")
+    assert "https://cdn.jsdelivr.net" in legacy.headers["Content-Security-Policy"]
+
+    api = client.get("/api/tickers")
+    csp = api.headers["Content-Security-Policy"]
+    assert "cdn.jsdelivr.net" not in csp
+    assert "script-src 'self';" in csp

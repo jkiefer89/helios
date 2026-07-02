@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from engine import data, persistence, portfolio
+from engine import analytics_cache, data, persistence, portfolio
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -27,12 +27,14 @@ def reset_process_local_stores():
     data._STORE.update(samples)
     data._PRICE_CACHE.clear()
     portfolio._MODELS.clear()
+    analytics_cache.invalidate()
     persistence.reset_store_for_tests()
     yield
     data._STORE.clear()
     data._STORE.update(samples)
     data._PRICE_CACHE.clear()
     portfolio._MODELS.clear()
+    analytics_cache.invalidate()
     persistence.reset_store_for_tests()
 
 

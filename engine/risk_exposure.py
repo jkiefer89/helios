@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 
 from . import data, indicators, mandate, portfolio, provenance, signal_journal
+from ._common import dedupe as _dedupe
 
 _SECTOR_MAP = {
     "AAPL": ("Technology", "mega-cap platform"),
@@ -852,11 +853,3 @@ def _liquidity_score_from_adv(adv: float) -> int:
     if adv >= 250_000_000:
         return 70
     return 55
-
-
-def _dedupe(items: list[str]) -> list[str]:
-    out = []
-    for item in items:
-        if item and item not in out:
-            out.append(item)
-    return out

@@ -73,7 +73,7 @@ def test_build_series_rescales_weights_over_available_holding_returns(monkeypatc
         "EARLY": data.PriceSeries("EARLY", close_series([100, 110, 121, 133.1]), "upload"),
         "LATE": data.PriceSeries("LATE", close_series([100, 100, 200], start="2024-01-03"), "upload"),
     }
-    monkeypatch.setattr(data, "resolve_series", lambda ticker, allow_live=True: resolved[ticker])
+    monkeypatch.setattr(data, "resolve_series", lambda ticker, allow_live=True, allow_sample=True, allow_simulated=True: resolved[ticker])
     model = portfolio.Model(
         id="RESCALE-TEST",
         name="Rescale Test",
@@ -95,7 +95,7 @@ def test_build_series_does_not_mutate_model_holdings(monkeypatch):
         "AAA": data.PriceSeries("AAA", close_series([100, 101, 102, 103]), "upload"),
         "BBB": data.PriceSeries("BBB", close_series([200, 201, 202, 203]), "sample"),
     }
-    monkeypatch.setattr(data, "resolve_series", lambda ticker, allow_live=True: resolved[ticker])
+    monkeypatch.setattr(data, "resolve_series", lambda ticker, allow_live=True, allow_sample=True, allow_simulated=True: resolved[ticker])
     model = portfolio.Model(
         id="NO-MUTATION",
         name="No Mutation",

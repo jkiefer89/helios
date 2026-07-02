@@ -4,8 +4,11 @@ import { fmtNumber } from "../../utils/format";
 import { EmptyChartState, LoadingChartState } from "./chartStates";
 import { drawdownOption } from "./adapters/drawdown";
 import { equityCurveOption } from "./adapters/equity";
-import { priceTrendOption } from "./adapters/priceTrend";
+import { forecastConeOption, type ForecastConePoint } from "./adapters/forecastCone";
+import { macdOption } from "./adapters/macd";
+import { priceTrendOption, type PriceTrendMarker } from "./adapters/priceTrend";
 import { rollingSharpeOption } from "./adapters/rollingSharpe";
+import { rsiOption } from "./adapters/rsi";
 
 type ChartTone = "positive" | "negative" | "warning" | "info" | "neutral";
 type ChartPoint = { label: string; x: number; y: number; size?: number; tone?: string; meta?: string };
@@ -284,12 +287,18 @@ export function PriceTrendChart({
   close,
   sma50,
   sma200,
+  bbUpper,
+  bbLower,
+  markers,
   height = 220,
 }: {
   labels: string[];
   close: NullableNumber[];
   sma50?: NullableNumber[];
   sma200?: NullableNumber[];
+  bbUpper?: NullableNumber[];
+  bbLower?: NullableNumber[];
+  markers?: PriceTrendMarker[];
   height?: number;
 }) {
   const points = labels.map((date, index) => ({
@@ -297,11 +306,72 @@ export function PriceTrendChart({
     close: chartNumber(close[index]),
     sma50: chartNumber(sma50?.[index]),
     sma200: chartNumber(sma200?.[index]),
+    bbUpper: chartNumber(bbUpper?.[index]),
+    bbLower: chartNumber(bbLower?.[index]),
   }));
   if (!hasEnoughPoints(points.map((point) => point.close))) {
     return <EmptyChartState body="Price trend appears when enough price history is available." minHeight={height} />;
   }
-  return <LazyHeliosEChart option={priceTrendOption(points)} height={height} ariaLabel="Price and moving-average trend chart" />;
+  return <LazyHeliosEChart option={priceTrendOption(points, markers ?? [])} height={height} ariaLabel="Price, moving-average, and Bollinger trend chart with signal markers" />;
+}
+
+export function ForecastConeChart({
+  points,
+  baseline,
+  height = 220,
+  ariaLabel = "Forecast confidence cone chart",
+}: {
+  points: ForecastConePoint[];
+  baseline?: number;
+  height?: number;
+  ariaLabel?: string;
+}) {
+  const plottable = points.filter((point) => [point.median, point.actual].some((value) => typeof value === "number" && Number.isFinite(value)));
+  if (plottable.length < 2) {
+    return <EmptyChartState body="Forecast cone appears when a forecast is available." minHeight={height} />;
+  }
+  return <LazyHeliosEChart option={forecastConeOption(points, baseline)} height={height} ariaLabel={ariaLabel} />;
+}
+
+export function RsiChart({
+  labels,
+  values,
+  height = 150,
+}: {
+  labels: string[];
+  values: NullableNumber[];
+  height?: number;
+}) {
+  const points = labels.map((date, index) => ({ date, rsi: chartNumber(values[index]) }));
+  if (!hasEnoughPoints(points.map((point) => point.rsi))) {
+    return <EmptyChartState body="RSI appears when enough real-data history is available." minHeight={height} />;
+  }
+  return <LazyHeliosEChart option={rsiOption(points)} height={height} ariaLabel="RSI oscillator chart with 30/70 bands" />;
+}
+
+export function MacdChart({
+  labels,
+  macd,
+  signal,
+  histogram,
+  height = 150,
+}: {
+  labels: string[];
+  macd: NullableNumber[];
+  signal?: NullableNumber[];
+  histogram?: NullableNumber[];
+  height?: number;
+}) {
+  const points = labels.map((date, index) => ({
+    date,
+    macd: chartNumber(macd[index]),
+    signal: chartNumber(signal?.[index]),
+    histogram: chartNumber(histogram?.[index]),
+  }));
+  if (!hasEnoughPoints(points.map((point) => point.macd))) {
+    return <EmptyChartState body="MACD appears when enough real-data history is available." minHeight={height} />;
+  }
+  return <LazyHeliosEChart option={macdOption(points)} height={height} ariaLabel="MACD line, signal, and histogram chart" />;
 }
 
 export function LineChart({

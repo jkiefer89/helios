@@ -12,7 +12,16 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from . import data, portfolio, provenance, regime, signal_journal, signals
+from . import analytics_cache, data, portfolio, provenance, signal_journal, signals
+from ._common import (
+    avg as _avg,
+    clean_close as _clean_close,
+    dedupe as _dedupe,
+    finite as _finite,
+    journal_paper_hit as _journal_hit,
+    paper_hit as _paper_hit,
+    pct as _pct,
+)
 
 DEFAULT_HORIZONS = (5, 21, 63)
 
@@ -129,11 +138,21 @@ def analyze_series(
 
     bench = _clean_close(benchmark_close) if benchmark_close is not None else pd.Series(dtype=float)
     benchmark_status = "available" if len(bench) >= train_window else "unavailable"
-    base_windows = _walk_windows(px, bench, horizon_days, train_window, step, benchmark_status)
-    decay = [
-        _decay_row(horizon, _walk_windows(px, bench, horizon, train_window, step, benchmark_status))
-        for horizon in decay_horizons
-    ]
+    cache_key = _walk_cache_key(target, px, benchmark_symbol, bench, horizon_days, train_window, step)
+    windows_by_horizon = analytics_cache.get("evidence_walk", cache_key)
+    if windows_by_horizon is None:
+        # Every signal/regime input is strictly backward-looking, so both are
+        # computed once on the full series and sliced per window (see tests).
+        score_series = signals.historical_signals(px)
+        regime_labels = _regime_labels(bench if len(bench) else px)
+        windows_by_horizon = {
+            horizon: _walk_windows(px, bench, horizon, train_window, step, benchmark_status,
+                                   score_series, regime_labels)
+            for horizon in decay_horizons
+        }
+        analytics_cache.put("evidence_walk", cache_key, windows_by_horizon)
+    base_windows = windows_by_horizon[horizon_days]
+    decay = [_decay_row(horizon, windows_by_horizon[horizon]) for horizon in decay_horizons]
     out_warnings = list(warnings or [])
     if benchmark_status != "available":
         out_warnings.append(f"Benchmark {benchmark_symbol} needs live or uploaded history for alpha evidence.")
@@ -313,12 +332,20 @@ def _compact_journal_entry(entry: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _journal_hit(entry: dict[str, Any]) -> bool | None:
-    return _paper_hit(
-        str(entry.get("action_label") or "HOLD").upper(),
-        _finite(entry.get("forward_result_pct")),
-        _finite(entry.get("alpha_pct")),
-    )
+def _walk_cache_key(
+    target: dict[str, Any],
+    close: pd.Series,
+    benchmark_symbol: str,
+    benchmark: pd.Series,
+    horizon_days: int,
+    train_window: int,
+    step: int,
+) -> tuple | None:
+    base = analytics_cache.series_key(f"{target.get('kind')}:{target.get('id')}", close)
+    if base is None:
+        return None
+    bench_key = analytics_cache.series_key(str(benchmark_symbol), benchmark) or (str(benchmark_symbol), "", 0)
+    return base + bench_key + (int(horizon_days), int(train_window), int(step))
 
 
 def _walk_windows(
@@ -328,16 +355,25 @@ def _walk_windows(
     train_window: int,
     step: int,
     benchmark_status: str,
+    score_series: pd.Series,
+    regime_labels: pd.Series,
 ) -> list[dict[str, Any]]:
+    """Walk-forward windows sliced from precomputed causal series.
+
+    `score_series` and `regime_labels` are computed once on the full history;
+    because every underlying input (rolling means, EMAs, RSI, drawdown) is
+    strictly backward-looking, slicing them at the signal date is exactly
+    equivalent to recomputing on each frozen history prefix (asserted in tests).
+    """
     rows = []
     if len(close) < train_window + horizon + 1:
         return rows
+    input_start_date = close.index[0].strftime("%Y-%m-%d")
     max_signal_index = len(close) - horizon - 1
     for signal_index in range(train_window - 1, max_signal_index + 1, step):
-        history = close.iloc[: signal_index + 1]
         signal_date = close.index[signal_index]
         forward_date = close.index[signal_index + horizon]
-        signal_score = float(signals.historical_signals(history).iloc[-1])
+        signal_score = float(score_series.iloc[signal_index])
         action = _action(signal_score)
         start_price = float(close.iloc[signal_index])
         end_price = float(close.iloc[signal_index + horizon])
@@ -348,8 +384,8 @@ def _walk_windows(
         row = {
             "signal_date": signal_date.strftime("%Y-%m-%d"),
             "forward_end_date": forward_date.strftime("%Y-%m-%d"),
-            "input_start_date": history.index[0].strftime("%Y-%m-%d"),
-            "input_rows": int(len(history)),
+            "input_start_date": input_start_date,
+            "input_rows": int(signal_index + 1),
             "horizon_days": int(horizon),
             "signal_score": round(signal_score, 4),
             "action_label": action,
@@ -358,7 +394,7 @@ def _walk_windows(
             "alpha_pct": alpha,
             "paper_hit": hit,
             "false_positive": bool(action in {"BUY", "SELL"} and hit is False),
-            "regime": _regime_at(benchmark if len(benchmark) else close, signal_date),
+            "regime": _label_on_or_before(regime_labels, signal_date),
         }
         rows.append(row)
     return rows
@@ -485,17 +521,6 @@ def _hit_rate_band(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _paper_hit(action: str, forward: float | None, alpha: float | None) -> bool | None:
-    if forward is None:
-        return None
-    evidence = alpha if alpha is not None else forward
-    if action == "BUY":
-        return evidence > 0
-    if action == "SELL":
-        return evidence < 0
-    return evidence >= -1.0
-
-
 def _action(score: float) -> str:
     if score > 0.15:
         return "BUY"
@@ -504,9 +529,54 @@ def _action(score: float) -> str:
     return "HOLD"
 
 
-def _regime_at(close: pd.Series, signal_date: pd.Timestamp) -> str:
-    hist = close.loc[:signal_date]
-    return str(regime.classify_regime(hist).get("label") or "neutral")
+def _regime_labels(close: pd.Series) -> pd.Series:
+    """Causal per-session regime labels for a clean price series.
+
+    Vectorizes the label decision of `regime.classify_regime`: every driver
+    (SMA50/200, 21/63-day returns, 63-day realized vol, drawdown from the
+    running high) is strictly backward-looking, so the label at session i
+    matches `classify_regime(close.iloc[:i + 1])["label"]` (asserted in tests).
+    """
+    px = pd.Series(close).dropna().astype(float)
+    n = len(px)
+    if n == 0:
+        return pd.Series(dtype=object)
+    last = px.to_numpy(dtype=float)
+    sma50 = px.rolling(50).mean().to_numpy(dtype=float)
+    sma200 = px.rolling(200).mean().to_numpy(dtype=float)
+    ret21 = _trailing_return_pct(px, 21)
+    ret63 = _trailing_return_pct(px, 63)
+    returns = px.to_numpy(dtype=float)[1:] / px.to_numpy(dtype=float)[:-1] - 1.0
+    vol = np.full(n, np.nan)
+    if n > 1:
+        vol[1:] = pd.Series(returns).rolling(63, min_periods=1).std().to_numpy() * np.sqrt(252) * 100
+    drawdown = (last / px.cummax().to_numpy(dtype=float) - 1.0) * 100
+
+    score = np.full(n, 50.0)
+    fin200 = np.isfinite(sma200)
+    score += np.where(fin200, np.where(last >= sma200, 16.0, -18.0), -4.0)
+    cross = np.isfinite(sma50) & fin200
+    score += np.where(cross, np.where(sma50 >= sma200, 14.0, -16.0), 0.0)
+    score += np.where(ret63 >= 0, 11.0, -13.0)
+    score += np.where(ret21 >= 0, 7.0, -8.0)
+    score += np.where(vol <= 18, 6.0, 0.0) + np.where(vol >= 30, -9.0, 0.0)
+    score += np.where(drawdown >= -5, 6.0, np.where(drawdown <= -15, -11.0, -2.0))
+    final = np.clip(score, 0.0, 100.0)
+    labels = np.where(final >= 65, "risk-on", np.where(final <= 35, "risk-off", "neutral"))
+    labels[: min(59, n)] = "neutral"  # classify_regime needs >= 60 sessions
+    return pd.Series(labels, index=px.index)
+
+
+def _trailing_return_pct(px: pd.Series, periods: int) -> np.ndarray:
+    """Vectorized equivalent of regime._return_pct at every session."""
+    start = px.shift(periods)
+    ret = (px / start - 1.0) * 100.0
+    return ret.where(start.notna() & (start != 0), 0.0).to_numpy(dtype=float)
+
+
+def _label_on_or_before(labels: pd.Series, date: pd.Timestamp) -> str:
+    upto = labels.loc[:date]
+    return str(upto.iloc[-1]) if len(upto) else "neutral"
 
 
 def _benchmark_return(benchmark: pd.Series, start_date: pd.Timestamp, end_date: pd.Timestamp) -> float | None:
@@ -532,36 +602,3 @@ def _benchmark_close(symbol: str) -> pd.Series | None:
     if inst is None or not provenance.is_real_source(inst.source) or "close" not in inst.df:
         return None
     return inst.df["close"]
-
-
-def _clean_close(close: pd.Series | None) -> pd.Series:
-    if close is None:
-        return pd.Series(dtype=float)
-    out = pd.Series(close).dropna().copy()
-    out.index = pd.to_datetime(out.index, errors="coerce")
-    out = out[~out.index.isna()]
-    if getattr(out.index, "tz", None) is not None:
-        out.index = out.index.tz_localize(None)
-    out.index = out.index.normalize()
-    return pd.to_numeric(out.sort_index(), errors="coerce").dropna()
-
-
-def _avg(values) -> float | None:
-    clean = [float(value) for value in values if _finite(value) is not None]
-    return round(float(np.mean(clean)), 4) if clean else None
-
-
-def _pct(num: int, den: int) -> float | None:
-    return round(float(num) / den * 100, 2) if den else None
-
-
-def _finite(value: Any) -> float | None:
-    return float(value) if isinstance(value, (int, float)) and np.isfinite(value) else None
-
-
-def _dedupe(items: list[str]) -> list[str]:
-    out = []
-    for item in items:
-        if item and item not in out:
-            out.append(item)
-    return out

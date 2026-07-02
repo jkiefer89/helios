@@ -10,14 +10,18 @@ or a guarantee engine.
 
 ## Repo Layout
 
-- `app.py`: Flask app, JSON API, auth gate, security headers, React/legacy
-  static serving.
+- `app.py`: thin entry point/facade; loads the repo-local `.env`, then wires
+  `helios_web.init_app()`.
+- `helios_web/`: Flask web layer, one blueprint per section (`core`, `data`,
+  `analysis`, `models`, `reports`, `ai`, `spa`, plus `localenv`); auth gate,
+  CSRF heuristic, security headers, React/legacy static serving.
 - `serve.py`: local/LAN production entrypoint using waitress, or self-signed
-  HTTPS when `HELIOS_TLS=1`.
-- `run.sh`: setup/start wrapper; creates `.venv`, installs runtime Python deps,
-  then runs `app.py` or `serve.py`.
+  HTTPS when `HELIOS_TLS=1` (TLS setup failures abort rather than fall back).
+- `run.sh`: setup/start wrapper; creates `.venv`, installs pinned Python deps
+  from `requirements.lock`, then runs `app.py` or `serve.py`.
 - `engine/`: deterministic analytics, persistence, portfolio parsing, signals,
-  reports, optional AI provider layer.
+  evidence lab, risk/exposure, governance/validation, reports, optional AI
+  provider layer.
 - `frontend/`: React + Vite + TypeScript application.
 - `templates/`, `static/`: legacy vanilla dashboard fallback at `/legacy`.
 - `tests/`: offline pytest suite for engine behavior, API smoke paths,
@@ -28,17 +32,25 @@ or a guarantee engine.
 ## Stack and Tooling
 
 - Backend: Python 3, Flask, waitress, pandas/numpy, SQLite persistence.
-- Frontend: React 19, Vite, TypeScript, npm with `frontend/package-lock.json`.
-- Tests: pytest for Python; TypeScript build/typecheck for frontend.
-- Package management: `requirements.txt`, `requirements-dev.txt`, and npm.
-- No Makefile, Dockerfile, `pyproject.toml`, configured lint command, or
-  configured formatter command exists in this repo today.
+- Frontend: React 19, Vite, TypeScript, ECharts, npm with
+  `frontend/package-lock.json`.
+- Tests: pytest (with coverage in CI) for Python; TypeScript build/typecheck
+  and ESLint for the frontend.
+- Package management: `requirements.txt` / `requirements-dev.txt` hold ranges;
+  `requirements.lock` holds the exact tested pins CI installs. npm for the
+  frontend. Regenerate the lock when Python dependency ranges change.
+- No Makefile, Dockerfile, or `pyproject.toml` exists in this repo today.
+  ESLint is configured for the frontend (`frontend/eslint.config.js`); there is
+  no Python lint or formatter command.
 
 ## Setup
 
 ```bash
 python3 -m venv .venv
-./.venv/bin/python -m pip install -r requirements-dev.txt
+# CI parity: exact tested pins (includes pytest/pytest-cov).
+./.venv/bin/python -m pip install -r requirements.lock
+# Or resolve fresh from ranges instead:
+# ./.venv/bin/python -m pip install -r requirements-dev.txt
 npm --prefix frontend ci
 ```
 
@@ -61,11 +73,17 @@ npm --prefix frontend run dev
 # Frontend typecheck.
 npm --prefix frontend run typecheck
 
+# Frontend lint (ESLint).
+npm --prefix frontend run lint
+
 # Frontend production build.
 npm --prefix frontend run build
 
 # Python tests.
 ./.venv/bin/python -m pytest
+
+# Python tests with coverage (CI flags).
+./.venv/bin/python -m pytest --cov=engine --cov=app --cov-report=term-missing
 
 # Python syntax compile.
 ./.venv/bin/python -m compileall app.py serve.py engine tests
@@ -80,18 +98,19 @@ node --check static/app.js
 Full CI-equivalent local verification:
 
 ```bash
-./.venv/bin/python -m pip install -r requirements-dev.txt
+./.venv/bin/python -m pip install -r requirements.lock
 npm --prefix frontend ci
 npm --prefix frontend run typecheck
 npm --prefix frontend run build
 ./.venv/bin/python -m compileall app.py serve.py engine tests
 ./.venv/bin/python -m json.tool .design_spec.json >/dev/null
 node --check static/app.js
-./.venv/bin/python -m pytest
+./.venv/bin/python -m pytest --cov=engine --cov=app --cov-report=term-missing
 ```
 
-Lint/format commands are not configured. Do not invent them; if adding a
+Python lint/format commands are not configured. Do not invent them; if adding a
 lint/format tool, add config, scripts, tests/docs, and explain the rationale.
+The frontend lint command is `npm --prefix frontend run lint` only.
 
 ## Engineering Conventions
 
