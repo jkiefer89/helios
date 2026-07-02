@@ -13,6 +13,13 @@ from typing import Any
 import pandas as pd
 
 from . import data, persistence, portfolio
+from ._common import (
+    avg as _avg,
+    clean_close as _clean_close,
+    finite as _finite,
+    journal_paper_hit as _paper_hit,
+    pct as _pct,
+)
 
 MODEL_BENCHMARKS = {
     "pure_growth": "QQQ",
@@ -266,61 +273,9 @@ def _forward_result(close: pd.Series, input_end_date: str, horizon_days: int) ->
     }
 
 
-def _clean_close(close: pd.Series) -> pd.Series:
-    if close is None:
-        return pd.Series(dtype=float)
-    out = pd.Series(close).dropna().copy()
-    out.index = pd.to_datetime(out.index, errors="coerce")
-    out = out[~out.index.isna()]
-    if getattr(out.index, "tz", None) is not None:
-        out.index = out.index.tz_localize(None)
-    out.index = out.index.normalize()
-    return pd.to_numeric(out.sort_index(), errors="coerce").dropna()
-
-
 def _dedupe_key(target_kind: str, target_id: str, input_end: str, horizon_days: int, action: str, score: float) -> str:
     raw = f"{target_kind}|{target_id}|{input_end}|{horizon_days}|{action}|{score:.4f}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:40]
-
-
-def _paper_hit(entry: dict[str, Any]) -> bool | None:
-    if entry.get("forward_status") != "measured":
-        return None
-    action = str(entry.get("action_label") or "").upper()
-    alpha = _finite(entry.get("alpha_pct"))
-    forward = _finite(entry.get("forward_result_pct"))
-    reference = alpha if alpha is not None else forward
-    if reference is None:
-        return None
-    if action in {"SELL", "REDUCE", "UNDERWEIGHT"}:
-        return reference < 0
-    if action in {"HOLD", "REVIEW"}:
-        return reference >= -1.0
-    return reference > 0
-
-
-def _finite(value: Any) -> float | None:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    if pd.isna(number):
-        return None
-    return number
-
-
-def _avg(values) -> float | None:
-    clean = [_finite(value) for value in values]
-    clean = [value for value in clean if value is not None]
-    if not clean:
-        return None
-    return round(float(sum(clean) / len(clean)), 4)
-
-
-def _pct(numerator: int, denominator: int) -> float | None:
-    if denominator <= 0:
-        return None
-    return round(float(numerator / denominator * 100.0), 2)
 
 
 def _merge_source_counts(entries: list[dict[str, Any]]) -> dict[str, int]:

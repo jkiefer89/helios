@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from ._common import dedupe as _dedupe
+
 SCHEMA_KEYS = (
     "summary",
     "key_points",
@@ -936,14 +938,6 @@ def _as_list(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(item)[:MAX_STRING_LEN] for item in value if item is not None]
     return [str(value)[:MAX_STRING_LEN]]
-
-
-def _dedupe(items: list[str]) -> list[str]:
-    out = []
-    for item in items:
-        if item and item not in out:
-            out.append(item)
-    return out
 
 
 def _redact_secret_like(value: str) -> str:

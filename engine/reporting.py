@@ -7,6 +7,7 @@ from . import (
     forecast, indicators, opportunity, persistence, portfolio, portfolio_clinic,
     provenance, risk_exposure, sentiment, signals, strategy,
 )
+from ._common import dedupe as _dedupe
 
 DISCLAIMER = (
     "Analysis only — Helios provides research evidence and does not provide investment advice, "
@@ -305,11 +306,3 @@ def _assumptions() -> dict:
             "For models, inspect Portfolio Clinic suggestions and simulated-data caveats.",
         ],
     }
-
-
-def _dedupe(items: list[str]) -> list[str]:
-    out = []
-    for item in items:
-        if item and item not in out:
-            out.append(item)
-    return out

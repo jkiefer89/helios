@@ -67,6 +67,7 @@ from engine import (
     ai_copilot, analytics_cache, backtest, data, evidence_lab, forecast, indicators, insights, mandate, model_governance, model_library, model_validation, opportunity, portfolio,
     portfolio_clinic, persistence, provenance, regime, report_exports, reporting, risk_exposure, sentiment, signal_journal, signals, strategy,
 )
+from engine._common import dedupe as _dedupe_strings
 
 app = Flask(__name__)
 # Cap request bodies so a huge upload can't exhaust memory (16 MB is ample for CSVs).
@@ -605,27 +606,27 @@ def _command_center_payload() -> dict:
 # --------------------------------------------------------------------------- #
 # Series helpers for the price/indicator chart (downsampled for transport)
 # --------------------------------------------------------------------------- #
-def _series_payload(inst: data.Instrument, lookback: int = 400):
-    df = inst.df
-    close = df["close"].dropna()
+def _series_payload(close, lookback: int = 400, *, markers: bool = False):
+    close = close.dropna()
     ind_df = indicators.indicator_frame(close).tail(lookback)
-    sigs = signals.historical_signals(close).tail(lookback)
     dates = [d.strftime("%Y-%m-%d") for d in ind_df.index]
 
     def col(name):
         return [None if pd.isna(v) else float(v) for v in ind_df[name]]
 
     # Buy/sell markers where the causal score crosses thresholds.
-    markers = []
-    prev = 0.0
-    for d, s in zip(ind_df.index, sigs):
-        if prev <= 0.15 < s:
-            markers.append({"date": d.strftime("%Y-%m-%d"), "type": "buy",
-                            "price": float(close.loc[d])})
-        elif prev >= -0.05 > s:
-            markers.append({"date": d.strftime("%Y-%m-%d"), "type": "sell",
-                            "price": float(close.loc[d])})
-        prev = s
+    marker_rows = []
+    if markers:
+        sigs = signals.historical_signals(close).tail(lookback)
+        prev = 0.0
+        for d, s in zip(ind_df.index, sigs):
+            if prev <= 0.15 < s:
+                marker_rows.append({"date": d.strftime("%Y-%m-%d"), "type": "buy",
+                                    "price": float(close.loc[d])})
+            elif prev >= -0.05 > s:
+                marker_rows.append({"date": d.strftime("%Y-%m-%d"), "type": "sell",
+                                    "price": float(close.loc[d])})
+            prev = s
 
     return {
         "dates": dates,
@@ -638,7 +639,7 @@ def _series_payload(inst: data.Instrument, lookback: int = 400):
         "macd": col("macd"),
         "macd_signal": col("macd_signal"),
         "macd_hist": col("macd_hist"),
-        "markers": markers,
+        "markers": marker_rows,
     }
 
 
@@ -834,7 +835,7 @@ def analyze():
         "name": inst.name,
         "source": inst.source,
         "metrics": metrics,
-        "series": _series_payload(inst),
+        "series": _series_payload(close, markers=True),
         "forecast": fc,
         "sentiment": sent,
         "signal": sig,
@@ -1422,7 +1423,7 @@ def model_analyze():
         "mandate": {"key": mdl.mandate_key, **mandate.get(mdl.mandate_key)},
         "context": mdl.mandate_context,
         "metrics": metrics,
-        "series": _model_series_payload(close),
+        "series": _series_payload(close),
         "holdings": holdings,
         "concentration": {"hhi": ps.hhi, "n_eff": ps.n_eff, "corr_mean": ps.corr_mean},
         "provenance": ps.provenance,
@@ -2195,14 +2196,6 @@ def _alert_id_part(value: str) -> str:
     return cleaned[:80] or "item"
 
 
-def _dedupe_strings(items: list[str]) -> list[str]:
-    out = []
-    for item in items:
-        if item and item not in out:
-            out.append(item)
-    return out
-
-
 def _record_instrument_signal(inst: data.Instrument, close: pd.Series, sig: dict, horizon_days: int) -> dict | None:
     try:
         p = provenance.instrument(inst.source, len(close.dropna()))
@@ -2256,19 +2249,6 @@ def _holdings_with_signals(ps: portfolio.PortfolioSeries, mdl: portfolio.Model) 
             action = "—"
         out.append({**h, "signal": action})
     return out
-
-
-def _model_series_payload(close, lookback: int = 400):
-    ind_df = indicators.indicator_frame(close).tail(lookback)
-    dates = [d.strftime("%Y-%m-%d") for d in ind_df.index]
-
-    def col(name):
-        return [None if pd.isna(v) else float(v) for v in ind_df[name]]
-
-    return {"dates": dates, "close": col("close"), "sma50": col("sma50"),
-            "sma200": col("sma200"), "bb_upper": col("bb_upper"), "bb_lower": col("bb_lower"),
-            "rsi": col("rsi"), "macd": col("macd"), "macd_signal": col("macd_signal"),
-            "macd_hist": col("macd_hist"), "markers": []}
 
 
 if __name__ == "__main__":

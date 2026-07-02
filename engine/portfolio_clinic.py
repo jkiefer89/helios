@@ -4,6 +4,7 @@ from __future__ import annotations
 import numpy as np
 
 from . import indicators, mandate, portfolio, provenance
+from ._common import dedupe as _dedupe
 
 
 def analyze_clinic(model: portfolio.Model) -> dict:
@@ -308,11 +309,3 @@ def _after_estimates(metrics: dict, before: dict[str, float], after: dict[str, f
         "hhi": after_hhi,
         "n_eff": (1.0 / after_hhi) if after_hhi > 0 else 0.0,
     }
-
-
-def _dedupe(items: list[str]) -> list[str]:
-    out = []
-    for item in items:
-        if item and item not in out:
-            out.append(item)
-    return out

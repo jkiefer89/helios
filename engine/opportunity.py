@@ -12,6 +12,7 @@ from . import (
     analytics_cache, data, forecast, indicators, mandate, portfolio, provenance,
     regime as regime_mod, sentiment, signals, strategy,
 )
+from ._common import dedupe as _dedupe
 
 
 def score_candidate(candidate: dict, regime: dict | None = None) -> dict:
@@ -354,11 +355,3 @@ def _action_from_signal(signal_score: float) -> str:
     if signal_score < -0.25:
         return "SELL"
     return "HOLD"
-
-
-def _dedupe(items: list[str]) -> list[str]:
-    out = []
-    for item in items:
-        if item and item not in out:
-            out.append(item)
-    return out

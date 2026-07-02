@@ -14,6 +14,13 @@ from io import BytesIO
 from typing import Any
 
 from . import data, mandate, model_library, persistence, portfolio
+from .pdf_layout import (
+    card_grid as _pdf_card_grid,
+    draw_text as _pdf_text,
+    draw_wrapped as _pdf_wrapped,
+    panel as _pdf_panel,
+)
+from . import pdf_layout
 
 APPROVAL_STATUSES = {"draft", "pending_review", "approved", "rejected", "archived"}
 REBALANCE_ACTIONS = {"rebalance_recorded", "rebalance_reviewed"}
@@ -359,19 +366,26 @@ def render_approval_packet_pdf(packet: dict[str, Any]) -> bytes:
     width, height = letter
 
     def background(section: str, page_no: int, total: int) -> None:
-        pdf.setFillColor(colors.HexColor("#071019"))
-        pdf.rect(0, 0, width, height, stroke=0, fill=1)
-        pdf.setFillColor(colors.HexColor("#0d1622"))
-        pdf.rect(0, height - 84, width, 84, stroke=0, fill=1)
-        pdf.setStrokeColor(colors.HexColor("#263548"))
-        pdf.line(38, height - 84, width - 38, height - 84)
-        _pdf_text(pdf, "HELIOS PRO", 42, height - 42, 18, colors.HexColor("#e6edf7"), bold=True)
-        _pdf_text(pdf, "MODEL APPROVAL PACKET", 42, height - 60, 9, colors.HexColor("#55a7ff"), bold=True)
-        _pdf_text(pdf, section, width - 252, height - 44, 10, colors.HexColor("#ffd24a"), bold=True)
-        pdf.setStrokeColor(colors.HexColor("#263548"))
-        pdf.line(42, 62, width - 42, 62)
-        _pdf_text(pdf, "Analysis-only governance evidence. Not investment advice, order execution, or a return guarantee.", 42, 44, 7.5, colors.HexColor("#9fb2c8"))
-        _pdf_text(pdf, f"Page {page_no} of {total}", width - 104, 44, 8, colors.HexColor("#9fb2c8"))
+        pdf_layout.page_background(pdf, width, height, colors)
+        pdf_layout.header(
+            pdf,
+            width,
+            height,
+            section,
+            colors,
+            subtitle="MODEL APPROVAL PACKET",
+            subtitle_size=9,
+            subtitle_color="#55a7ff",
+            section_color="#ffd24a",
+        )
+        pdf_layout.footer(
+            pdf,
+            width,
+            page_no,
+            total,
+            colors,
+            note="Analysis-only governance evidence. Not investment advice, order execution, or a return guarantee.",
+        )
 
     total_pages = 3
     background("COMMITTEE COVER", 1, total_pages)
@@ -832,76 +846,6 @@ def _html_committee_note(row: dict[str, Any]) -> str:
         f"<article><strong>{escape(str(row.get('actor') or ''))}</strong>"
         f"{identity_copy}<p>{escape(str(row.get('note') or ''))}</p></article>"
     )
-
-
-def _pdf_text(pdf: Any, text: str, x: float, y: float, size: float, color: Any, *, bold: bool = False) -> None:
-    pdf.setFillColor(color)
-    pdf.setFont("Helvetica-Bold" if bold else "Helvetica", size)
-    pdf.drawString(x, y, str(text))
-
-
-def _pdf_wrapped(
-    pdf: Any,
-    text: str,
-    x: float,
-    y: float,
-    width: float,
-    size: float,
-    color: Any,
-    *,
-    bold: bool = False,
-    max_lines: int = 4,
-) -> float:
-    words = str(text or "").split()
-    if not words:
-        return y
-    line = ""
-    lines: list[str] = []
-    max_chars = max(18, int(width / max(size * 0.52, 1)))
-    for word in words:
-        candidate = f"{line} {word}".strip()
-        if len(candidate) > max_chars and line:
-            lines.append(line)
-            line = word
-        else:
-            line = candidate
-    if line:
-        lines.append(line)
-    for idx, line_text in enumerate(lines[:max_lines]):
-        _pdf_text(pdf, line_text, x, y - idx * (size + 4), size, color, bold=bold)
-    return y - min(len(lines), max_lines) * (size + 4)
-
-
-def _pdf_card_grid(pdf: Any, cards: list[tuple[str, Any]], x: float, y: float, card_w: float, card_h: float, colors: Any) -> None:
-    for index, (label, value) in enumerate(cards):
-        col = index % 2
-        row = index // 2
-        cx = x + col * (card_w + 14)
-        cy = y - row * (card_h + 12)
-        pdf.setFillColor(colors.HexColor("#0b1522"))
-        pdf.setStrokeColor(colors.HexColor("#263548"))
-        pdf.roundRect(cx, cy, card_w, card_h, 6, stroke=1, fill=1)
-        _pdf_text(pdf, str(label).upper(), cx + 12, cy + card_h - 18, 7.5, colors.HexColor("#9fb2c8"), bold=True)
-        _pdf_wrapped(pdf, str(value), cx + 12, cy + card_h - 36, card_w - 24, 10, colors.HexColor("#e6edf7"), bold=True, max_lines=2)
-
-
-def _pdf_panel(
-    pdf: Any,
-    x: float,
-    y: float,
-    width: float,
-    height: float,
-    title: str,
-    body: str,
-    colors: Any,
-    *,
-    accent: str,
-) -> None:
-    pdf.setFillColor(colors.HexColor("#101b2a"))
-    pdf.setStrokeColor(colors.HexColor("#263548"))
-    pdf.roundRect(x, y, width, height, 8, stroke=1, fill=1)
-    _pdf_text(pdf, title, x + 16, y + height - 24, 10, colors.HexColor(accent), bold=True)
-    _pdf_wrapped(pdf, body, x + 16, y + height - 46, width - 32, 9, colors.HexColor("#c8d3df"), max_lines=4)
 
 
 def _snapshot_summary(event: dict[str, Any]) -> dict[str, Any]:

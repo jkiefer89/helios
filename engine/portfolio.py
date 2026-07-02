@@ -298,19 +298,12 @@ def build_series(
         # worker; cached/sample holdings are unaffected, the rest fall to simulated.
         allow_live = live_used < _LIVE_FETCH_BUDGET and time.monotonic() < deadline
         try:
-            try:
-                ps = data.resolve_series(
-                    h.ticker,
-                    allow_live=allow_live,
-                    allow_sample=allow_sample,
-                    allow_simulated=allow_simulated,
-                )
-            except TypeError as e:
-                if "allow_sample" not in str(e) and "allow_simulated" not in str(e):
-                    raise
-                # Backward-compatible with narrow test doubles that still expose
-                # the pre-Pro signature.
-                ps = data.resolve_series(h.ticker, allow_live=allow_live)
+            ps = data.resolve_series(
+                h.ticker,
+                allow_live=allow_live,
+                allow_sample=allow_sample,
+                allow_simulated=allow_simulated,
+            )
             if ps.source == "live":
                 live_used += 1
             src_by[h.ticker] = ps.source

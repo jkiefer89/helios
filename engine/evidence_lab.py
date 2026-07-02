@@ -13,6 +13,15 @@ import numpy as np
 import pandas as pd
 
 from . import analytics_cache, data, portfolio, provenance, signal_journal, signals
+from ._common import (
+    avg as _avg,
+    clean_close as _clean_close,
+    dedupe as _dedupe,
+    finite as _finite,
+    journal_paper_hit as _journal_hit,
+    paper_hit as _paper_hit,
+    pct as _pct,
+)
 
 DEFAULT_HORIZONS = (5, 21, 63)
 
@@ -323,14 +332,6 @@ def _compact_journal_entry(entry: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _journal_hit(entry: dict[str, Any]) -> bool | None:
-    return _paper_hit(
-        str(entry.get("action_label") or "HOLD").upper(),
-        _finite(entry.get("forward_result_pct")),
-        _finite(entry.get("alpha_pct")),
-    )
-
-
 def _walk_cache_key(
     target: dict[str, Any],
     close: pd.Series,
@@ -520,17 +521,6 @@ def _hit_rate_band(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _paper_hit(action: str, forward: float | None, alpha: float | None) -> bool | None:
-    if forward is None:
-        return None
-    evidence = alpha if alpha is not None else forward
-    if action == "BUY":
-        return evidence > 0
-    if action == "SELL":
-        return evidence < 0
-    return evidence >= -1.0
-
-
 def _action(score: float) -> str:
     if score > 0.15:
         return "BUY"
@@ -612,36 +602,3 @@ def _benchmark_close(symbol: str) -> pd.Series | None:
     if inst is None or not provenance.is_real_source(inst.source) or "close" not in inst.df:
         return None
     return inst.df["close"]
-
-
-def _clean_close(close: pd.Series | None) -> pd.Series:
-    if close is None:
-        return pd.Series(dtype=float)
-    out = pd.Series(close).dropna().copy()
-    out.index = pd.to_datetime(out.index, errors="coerce")
-    out = out[~out.index.isna()]
-    if getattr(out.index, "tz", None) is not None:
-        out.index = out.index.tz_localize(None)
-    out.index = out.index.normalize()
-    return pd.to_numeric(out.sort_index(), errors="coerce").dropna()
-
-
-def _avg(values) -> float | None:
-    clean = [float(value) for value in values if _finite(value) is not None]
-    return round(float(np.mean(clean)), 4) if clean else None
-
-
-def _pct(num: int, den: int) -> float | None:
-    return round(float(num) / den * 100, 2) if den else None
-
-
-def _finite(value: Any) -> float | None:
-    return float(value) if isinstance(value, (int, float)) and np.isfinite(value) else None
-
-
-def _dedupe(items: list[str]) -> list[str]:
-    out = []
-    for item in items:
-        if item and item not in out:
-            out.append(item)
-    return out
