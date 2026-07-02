@@ -1153,32 +1153,209 @@ export interface ReportSignalJournalEvidence {
   disclaimer: string;
 }
 
+export interface AnalysisMarker {
+  date: string;
+  type: "buy" | "sell" | string;
+  price: number;
+}
+
+export interface AnalysisSeries {
+  dates: string[];
+  close: Array<number | null>;
+  sma50?: Array<number | null>;
+  sma200?: Array<number | null>;
+  bb_upper?: Array<number | null>;
+  bb_lower?: Array<number | null>;
+  rsi?: Array<number | null>;
+  macd?: Array<number | null>;
+  macd_signal?: Array<number | null>;
+  macd_hist?: Array<number | null>;
+  markers?: AnalysisMarker[];
+}
+
+export interface ForecastBands {
+  p05: Array<number | null>;
+  p25: Array<number | null>;
+  p50: Array<number | null>;
+  p75: Array<number | null>;
+  p95: Array<number | null>;
+}
+
+export interface ForecastQuality {
+  r2?: number | null;
+  rmse?: number | null;
+  directional_accuracy?: number | null;
+  n_test?: number;
+}
+
+export interface ForecastFeatureWeight {
+  feature: string;
+  weight: number;
+}
+
+export interface TacticalForecast {
+  kind?: "short";
+  dates: string[];
+  bands: ForecastBands;
+  horizon_days: number;
+  expected_return_pct: number;
+  prob_up: number;
+  model_daily_drift_pct?: number;
+  annualized_drift_pct?: number;
+  expected_vol_pct?: number;
+  quality?: ForecastQuality;
+  feature_weights?: ForecastFeatureWeight[];
+}
+
+export interface ForecastPercentiles {
+  p05?: number;
+  p25?: number;
+  p50?: number;
+  p75?: number;
+  p95?: number;
+}
+
+export interface LongHorizonForecast {
+  kind: "long";
+  label: string;
+  horizon_days: number;
+  base_value: number;
+  dates: string[];
+  bands: ForecastBands;
+  terminal: ForecastPercentiles;
+  cagr_pct: ForecastPercentiles;
+  prob_positive: number;
+  prob_meets_mandate?: number;
+  mandate_target_pct?: number;
+  drawdown_median_pct?: number;
+  drawdown_p95_pct?: number;
+  prob_breach_maxdd?: number;
+  params?: {
+    mu_long_pct?: number;
+    mu_hist_pct?: number;
+    mu_anchor_pct?: number;
+    anchor_weight_lambda?: number;
+    sigma_ann_pct?: number;
+    sigma_eff_pct?: number;
+    regime_mult?: number;
+    n_paths?: number;
+    step?: string;
+  };
+  disclaimer?: string;
+}
+
+export type AnalysisForecast = TacticalForecast | LongHorizonForecast;
+
+export interface SentimentItem {
+  headline: string;
+  score: number;
+  label: "positive" | "negative" | "neutral" | string;
+}
+
+export interface SentimentPayload {
+  items: SentimentItem[];
+  aggregate_score: number;
+  aggregate_label: string;
+  count: number;
+}
+
+export interface SignalComponent {
+  name: string;
+  raw: number;
+  base_weight: number;
+  effective_weight: number;
+  contribution: number;
+  clause?: string;
+}
+
+export interface AnalysisSignal {
+  action: string;
+  score?: number;
+  conviction_pct: number;
+  conviction_band?: string;
+  vol_penalty?: number;
+  mandate_fit?: number;
+  mandate?: string | null;
+  components?: SignalComponent[];
+  headline_rationale?: string;
+  rationale?: string;
+  caveats?: string[];
+}
+
+export interface BacktestPayload {
+  dates: string[];
+  strategy_curve: Array<number | null>;
+  benchmark_curve: Array<number | null>;
+  strategy: MetricSet;
+  benchmark: MetricSet;
+  n_trades: number;
+  win_rate_pct: number;
+  exposure_pct: number;
+}
+
+export interface AnalysisInsight {
+  id: string;
+  category: string;
+  severity: "high" | "medium" | "low" | string;
+  message: string;
+  suggested_action: string;
+  rationale?: string;
+}
+
+export interface AnalysisMandate {
+  key: string;
+  label: string;
+  description?: string;
+  target_vol_pct?: number;
+  max_drawdown_tolerance_pct?: number;
+  target_return_pct?: number;
+  single_name_cap?: number;
+  growth_orientation?: number;
+  income_orientation?: number;
+  typical_horizons?: string[];
+  weights?: Record<string, number>;
+}
+
+export interface AnalysisHorizon {
+  kind: "short" | "long" | string;
+  value: number;
+  label?: string | null;
+  available_long?: string[];
+}
+
+export interface AnalysisHolding {
+  ticker: string;
+  weight: number;
+  source?: string;
+  window_return_pct?: number | null;
+  mrc_pct?: number | null;
+  excluded?: boolean;
+  note?: string;
+  signal?: string;
+  [key: string]: unknown;
+}
+
 export interface AnalysisResponse {
   symbol?: string;
   id?: string;
   name: string;
   source?: string;
+  context?: string;
   metrics: MetricSet;
-  series: {
-    dates: string[];
-    close: Array<number | null>;
-    sma50?: Array<number | null>;
-    sma200?: Array<number | null>;
-  };
-  signal: {
-    action: string;
-    conviction_pct: number;
-    headline_rationale?: string;
-    rationale?: string;
-    caveats?: string[];
-  };
-  forecast: Record<string, unknown>;
-  backtest: Record<string, unknown>;
-  holdings?: Array<Record<string, unknown>>;
+  series: AnalysisSeries;
+  signal: AnalysisSignal;
+  sentiment?: SentimentPayload;
+  forecast: AnalysisForecast;
+  forecast_short?: TacticalForecast;
+  backtest: BacktestPayload;
+  insights?: AnalysisInsight[];
+  holdings?: AnalysisHolding[];
+  concentration?: { hhi?: number; n_eff?: number; corr_mean?: number };
   warnings?: string[];
   provenance?: Record<string, unknown>;
-  mandate?: { label: string; key: string };
-  horizon?: Record<string, unknown>;
+  mandate?: AnalysisMandate;
+  horizon?: AnalysisHorizon;
+  signal_journal_entry?: Record<string, unknown> | null;
 }
 
 export interface AIStatusResponse {
