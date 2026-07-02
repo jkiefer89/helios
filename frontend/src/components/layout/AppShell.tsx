@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FocusEvent, type FormEvent, type ReactNode } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type FocusEvent, type FormEvent, type ReactNode } from "react";
 import type { DataMode, DataStatusResponse, MandateSummary, ModelSummary, TickerSummary } from "../../api/types";
 import { DataModeBadge, SourcePill } from "../badges/DataModeBadge";
 import { TerminalSelect } from "../forms/TerminalSelect";
@@ -42,6 +42,10 @@ const views: Array<{ id: ViewId; label: string }> = [
   { id: "analysis", label: "Analysis" },
 ];
 
+export function isViewId(value: string): value is ViewId {
+  return views.some((view) => view.id === value);
+}
+
 function compactDataModeLabel(mode: DataMode | undefined, label: string) {
   if (mode === "demo") return "Demo Mode";
   if (mode === "real") return "Live Data";
@@ -51,9 +55,12 @@ function compactDataModeLabel(mode: DataMode | undefined, label: string) {
 }
 
 export function AppShell(props: ShellProps) {
+  const { tickers, models, onViewChange, onSelectInstrument, onSelectModel } = props;
   const [searchQuery, setSearchQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
+  const [searchActiveIndex, setSearchActiveIndex] = useState(0);
   const [advisorOpen, setAdvisorOpen] = useState(false);
+  const searchListId = useId();
   const searchShellRef = useRef<HTMLDivElement | null>(null);
   const advisorShellRef = useRef<HTMLDivElement | null>(null);
   const activeViewLabel = views.find((view) => view.id === props.activeView)?.label || "Workspace";
@@ -70,35 +77,41 @@ export function AppShell(props: ShellProps) {
       key: `view-${view.id}`,
       label: view.label,
       meta: "Workspace",
-      action: () => props.onViewChange(view.id),
+      action: () => onViewChange(view.id),
     }));
-    const instrumentResults = props.tickers.map((ticker) => ({
+    const instrumentResults = tickers.map((ticker) => ({
       key: `instrument-${ticker.symbol}`,
       label: `${ticker.symbol} · ${ticker.name}`,
       meta: `Instrument · ${ticker.source || "source pending"}`,
-      action: () => props.onSelectInstrument(ticker.symbol),
+      action: () => onSelectInstrument(ticker.symbol),
     }));
-    const modelResults = props.models.map((model) => ({
+    const modelResults = models.map((model) => ({
       key: `model-${model.id}`,
       label: model.name,
       meta: `Model · ${model.mandate_label} · ${model.n_holdings} holdings`,
-      action: () => props.onSelectModel(model.id),
+      action: () => onSelectModel(model.id),
     }));
     const all = [...viewResults, ...instrumentResults, ...modelResults];
     if (!query) return all.slice(0, 7);
     return all
       .filter((item) => `${item.label} ${item.meta}`.toLowerCase().includes(query))
       .slice(0, 8);
-  }, [props.models, props.onSelectInstrument, props.onSelectModel, props.onViewChange, props.tickers, searchQuery]);
+  }, [models, onSelectInstrument, onSelectModel, onViewChange, tickers, searchQuery]);
+  const activeResultIndex = Math.min(searchActiveIndex, Math.max(0, searchResults.length - 1));
   const runSearchResult = (result: { action: () => void }) => {
     result.action();
     setSearchOpen(false);
     setSearchQuery("");
+    setSearchActiveIndex(0);
+  };
+  const moveSearchSelection = (direction: -1 | 1) => {
+    if (!searchResults.length) return;
+    setSearchActiveIndex((activeResultIndex + direction + searchResults.length) % searchResults.length);
   };
   const submitSearch = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const first = searchResults[0];
-    if (first) runSearchResult(first);
+    const active = searchResults[activeResultIndex];
+    if (active) runSearchResult(active);
   };
   const runAdvisorAction = (view: ViewId) => {
     props.onViewChange(view);
@@ -140,11 +153,17 @@ export function AppShell(props: ShellProps) {
             <form className="terminal-search" onSubmit={submitSearch}>
               <span aria-hidden="true">/</span>
               <input
+                role="combobox"
                 aria-label="Search instruments, models, and reports"
+                aria-expanded={searchOpen}
+                aria-controls={`${searchListId}-listbox`}
+                aria-autocomplete="list"
+                aria-activedescendant={searchOpen && searchResults[activeResultIndex] ? `${searchListId}-option-${activeResultIndex}` : undefined}
                 placeholder="Search instruments, models, reports..."
                 value={searchQuery}
                 onChange={(event) => {
                   setSearchQuery(event.currentTarget.value);
+                  setSearchActiveIndex(0);
                   setSearchOpen(true);
                 }}
                 onFocus={() => setSearchOpen(true)}
@@ -153,19 +172,33 @@ export function AppShell(props: ShellProps) {
                     setSearchOpen(false);
                     return;
                   }
+                  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                    event.preventDefault();
+                    if (!searchOpen) setSearchOpen(true);
+                    else moveSearchSelection(event.key === "ArrowDown" ? 1 : -1);
+                    return;
+                  }
                   if (event.key !== "Enter") return;
                   event.preventDefault();
-                  const first = searchResults[0];
-                  if (first) runSearchResult(first);
+                  const active = searchResults[activeResultIndex];
+                  if (active) runSearchResult(active);
                 }}
               />
             </form>
             {searchOpen && (
-              <div className="search-popover">
+              <div className="search-popover" id={`${searchListId}-listbox`} role="listbox" aria-label="Search results">
                 {searchResults.length === 0 ? (
                   <span className="search-empty">No matching instruments, models, or views.</span>
-                ) : searchResults.map((result) => (
-                  <button type="button" key={result.key} onClick={() => runSearchResult(result)}>
+                ) : searchResults.map((result, index) => (
+                  <button
+                    type="button"
+                    key={result.key}
+                    id={`${searchListId}-option-${index}`}
+                    role="option"
+                    aria-selected={index === activeResultIndex}
+                    className={index === activeResultIndex ? "active" : ""}
+                    onClick={() => runSearchResult(result)}
+                  >
                     <strong>{result.label}</strong>
                     <small>{result.meta}</small>
                   </button>
@@ -264,7 +297,7 @@ export function AppShell(props: ShellProps) {
           </section>
         </aside>
         <main className="content">
-          {props.notice && <div className="notice">{props.notice}</div>}
+          {props.notice && <div className="notice" role="status" aria-live="polite">{props.notice}</div>}
           {props.children}
         </main>
       </div>

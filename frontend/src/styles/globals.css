@@ -375,7 +375,8 @@ p {
 }
 
 .search-popover button:hover,
-.search-popover button:focus-visible {
+.search-popover button:focus-visible,
+.search-popover button.active {
   background: rgba(76, 157, 255, 0.11);
   color: var(--text);
 }
@@ -4166,6 +4167,312 @@ p {
   border-radius: 6px;
   padding: 0.55rem 0.65rem;
   color: var(--soft);
+}
+
+/* Analysis parity: horizon presets, forecast panels, breakdown, sentiment, mandate fit */
+.horizon-presets {
+  display: inline-flex;
+  gap: 0.3rem;
+  align-self: end;
+}
+
+.horizon-presets button {
+  min-height: var(--control-height);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(8, 13, 21, 0.55);
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 800;
+  padding: 0.3rem 0.55rem;
+}
+
+.horizon-presets button.active {
+  border-color: var(--blue);
+  color: var(--text);
+  background: rgba(76, 157, 255, 0.14);
+}
+
+.forecast-panel {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.forecast-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.oscillator-stack {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.oscillator-stack__label {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.signal-breakdown {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.component-breakdown {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.component-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 160px) minmax(0, 1fr) 52px;
+  gap: 0.6rem;
+  align-items: center;
+}
+
+.component-row__name {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--soft);
+  font-weight: 700;
+}
+
+.weight-chip {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.05rem 0.4rem;
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 800;
+}
+
+.component-track {
+  position: relative;
+  height: 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(8, 13, 21, 0.55);
+  overflow: hidden;
+}
+
+.component-track__zero {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--line-strong);
+}
+
+.component-track__bar {
+  position: absolute;
+  top: 1px;
+  bottom: 1px;
+  border-radius: 999px;
+}
+
+.component-track__bar.is-positive {
+  left: 50%;
+  background: var(--green);
+}
+
+.component-track__bar.is-negative {
+  right: 50%;
+  background: var(--red);
+}
+
+.component-row b {
+  text-align: right;
+}
+
+.clause-list {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.clause-list p {
+  margin: 0;
+  border-left: 2px solid var(--line-strong);
+  padding-left: 0.6rem;
+  color: var(--soft);
+  font-size: 0.78rem;
+}
+
+.feat-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.feat-chip {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(8, 13, 21, 0.55);
+  padding: 0.15rem 0.5rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.sentiment-panel {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.sentiment-panel__aggregate {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  color: var(--muted);
+}
+
+.sentiment-list {
+  display: grid;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sentiment-list li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.6rem;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.5rem 0.6rem;
+  color: var(--soft);
+}
+
+.sent-chip {
+  border-radius: 999px;
+  padding: 0.12rem 0.5rem;
+  font-size: 0.72rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.sent-chip.sent-positive {
+  color: var(--green);
+  background: rgba(71, 214, 111, 0.12);
+}
+
+.sent-chip.sent-negative {
+  color: var(--red);
+  background: rgba(255, 92, 103, 0.12);
+}
+
+.sent-chip.sent-neutral {
+  color: var(--muted);
+  background: rgba(154, 168, 186, 0.12);
+}
+
+.mandate-fit {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.fit-item {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.fit-item__head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.6rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.fit-bar {
+  height: 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(8, 13, 21, 0.55);
+  overflow: hidden;
+}
+
+.fit-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+}
+
+.fit-bar i.is-positive {
+  background: var(--green);
+}
+
+.fit-bar i.is-negative {
+  background: var(--red);
+}
+
+.insights-list {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.insight-card {
+  display: grid;
+  gap: 0.35rem;
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  border-radius: 6px;
+  padding: 0.6rem 0.7rem;
+}
+
+.insight-card.severity-high {
+  border-left-color: var(--red);
+}
+
+.insight-card.severity-medium {
+  border-left-color: var(--amber);
+}
+
+.insight-card.severity-low {
+  border-left-color: var(--blue);
+}
+
+.insight-card__head {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.insight-card__severity {
+  font-size: 0.7rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--amber);
+}
+
+.insight-card.severity-high .insight-card__severity {
+  color: var(--red);
+}
+
+.insight-card.severity-low .insight-card__severity {
+  color: var(--blue);
+}
+
+.insight-card__category {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.insight-card p {
+  margin: 0;
+  color: var(--soft);
+}
+
+.insight-card small {
+  color: var(--muted);
 }
 
 .report-sheet {

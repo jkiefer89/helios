@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
 import type { ClientRiskPack, ModelSummary, RiskAnalyticsResponse } from "../api/types";
 import { DataQualityBanner } from "../components/badges/DataModeBadge";
@@ -6,6 +6,7 @@ import { Panel, StatTile } from "../components/cards/Panel";
 import { DonutChart, MiniBars } from "../components/charts/Charts";
 import { EmptyState } from "../components/empty-states/EmptyState";
 import { TerminalSelect } from "../components/forms/TerminalSelect";
+import { useViewFetch } from "../hooks/useViewFetch";
 import { fmtMoney, fmtNumber, fmtPct, titleCase } from "../utils/format";
 
 export function RiskAnalytics({
@@ -19,9 +20,7 @@ export function RiskAnalytics({
 }) {
   const defaultModelId = selectedModel || models[0]?.id || "";
   const [modelId, setModelId] = useState(defaultModelId);
-  const [payload, setPayload] = useState<RiskAnalyticsResponse | null>(null);
-  const [error, setError] = useState("");
-  const requestSeq = useRef(0);
+  const { payload, error, isLoading, load, isCurrentTarget } = useViewFetch<RiskAnalyticsResponse>({ failureMessage: "Risk analytics failed." });
   const modelOptions = models.length > 0
     ? models.map((model) => ({ value: model.id, label: `${model.name} · ${model.mandate_label}` }))
     : [{ value: "", label: "No models imported" }];
@@ -31,29 +30,17 @@ export function RiskAnalytics({
       .sort((left, right) => right.value - left.value);
   }, [payload]);
 
-  const run = async (requestedModelId = modelId) => {
+  const run = useCallback((requestedModelId: string) => {
     if (!requestedModelId) return;
-    const requestId = requestSeq.current + 1;
-    requestSeq.current = requestId;
-    try {
-      setError("");
-      setPayload(null);
-      onSelectModel(requestedModelId);
-      const result = await api.modelRisk(requestedModelId);
-      if (requestId !== requestSeq.current) return;
-      setPayload(result);
-    } catch (err) {
-      if (requestId !== requestSeq.current) return;
-      setPayload(null);
-      setError(err instanceof Error ? err.message : "Risk analytics failed.");
-    }
-  };
+    onSelectModel(requestedModelId);
+    void load(requestedModelId, () => api.modelRisk(requestedModelId));
+  }, [load, onSelectModel]);
 
   useEffect(() => {
-    if (!defaultModelId) return;
+    if (!defaultModelId || isCurrentTarget(defaultModelId)) return;
     setModelId(defaultModelId);
-    void run(defaultModelId);
-  }, [defaultModelId]);
+    run(defaultModelId);
+  }, [defaultModelId, isCurrentTarget, run]);
 
   return (
     <div className="view-stack">
@@ -63,12 +50,13 @@ export function RiskAnalytics({
           <h1>Risk + portfolio analytics</h1>
           <p>Portfolio-level factor exposure, concentration, stress, liquidity, and benchmark-relative risk from real model histories.</p>
         </div>
-        <form className="toolbar" onSubmit={(event) => { event.preventDefault(); void run(); }}>
+        <form className="toolbar" onSubmit={(event) => { event.preventDefault(); run(modelId); }}>
           <label>Model<TerminalSelect ariaLabel="Risk Analytics model" value={modelId} onChange={setModelId} options={modelOptions} disabled={models.length === 0} /></label>
           <button type="submit" disabled={models.length === 0}>Analyze risk</button>
         </form>
       </header>
-      {error && <div className="notice danger">{error}</div>}
+      {error && <div className="notice danger" role="alert">{error}</div>}
+      {isLoading && <div className="loading" role="status">Loading portfolio-level risk analytics...</div>}
       {models.length === 0 && (
         <Panel title="Risk Analytics Gate" meta="model required">
           <EmptyState title="No model imported" body="Import or upload a model before running portfolio-level risk analytics." />

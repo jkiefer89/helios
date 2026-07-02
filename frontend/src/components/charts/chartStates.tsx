@@ -26,19 +26,3 @@ export function EmptyChartState({ body = "Chart appears when enough history is a
 export function LoadingChartState({ body = "Loading chart renderer...", minHeight }: { body?: string; minHeight?: number }) {
   return <ChartState title="Loading chart" body={body} kind="loading" minHeight={minHeight} />;
 }
-
-export function ErrorChartState({ body = "Chart could not be rendered.", minHeight }: { body?: string; minHeight?: number }) {
-  return <ChartState title="Chart unavailable" body={body} kind="error" minHeight={minHeight} />;
-}
-
-export function LockedChartState({ body = "Chart is locked until more evidence is available.", minHeight }: { body?: string; minHeight?: number }) {
-  return <ChartState title="Chart locked" body={body} kind="locked" minHeight={minHeight} />;
-}
-
-export function DemoChartState({ body = "Demo data is separated from live analysis.", minHeight }: { body?: string; minHeight?: number }) {
-  return <ChartState title="Demo chart" body={body} kind="demo" minHeight={minHeight} />;
-}
-
-export function LiveChartState({ body = "Live chart data is loading.", minHeight }: { body?: string; minHeight?: number }) {
-  return <ChartState title="Live chart" body={body} kind="live" minHeight={minHeight} />;
-}

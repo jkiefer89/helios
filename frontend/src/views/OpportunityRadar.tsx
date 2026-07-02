@@ -1,12 +1,12 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import { api } from "../api/client";
 import type { OpportunitiesResponse, OpportunityItem } from "../api/types";
 import { AICopilotPanel, opportunityCopilotActions } from "../components/ai/AICopilotPanel";
 import { DataQualityBanner, SourcePill } from "../components/badges/DataModeBadge";
 import { Panel } from "../components/cards/Panel";
 import { HistogramChart, ScoreBar, ScoreScatter } from "../components/charts/Charts";
-import { EmptyState } from "../components/empty-states/EmptyState";
 import { TerminalSelect } from "../components/forms/TerminalSelect";
+import { useViewFetch } from "../hooks/useViewFetch";
 import { fmtNumber, fmtPct } from "../utils/format";
 
 export function OpportunityRadar({
@@ -20,39 +20,29 @@ export function OpportunityRadar({
   onOpenInstrument: (symbol: string) => void;
   onOpenModel: (id: string) => void;
 }) {
-  const [payload, setPayload] = useState<OpportunitiesResponse | null>(initialPayload);
   const [kind, setKind] = useState("all");
   const [minScore, setMinScore] = useState(0);
   const [includeHold, setIncludeHold] = useState(true);
   const [sort, setSort] = useState<"opportunity_score" | "evidence_score" | "risk_score">("opportunity_score");
   const [selectedId, setSelectedId] = useState<string>("");
-  const [error, setError] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
-  const requestSeq = useRef(0);
+  const { payload, error, isLoading, load: fetchRadar, isCurrentTarget } = useViewFetch<OpportunitiesResponse>({
+    failureMessage: "Opportunity Radar failed.",
+    keepPayloadWhileLoading: true,
+    initialPayload,
+  });
 
-  const load = async () => {
-    const requestId = requestSeq.current + 1;
-    requestSeq.current = requestId;
-    try {
-      setError("");
-      setIsLoading(true);
-      const next = await api.opportunities({ kind, includeHold, minScore, limit: 50 });
-      if (requestId !== requestSeq.current) return;
-      setPayload(next);
+  const load = useCallback(() => {
+    void fetchRadar("opportunities", () => api.opportunities({ kind, includeHold, minScore, limit: 50 }), (next) => {
       onPayload(next);
       setSelectedId((current) => current || next.items[0]?.id || "");
-    } catch (err) {
-      if (requestId !== requestSeq.current) return;
-      setPayload(null);
-      setError(err instanceof Error ? err.message : "Opportunity Radar failed.");
-    } finally {
-      if (requestId === requestSeq.current) setIsLoading(false);
-    }
-  };
+    });
+  }, [fetchRadar, includeHold, kind, minScore, onPayload]);
 
   useEffect(() => {
-    void load();
-  }, []);
+    // Refresh once on mount; filter changes only apply on explicit Refresh.
+    if (isCurrentTarget("opportunities")) return;
+    load();
+  }, [isCurrentTarget, load]);
 
   const items = useMemo(() => [...(payload?.items || [])].sort((a, b) => {
     const direction = sort === "risk_score" ? -1 : 1;
@@ -106,7 +96,7 @@ export function OpportunityRadar({
           <h1>Ranked real-data review queue</h1>
           <p>Scores use the backend evidence model across signal, forecast, strategy, risk, data quality, and regime compatibility.</p>
         </div>
-        <form className="toolbar" onSubmit={(event) => { event.preventDefault(); void load(); }}>
+        <form className="toolbar" onSubmit={(event) => { event.preventDefault(); load(); }}>
           <label>Kind<TerminalSelect ariaLabel="Opportunity kind" value={kind} onChange={setKind} options={[
             { value: "all", label: "All" },
             { value: "instrument", label: "Instruments" },
@@ -122,7 +112,7 @@ export function OpportunityRadar({
           <button type="submit">Refresh</button>
         </form>
       </header>
-      {error && <div className="notice danger">{error}</div>}
+      {error && <div className="notice danger" role="alert">{error}</div>}
       {items.length > 0 && (
         <section className="dashboard-grid">
           <Panel title="Opportunity Score Map" meta="return/risk review">

@@ -1,58 +1,99 @@
 import type { EChartsOption, SeriesOption } from "echarts";
-import { chartAlpha, chartLegend, HELIOS_CHART_FORMATTERS, toneColor } from "../chartTheme";
+import { chartAlpha, chartLegend, HELIOS_CHART_COLORS, HELIOS_CHART_FORMATTERS, toneColor } from "../chartTheme";
 import { lineOption } from "./equity";
 
 export type ForecastConePoint = {
   date: string;
-  expected: number | null;
-  low?: number | null;
-  high?: number | null;
+  actual?: number | null;
+  median: number | null;
+  p05?: number | null;
+  p25?: number | null;
+  p75?: number | null;
+  p95?: number | null;
 };
 
-export function forecastConeOption(points: ForecastConePoint[]): EChartsOption {
-  const dates = points.map((point) => point.date);
-  const lows = points.map((point) => point.low ?? null);
-  const bands = points.map((point) => {
-    if (typeof point.low !== "number" || typeof point.high !== "number") return null;
-    return point.high - point.low;
+/** Invisible lower line + width series that stack into a percentile band fill. */
+function bandPair(
+  name: string,
+  stack: string,
+  lows: Array<number | null>,
+  highs: Array<number | null>,
+  fill: string,
+): SeriesOption[] {
+  const widths = lows.map((low, index) => {
+    const high = highs[index];
+    if (typeof low !== "number" || typeof high !== "number") return null;
+    return high - low;
   });
-  const series: SeriesOption[] = [
+  return [
     {
-      name: "Lower bound",
+      name: `${name} base`,
       type: "line",
       data: lows,
       showSymbol: false,
-      stack: "confidence-band",
+      stack,
       lineStyle: { opacity: 0 },
       tooltip: { show: false },
       emphasis: { disabled: true },
     },
     {
-      name: "Confidence band",
+      name,
       type: "line",
-      data: bands,
+      data: widths,
       showSymbol: false,
-      stack: "confidence-band",
+      stack,
       lineStyle: { opacity: 0 },
-      areaStyle: { color: chartAlpha("info", 0.15) },
+      areaStyle: { color: fill },
       tooltip: { show: false },
-      emphasis: { focus: "series" },
+      emphasis: { disabled: true },
     },
+  ];
+}
+
+export function forecastConeOption(points: ForecastConePoint[], baseline?: number): EChartsOption {
+  const dates = points.map((point) => point.date);
+  const pick = (key: keyof ForecastConePoint) => points.map((point) => {
+    const value = point[key];
+    return typeof value === "number" && Number.isFinite(value) ? value : null;
+  });
+  const series: SeriesOption[] = [
+    ...bandPair("P05–P95 band", "outer-band", pick("p05"), pick("p95"), chartAlpha("info", 0.1)),
+    ...bandPair("P25–P75 band", "inner-band", pick("p25"), pick("p75"), chartAlpha("info", 0.18)),
     {
-      name: "Expected",
+      name: "Median path",
       type: "line",
-      data: points.map((point) => point.expected),
+      data: pick("median"),
       showSymbol: false,
-      smooth: true,
-      lineStyle: { width: 2.2, color: toneColor("info") },
+      lineStyle: { width: 2, color: toneColor("info"), type: "dashed" },
       itemStyle: { color: toneColor("info") },
       emphasis: { focus: "series" },
     },
+    {
+      name: "Actual",
+      type: "line",
+      data: pick("actual"),
+      showSymbol: false,
+      lineStyle: { width: 1.8, color: HELIOS_CHART_COLORS.text },
+      itemStyle: { color: HELIOS_CHART_COLORS.text },
+      emphasis: { focus: "series" },
+    },
   ];
+  if (typeof baseline === "number" && Number.isFinite(baseline)) {
+    series.push({
+      name: "Start",
+      type: "line",
+      data: dates.map(() => baseline),
+      showSymbol: false,
+      lineStyle: { width: 1, color: HELIOS_CHART_COLORS.neutral, type: "dashed" },
+      itemStyle: { color: HELIOS_CHART_COLORS.neutral },
+      tooltip: { show: false },
+      emphasis: { disabled: true },
+    });
+  }
   return {
     ...lineOption(dates, series, HELIOS_CHART_FORMATTERS.price),
     legend: chartLegend({
-      data: ["Expected", "Confidence band"],
+      data: ["Actual", "Median path", "P25–P75 band", "P05–P95 band"],
     }),
   };
 }

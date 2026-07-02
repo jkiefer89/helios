@@ -158,7 +158,7 @@ export function AICopilotPanel({
         </button>
       </form>
 
-      {error && <div className="notice danger">{error}</div>}
+      {error && <div className="notice danger" role="alert">{error}</div>}
       {result && <AIResultView result={result} />}
     </section>
   );

@@ -5,8 +5,6 @@ import { Panel } from "../components/cards/Panel";
 import { EmptyState } from "../components/empty-states/EmptyState";
 import { fmtNumber, fmtPct } from "../utils/format";
 
-const GOVERNANCE_SOURCE_LABEL = "api.modelGovernance";
-
 export function Models({
   models,
   governance,

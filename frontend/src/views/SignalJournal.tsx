@@ -52,7 +52,7 @@ export function SignalJournal() {
         </form>
       </header>
 
-      {error && <div className="notice danger">{error}</div>}
+      {error && <div className="notice danger" role="alert">{error}</div>}
       {!payload ? (
         <EmptyState title="Signal Journal unavailable" body="The backend did not return paper-performance journal data." />
       ) : payload.entries.length === 0 ? (

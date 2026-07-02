@@ -42,7 +42,7 @@ export function DataQuality() {
         </form>
       </header>
 
-      {error && <div className="notice danger">{error}</div>}
+      {error && <div className="notice danger" role="alert">{error}</div>}
       {payload ? (
         <>
           <section className="dashboard-grid three">
