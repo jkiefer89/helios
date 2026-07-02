@@ -2348,7 +2348,18 @@ kbd {
 
 .risk-pack-table .terminal-table__head,
 .risk-pack-table .table-row {
-  grid-template-columns: minmax(140px, 1.5fr) 88px minmax(110px, 1fr);
+  grid-template-columns: minmax(130px, 1.4fr) 88px minmax(130px, 1.2fr);
+}
+
+.risk-pack-table .table-row span {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.risk-pack-table small {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
 }
 
 .liquidity-table .terminal-table__head,
@@ -2765,6 +2776,12 @@ kbd {
   font-style: normal;
   color: var(--faint);
   white-space: nowrap;
+}
+
+.regime-panel-head i::before {
+  content: "·";
+  margin-right: 0.45rem;
+  color: var(--faint);
 }
 
 .info-mark {
@@ -4259,9 +4276,19 @@ button.locked-table-row:hover {
 
 .detail-title {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
-  gap: 1rem;
+  gap: 0.6rem 1rem;
   align-items: flex-start;
+}
+
+.detail-title > div {
+  min-width: 0;
+  flex: 1 1 220px;
+}
+
+.detail-title strong {
+  overflow-wrap: anywhere;
 }
 
 .detail-title strong {

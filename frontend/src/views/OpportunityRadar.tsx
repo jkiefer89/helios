@@ -53,7 +53,7 @@ export function OpportunityRadar({
     x: item.risk_score,
     y: item.opportunity_score,
     size: Math.max(5, Math.min(11, item.evidence_score / 10)),
-    tone: safeActionTone(item.action),
+    tone: actionChartTone(item.action),
     meta: `${fmtNumber(item.evidence_score, 1)} evidence`,
   })), [items]);
   const opportunityScores = useMemo(() => items.map((item) => item.opportunity_score), [items]);
@@ -301,4 +301,15 @@ function safeActionTone(action?: string) {
   const normalized = (action || "").toLowerCase();
   if (normalized === "buy" || normalized === "sell" || normalized === "hold" || normalized === "review") return normalized;
   return "review";
+}
+
+// Chart dots use the shared status palette: favorable green, risk red,
+// caution amber, neutral gray — never the raw action word (which the chart
+// theme would silently drop to neutral).
+function actionChartTone(action?: string) {
+  const normalized = safeActionTone(action);
+  if (normalized === "buy") return "positive";
+  if (normalized === "sell") return "negative";
+  if (normalized === "review") return "warning";
+  return "neutral";
 }

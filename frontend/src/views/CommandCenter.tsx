@@ -600,7 +600,9 @@ function buildStatusItems(payload: CommandCenterResponse, sourceStatus: string, 
   return [
     { tone: payload.eligible_for_real_research ? "positive" : "warning", label: `Market Data: ${modeLabel}`, view: "instruments" },
     { tone: sourceTone, label: sourceLabel, view: "reports" },
-    { tone: "warning", label: "Research: gated until provenance passes", view: "opportunities" },
+    payload.eligible_for_real_research
+      ? { tone: "positive" as const, label: "Research: unlocked by provenance checks", view: "opportunities" as const }
+      : { tone: "warning" as const, label: "Research: gated until provenance passes", view: "opportunities" as const },
     { tone: "warning", label: generatedLabel.replace("Data as of ", "Models: "), view: "models" },
   ];
 }
