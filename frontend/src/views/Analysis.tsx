@@ -1,12 +1,38 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
-import type { AnalysisResponse, DataMode, ModelSummary, ProvenancePayload, TickerSummary } from "../api/types";
+import type {
+  AnalysisHolding,
+  AnalysisInsight,
+  AnalysisMandate,
+  AnalysisResponse,
+  AnalysisSeries,
+  AnalysisSignal,
+  BacktestPayload,
+  DataMode,
+  ForecastBands,
+  LongHorizonForecast,
+  MetricSet,
+  ModelSummary,
+  ProvenancePayload,
+  SentimentPayload,
+  TacticalForecast,
+  TickerSummary,
+} from "../api/types";
 import { DataQualityBanner, SourcePill } from "../components/badges/DataModeBadge";
 import { Panel, StatTile } from "../components/cards/Panel";
-import { DrawdownChart, HistogramChart, PriceTrendChart } from "../components/charts/Charts";
+import {
+  ChartSummary,
+  DrawdownChart,
+  EquityCurveChart,
+  ForecastConeChart,
+  HistogramChart,
+  MacdChart,
+  PriceTrendChart,
+  RsiChart,
+} from "../components/charts/Charts";
 import { EmptyState } from "../components/empty-states/EmptyState";
 import { TerminalSelect } from "../components/forms/TerminalSelect";
-import { fmtAuto, fmtNumber, fmtPct, titleCase } from "../utils/format";
+import { fmtAuto, fmtMoney, fmtNumber, fmtPct, titleCase } from "../utils/format";
 
 export function Analysis({
   tickers,
@@ -92,6 +118,7 @@ function AnalysisPayload({ payload }: { payload: AnalysisResponse }) {
   const panelSuffix = eligible ? "" : " preview";
   const dailyReturns = pctReturns(payload.series.close);
   const drawdown = drawdownSeries(payload.series.close);
+  const tactical = payload.forecast.kind === "long" ? payload.forecast_short : payload.forecast;
   return (
     <>
       <DataQualityBanner payload={quality} />
@@ -112,16 +139,31 @@ function AnalysisPayload({ payload }: { payload: AnalysisResponse }) {
             ))}
           </div>
         </Panel>
-        <Panel title={`Forecast${panelSuffix}`}>
-          <KeyObject data={payload.forecast} />
-        </Panel>
-        <Panel title={`Backtest${panelSuffix}`}>
-          <KeyObject data={payload.backtest} />
-        </Panel>
+        <SentimentPanel sentiment={payload.sentiment} suffix={panelSuffix} />
+        <SignalBreakdownPanel signal={payload.signal} forecast={tactical} suffix={panelSuffix} />
       </section>
       <section className="dashboard-grid">
-        <Panel title={`Price and Trend${panelSuffix}`} className="span-2">
-          <PriceTrendChart labels={payload.series.dates} close={payload.series.close} sma50={payload.series.sma50 || []} sma200={payload.series.sma200 || []} />
+        <Panel title={`Price, Trend & Bollinger Bands${panelSuffix}`} className="span-2" meta={markerNote(payload.series)}>
+          <PriceTrendChart
+            labels={payload.series.dates}
+            close={payload.series.close}
+            sma50={payload.series.sma50 || []}
+            sma200={payload.series.sma200 || []}
+            bbUpper={payload.series.bb_upper || []}
+            bbLower={payload.series.bb_lower || []}
+            markers={payload.series.markers || []}
+          />
+        </Panel>
+        <Panel title={`RSI${panelSuffix}`} meta="70 overbought · 30 oversold">
+          <RsiChart labels={payload.series.dates} values={payload.series.rsi || []} />
+        </Panel>
+        <Panel title={`MACD${panelSuffix}`}>
+          <MacdChart
+            labels={payload.series.dates}
+            macd={payload.series.macd || []}
+            signal={payload.series.macd_signal || []}
+            hist={payload.series.macd_hist || []}
+          />
         </Panel>
         <Panel title={`Drawdown${panelSuffix}`}>
           <DrawdownChart labels={payload.series.dates} values={drawdown} height={160} />
@@ -130,15 +172,23 @@ function AnalysisPayload({ payload }: { payload: AnalysisResponse }) {
           <HistogramChart values={dailyReturns} label="Daily return %" buckets={9} tone={eligible ? "info" : "warning"} />
         </Panel>
       </section>
+      <section className="dashboard-grid">
+        <ForecastPanel payload={payload} suffix={panelSuffix} />
+        {payload.mandate && <MandateFitPanel metrics={payload.metrics} mandate={payload.mandate} signal={payload.signal} suffix={panelSuffix} />}
+        {payload.insights && <InsightsPanel insights={payload.insights} suffix={panelSuffix} />}
+      </section>
+      <section className="dashboard-grid">
+        <BacktestPanel backtest={payload.backtest} suffix={panelSuffix} />
+      </section>
       {payload.holdings && (
         <Panel title={`Holdings${panelSuffix}`}>
           <div className="holdings-table">
-            {payload.holdings.map((holding) => (
-              <div key={String(holding.ticker)}>
-                <strong>{String(holding.ticker)}</strong>
-                <span>{fmtPct(Number(holding.weight) * 100)}</span>
-                <span>{String(holding.source || "unavailable")}</span>
-                <span>{String(holding.signal || "—")}</span>
+            {payload.holdings.map((holding: AnalysisHolding) => (
+              <div key={holding.ticker}>
+                <strong>{holding.ticker}</strong>
+                <span>{fmtPct(holding.weight * 100)}</span>
+                <span>{holding.source || "unavailable"}</span>
+                <span>{holding.signal || "—"}</span>
               </div>
             ))}
           </div>
@@ -146,6 +196,305 @@ function AnalysisPayload({ payload }: { payload: AnalysisResponse }) {
       )}
     </>
   );
+}
+
+function ForecastPanel({ payload, suffix }: { payload: AnalysisResponse; suffix: string }) {
+  const forecast = payload.forecast;
+  if (forecast.kind === "long") {
+    return <LongForecastPanel forecast={forecast} mandate={payload.mandate} suffix={suffix} />;
+  }
+  return <TacticalForecastPanel forecast={forecast} series={payload.series} suffix={suffix} />;
+}
+
+function TacticalForecastPanel({ forecast, series, suffix }: { forecast: TacticalForecast; series: AnalysisSeries; suffix: string }) {
+  const accuracy = forecast.quality?.directional_accuracy;
+  return (
+    <Panel
+      title={`Return Forecast & Confidence Cone${suffix}`}
+      className="span-2"
+      meta={`${forecast.horizon_days}d horizon · p(up) ${fmtNumber(forecast.prob_up * 100, 0)}%`}
+    >
+      <ChartSummary items={[
+        { label: "Expected return", value: fmtPct(forecast.expected_return_pct), tone: signTone(forecast.expected_return_pct) },
+        { label: "Annualized drift", value: fmtPct(forecast.annualized_drift_pct), tone: signTone(forecast.annualized_drift_pct) },
+        { label: "Expected vol", value: `${fmtNumber(forecast.expected_vol_pct, 1)}%` },
+        { label: "Dir. accuracy", value: accuracy == null ? "—" : `${fmtNumber(accuracy * 100, 1)}%` },
+      ]} />
+      <ForecastConeChart points={tacticalConePoints(series, forecast)} />
+    </Panel>
+  );
+}
+
+function LongForecastPanel({ forecast, mandate, suffix }: { forecast: LongHorizonForecast; mandate?: AnalysisMandate; suffix: string }) {
+  const cagr = forecast.cagr_pct || {};
+  const terminal = forecast.terminal || {};
+  const params = forecast.params || {};
+  const breachProb = forecast.prob_breach_maxdd;
+  const tolerance = mandate?.max_drawdown_tolerance_pct;
+  return (
+    <Panel
+      title={`${forecast.label} Strategic Value Projection ($10,000 base)${suffix}`}
+      className="span-2"
+      meta={`drift ${fmtPct(params.mu_long_pct)}/yr (λ${fmtNumber(params.anchor_weight_lambda, 2)} to anchor) · vol ${fmtNumber(params.sigma_eff_pct, 1)}%`}
+    >
+      <ChartSummary items={[
+        { label: "Median value", value: fmtMoney(terminal.p50) },
+        { label: "Median CAGR", value: fmtPct(cagr.p50), tone: signTone(cagr.p50) },
+        { label: "P05–P95 CAGR", value: `${fmtNumber(cagr.p05, 1)}% … ${fmtNumber(cagr.p95, 1)}%` },
+        { label: "Prob. positive", value: forecast.prob_positive == null ? "—" : `${fmtNumber(forecast.prob_positive * 100, 0)}%` },
+        { label: `Meets ${fmtNumber(forecast.mandate_target_pct, 1)}% target`, value: forecast.prob_meets_mandate == null ? "—" : `${fmtNumber(forecast.prob_meets_mandate * 100, 0)}%` },
+        { label: "Median path drawdown", value: `${fmtNumber(forecast.drawdown_median_pct, 0)}%`, tone: signTone(forecast.drawdown_median_pct) },
+        { label: tolerance != null ? `Breach −${fmtNumber(tolerance, 0)}% tolerance` : "Breach drawdown tolerance", value: breachProb == null ? "—" : `${fmtNumber(breachProb * 100, 0)}%`, tone: breachProb == null ? "neutral" : breachProb > 0.2 ? "negative" : "positive" },
+        { label: "Value range", value: `${fmtMoney(terminal.p05)} – ${fmtMoney(terminal.p95)}` },
+      ]} />
+      <ForecastConeChart points={longConePoints(forecast)} baseline={forecast.base_value} />
+      {forecast.disclaimer && <p className="muted">{forecast.disclaimer}</p>}
+    </Panel>
+  );
+}
+
+function SentimentPanel({ sentiment, suffix }: { sentiment?: SentimentPayload; suffix: string }) {
+  const label = sentiment?.aggregate_label || "neutral";
+  const tone = label === "positive" ? "positive" : label === "negative" ? "negative" : "neutral";
+  return (
+    <Panel
+      title={`News Sentiment${suffix}`}
+      meta={sentiment ? <span className={`badge tone-${tone}`}>{label} ({fmtSigned(sentiment.aggregate_score, 2)})</span> : undefined}
+    >
+      {!sentiment || !sentiment.items.length ? (
+        <p className="muted">No headlines available for this target.</p>
+      ) : (
+        <div>
+          {sentiment.items.map((item, index) => (
+            <div className="queue-line" key={`${item.headline}-${index}`}>
+              <span>{item.label}</span>
+              <strong>{item.headline}</strong>
+              <p>sentiment score {fmtSigned(item.score, 2)}</p>
+            </div>
+          ))}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+function SignalBreakdownPanel({ signal, forecast, suffix }: { signal: AnalysisSignal; forecast?: TacticalForecast; suffix: string }) {
+  const components = signal.components || [];
+  const featureWeights = (forecast?.feature_weights || []).slice(0, 6);
+  const maxAbs = Math.max(...components.map((component) => Math.abs(component.contribution)), 0.25);
+  const clauses = [...components]
+    .sort((a, b) => Math.abs(b.contribution) - Math.abs(a.contribution))
+    .filter((component) => component.clause);
+  const mandateFit = signal.mandate_fit;
+  return (
+    <Panel
+      title={`Signal Component Breakdown${suffix}`}
+      meta={mandateFit != null && mandateFit < 1 ? `conviction scaled ×${fmtNumber(mandateFit, 2)} for mandate fit` : undefined}
+    >
+      {!components.length ? (
+        <p className="muted">Component attribution appears when the composite signal is available.</p>
+      ) : (
+        <>
+          <div className="mini-bars">
+            {components.map((component) => (
+              <div className="mini-bars__row" key={component.name}>
+                <span>{titleCase(component.name)} · {fmtNumber(component.effective_weight * 100, 0)}% wt</span>
+                <div>
+                  <i
+                    className={component.contribution >= 0 ? "tone-positive" : "tone-negative"}
+                    style={{ width: `${Math.min(100, (Math.abs(component.contribution) / maxAbs) * 100)}%` }}
+                  />
+                </div>
+                <b>{fmtSigned(component.contribution, 2)}</b>
+              </div>
+            ))}
+          </div>
+          {clauses.map((component) => <p className="muted" key={`clause-${component.name}`}>{component.clause}</p>)}
+        </>
+      )}
+      {featureWeights.length > 0 && (
+        <ChartSummary items={featureWeights.map((feature) => ({ label: feature.feature, value: fmtSigned(feature.weight, 3) }))} />
+      )}
+    </Panel>
+  );
+}
+
+function MandateFitPanel({ metrics, mandate, signal, suffix }: { metrics: MetricSet; mandate: AnalysisMandate; signal: AnalysisSignal; suffix: string }) {
+  const vol = asNumber(metrics.annual_vol_pct);
+  const targetVol = mandate.target_vol_pct;
+  const dd = asNumber(metrics.max_drawdown_pct);
+  const tolerance = mandate.max_drawdown_tolerance_pct;
+  const annualReturn = asNumber(metrics.annual_return_pct);
+  const targetReturn = mandate.target_return_pct;
+  const rows: Array<{ label: string; value: string; width: number; ok: boolean }> = [];
+  if (vol != null && targetVol) {
+    rows.push({
+      label: `Volatility vs ≤${fmtNumber(targetVol, 0)}% target`,
+      value: `${fmtNumber(vol, 1)}%`,
+      width: Math.min((vol / (targetVol * 2)) * 100, 100),
+      ok: vol <= targetVol * 1.15,
+    });
+  }
+  if (dd != null && tolerance) {
+    const drawdownAbs = Math.abs(dd);
+    rows.push({
+      label: `Max drawdown vs −${fmtNumber(tolerance, 0)}% tolerance`,
+      value: `−${fmtNumber(drawdownAbs, 1)}%`,
+      width: Math.min((drawdownAbs / (tolerance * 2)) * 100, 100),
+      ok: drawdownAbs <= tolerance,
+    });
+  }
+  if (annualReturn != null && targetReturn != null) {
+    rows.push({
+      label: `Return vs ${fmtNumber(targetReturn, 1)}% mandate target`,
+      value: fmtPct(annualReturn),
+      width: Math.min((Math.max(annualReturn, 0) / Math.max(targetReturn * 2, 1)) * 100, 100),
+      ok: annualReturn >= targetReturn,
+    });
+  }
+  return (
+    <Panel
+      title={`Mandate Fit${suffix}`}
+      meta={signal.mandate_fit != null ? `signal conviction scaled ×${fmtNumber(signal.mandate_fit, 2)} for mandate fit` : undefined}
+    >
+      {!rows.length ? (
+        <p className="muted">Mandate-fit bars appear when mandate risk budgets are available.</p>
+      ) : (
+        <div className="mini-bars">
+          {rows.map((row) => (
+            <div className="mini-bars__row" key={row.label}>
+              <span>{row.label}</span>
+              <div><i className={row.ok ? "tone-positive" : "tone-negative"} style={{ width: `${row.width}%` }} /></div>
+              <b>{row.value}</b>
+            </div>
+          ))}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+function InsightsPanel({ insights, suffix }: { insights: AnalysisInsight[]; suffix: string }) {
+  return (
+    <Panel
+      title={`Model Insights${suffix}`}
+      meta={insights.length ? `${insights.length} finding${insights.length > 1 ? "s" : ""}` : "no issues flagged"}
+    >
+      {!insights.length ? (
+        <p className="muted">No mandate, concentration, or risk issues flagged for this model.</p>
+      ) : (
+        <div>
+          {insights.map((insight, index) => (
+            <div className="queue-line" key={`${insight.id}-${index}`}>
+              <span>{insight.severity}</span>
+              <strong>{titleCase(insight.category)}: {insight.message}</strong>
+              <p>{insight.suggested_action}</p>
+            </div>
+          ))}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+function BacktestPanel({ backtest, suffix }: { backtest: BacktestPayload; suffix: string }) {
+  const strategy = backtest.strategy || {};
+  const benchmark = backtest.benchmark || {};
+  const strategyVol = asNumber(strategy.annual_vol_pct);
+  const benchmarkVol = asNumber(benchmark.annual_vol_pct);
+  const volReduction = strategyVol != null && benchmarkVol != null ? benchmarkVol - strategyVol : null;
+  return (
+    <Panel title={`Signal Backtest vs Buy & Hold${suffix}`} className="span-2">
+      <ChartSummary items={[
+        { label: "Strategy return", value: fmtPct(strategy.total_return_pct), tone: signTone(strategy.total_return_pct) },
+        { label: "Buy & hold", value: fmtPct(benchmark.total_return_pct), tone: signTone(benchmark.total_return_pct) },
+        { label: "Strategy Sharpe", value: fmtNumber(strategy.sharpe, 2) },
+        { label: "Strategy max DD", value: `${fmtNumber(strategy.max_drawdown_pct, 1)}%` },
+        { label: "Win rate", value: `${fmtNumber(backtest.win_rate_pct, 0)}%` },
+        { label: "Trades", value: String(backtest.n_trades ?? "—") },
+        { label: "Time in market", value: `${fmtNumber(backtest.exposure_pct, 0)}%` },
+        { label: "Vol reduction", value: volReduction == null ? "—" : `${fmtNumber(volReduction, 1)}%`, tone: signTone(volReduction ?? undefined) },
+      ]} />
+      <EquityCurveChart labels={backtest.dates || []} strategy={backtest.strategy_curve || []} benchmark={backtest.benchmark_curve || []} height={200} />
+    </Panel>
+  );
+}
+
+type ConePoint = {
+  date: string;
+  expected?: number | null;
+  low?: number | null;
+  high?: number | null;
+  innerLow?: number | null;
+  innerHigh?: number | null;
+  history?: number | null;
+};
+
+function tacticalConePoints(series: AnalysisSeries, forecast: TacticalForecast): ConePoint[] {
+  const tail = 60;
+  const dates = series.dates.slice(-tail);
+  const close = series.close.slice(-tail);
+  const points: ConePoint[] = dates.map((date, index) => ({ date, history: close[index] ?? null }));
+  const anchor = [...close].reverse().find((value): value is number => typeof value === "number" && Number.isFinite(value));
+  if (points.length && typeof anchor === "number") {
+    points[points.length - 1] = {
+      ...points[points.length - 1],
+      expected: anchor,
+      low: anchor,
+      high: anchor,
+      innerLow: anchor,
+      innerHigh: anchor,
+    };
+  }
+  const bands: Partial<ForecastBands> = forecast.bands || {};
+  (forecast.dates || []).forEach((date, index) => {
+    points.push({
+      date,
+      expected: bands.p50?.[index] ?? null,
+      low: bands.p05?.[index] ?? null,
+      high: bands.p95?.[index] ?? null,
+      innerLow: bands.p25?.[index] ?? null,
+      innerHigh: bands.p75?.[index] ?? null,
+    });
+  });
+  return points;
+}
+
+function longConePoints(forecast: LongHorizonForecast): ConePoint[] {
+  const base = forecast.base_value;
+  const bands: Partial<ForecastBands> = forecast.bands || {};
+  return [
+    { date: "Now", expected: base, low: base, high: base, innerLow: base, innerHigh: base },
+    ...(forecast.dates || []).map((date, index) => ({
+      date,
+      expected: bands.p50?.[index] ?? null,
+      low: bands.p05?.[index] ?? null,
+      high: bands.p95?.[index] ?? null,
+      innerLow: bands.p25?.[index] ?? null,
+      innerHigh: bands.p75?.[index] ?? null,
+    })),
+  ];
+}
+
+function markerNote(series: AnalysisSeries): string | undefined {
+  const markers = series.markers || [];
+  if (!markers.length) return undefined;
+  const buys = markers.filter((marker) => marker.type === "buy").length;
+  return `${buys} buy · ${markers.length - buys} sell signals`;
+}
+
+function signTone(value?: number): "positive" | "negative" | "neutral" {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "neutral";
+  return value >= 0 ? "positive" : "negative";
+}
+
+function fmtSigned(value: unknown, digits = 2): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "—";
+  return `${value >= 0 ? "+" : ""}${value.toFixed(digits)}`;
+}
+
+function asNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function safeAction(action?: string) {
@@ -191,22 +540,6 @@ function analysisQuality(payload: AnalysisResponse): ProvenancePayload {
       data_mode: mode,
     },
   };
-}
-
-function KeyObject({ data }: { data: Record<string, unknown> }) {
-  return (
-    <div className="key-values dense">
-      {Object.entries(data).slice(0, 12).map(([key, value]) => (
-        <span key={key}><b>{displayValue(value)}</b><small>{titleCase(key)}</small></span>
-      ))}
-    </div>
-  );
-}
-
-function displayValue(value: unknown): string {
-  if (Array.isArray(value)) return `${value.length} items`;
-  if (value && typeof value === "object") return "Details";
-  return fmtAuto(value);
 }
 
 function pctReturns(values: Array<number | null>): Array<number | null> {

@@ -4,8 +4,13 @@ import { fmtNumber } from "../../utils/format";
 import { EmptyChartState, LoadingChartState } from "./chartStates";
 import { drawdownOption } from "./adapters/drawdown";
 import { equityCurveOption } from "./adapters/equity";
+import { forecastConeOption } from "./adapters/forecastCone";
+import type { ForecastConePoint } from "./adapters/forecastCone";
+import { macdOption } from "./adapters/macd";
 import { priceTrendOption } from "./adapters/priceTrend";
+import type { PriceTrendMarker } from "./adapters/priceTrend";
 import { rollingSharpeOption } from "./adapters/rollingSharpe";
+import { rsiOption } from "./adapters/rsi";
 
 type ChartTone = "positive" | "negative" | "warning" | "info" | "neutral";
 type ChartPoint = { label: string; x: number; y: number; size?: number; tone?: string; meta?: string };
@@ -284,12 +289,18 @@ export function PriceTrendChart({
   close,
   sma50,
   sma200,
+  bbUpper,
+  bbLower,
+  markers,
   height = 220,
 }: {
   labels: string[];
   close: NullableNumber[];
   sma50?: NullableNumber[];
   sma200?: NullableNumber[];
+  bbUpper?: NullableNumber[];
+  bbLower?: NullableNumber[];
+  markers?: PriceTrendMarker[];
   height?: number;
 }) {
   const points = labels.map((date, index) => ({
@@ -297,11 +308,99 @@ export function PriceTrendChart({
     close: chartNumber(close[index]),
     sma50: chartNumber(sma50?.[index]),
     sma200: chartNumber(sma200?.[index]),
+    bbUpper: chartNumber(bbUpper?.[index]),
+    bbLower: chartNumber(bbLower?.[index]),
   }));
   if (!hasEnoughPoints(points.map((point) => point.close))) {
     return <EmptyChartState body="Price trend appears when enough price history is available." minHeight={height} />;
   }
-  return <LazyHeliosEChart option={priceTrendOption(points)} height={height} ariaLabel="Price and moving-average trend chart" />;
+  return (
+    <LazyHeliosEChart
+      option={priceTrendOption(points, markers || [])}
+      height={height}
+      ariaLabel="Price chart with moving averages, Bollinger bands and signal markers"
+    />
+  );
+}
+
+export function ForecastConeChart({
+  points,
+  baseline,
+  height = 240,
+}: {
+  points: Array<{
+    date: string;
+    expected?: NullableNumber;
+    low?: NullableNumber;
+    high?: NullableNumber;
+    innerLow?: NullableNumber;
+    innerHigh?: NullableNumber;
+    history?: NullableNumber;
+  }>;
+  baseline?: number;
+  height?: number;
+}) {
+  const clean: ForecastConePoint[] = points.map((point) => ({
+    date: point.date,
+    expected: chartNumber(point.expected),
+    low: chartNumber(point.low),
+    high: chartNumber(point.high),
+    innerLow: chartNumber(point.innerLow),
+    innerHigh: chartNumber(point.innerHigh),
+    history: chartNumber(point.history),
+  }));
+  const drawable = clean.filter((point) => point.expected != null || point.history != null);
+  if (drawable.length < 2) {
+    return <EmptyChartState body="Forecast cone appears when forecast bands are available." minHeight={height} />;
+  }
+  return (
+    <LazyHeliosEChart
+      option={forecastConeOption(clean, { baseline })}
+      height={height}
+      ariaLabel="Forecast confidence cone chart"
+    />
+  );
+}
+
+export function RsiChart({
+  labels,
+  values,
+  height = 160,
+}: {
+  labels: string[];
+  values: NullableNumber[];
+  height?: number;
+}) {
+  const points = labels.map((date, index) => ({ date, rsi: chartNumber(values[index]) }));
+  if (!hasEnoughPoints(points.map((point) => point.rsi))) {
+    return <EmptyChartState body="RSI appears when enough indicator history is available." minHeight={height} />;
+  }
+  return <LazyHeliosEChart option={rsiOption(points)} height={height} ariaLabel="RSI oscillator chart" />;
+}
+
+export function MacdChart({
+  labels,
+  macd,
+  signal,
+  hist,
+  height = 160,
+}: {
+  labels: string[];
+  macd: NullableNumber[];
+  signal?: NullableNumber[];
+  hist?: NullableNumber[];
+  height?: number;
+}) {
+  const points = labels.map((date, index) => ({
+    date,
+    macd: chartNumber(macd[index]),
+    signal: chartNumber(signal?.[index]),
+    hist: chartNumber(hist?.[index]),
+  }));
+  if (!hasEnoughPoints(points.map((point) => point.macd))) {
+    return <EmptyChartState body="MACD appears when enough indicator history is available." minHeight={height} />;
+  }
+  return <LazyHeliosEChart option={macdOption(points)} height={height} ariaLabel="MACD indicator chart" />;
 }
 
 export function LineChart({
