@@ -7,12 +7,13 @@ audit facts plus a pending/measured forward result when later data exists.
 from __future__ import annotations
 
 import hashlib
+import threading
 from datetime import datetime, timezone
 from typing import Any
 
 import pandas as pd
 
-from . import data, persistence, portfolio
+from . import analytics_cache, data, persistence, portfolio
 
 MODEL_BENCHMARKS = {
     "pure_growth": "QQQ",
@@ -201,8 +202,20 @@ def drift_series(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+_REFRESH_GATE_LOCK = threading.Lock()
+_REFRESH_GATE: dict[str, Any] = {"store": None, "version": None, "limit": 0}
+
+
 def refresh_forward_results(limit: int = 250) -> None:
     store = persistence.get_store()
+    # Pending entries can only become measurable when new price history arrives
+    # (record_signal already measures against the data available at record time),
+    # so re-scanning is pointless until the data version changes.
+    data_version = analytics_cache.version()
+    with _REFRESH_GATE_LOCK:
+        gate = _REFRESH_GATE
+        if gate["store"] is store and gate["version"] == data_version and limit <= gate["limit"]:
+            return
     for entry in store.signal_journal(limit=limit):
         if entry["forward_status"] == "measured":
             continue
@@ -215,6 +228,13 @@ def refresh_forward_results(limit: int = 250) -> None:
             result["alpha_pct"] = round(result["forward_result_pct"] - result["benchmark_result_pct"], 4)
         if result["forward_status"] == "measured":
             store.update_signal_forward_result(entry["dedupe_key"], result)
+    with _REFRESH_GATE_LOCK:
+        same_state = _REFRESH_GATE["store"] is store and _REFRESH_GATE["version"] == data_version
+        _REFRESH_GATE["store"] = store
+        # Record the version observed before the scan: if new data arrived while
+        # scanning, the mismatch forces one more full pass on the next call.
+        _REFRESH_GATE["version"] = data_version
+        _REFRESH_GATE["limit"] = max(limit, _REFRESH_GATE["limit"]) if same_state else limit
 
 
 def _series_for_entry(entry: dict[str, Any]) -> pd.Series:

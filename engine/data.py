@@ -21,6 +21,8 @@ from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 
+from . import analytics_cache
+
 # Cap user-added instruments so repeated uploads/fetches can't grow memory
 # without bound. Keep it high enough for a serious multi-theme research
 # universe plus model holdings; samples are never counted against this limit.
@@ -110,6 +112,8 @@ def register(inst: Instrument) -> None:
         user_keys = [k for k, v in _STORE.items() if v.source != "sample"]
         for stale in user_keys[:-MAX_USER_INSTRUMENTS] if len(user_keys) > MAX_USER_INSTRUMENTS else []:
             _STORE.pop(stale, None)
+    # New/changed price data invalidates memoized per-series analytics.
+    analytics_cache.invalidate()
 
 
 # --------------------------------------------------------------------------- #
@@ -582,6 +586,7 @@ def resolve_series(
             return _PRICE_CACHE[sym]
 
     # 1) a sidebar instrument already has good history
+    fetched_live = False
     inst = get(sym)
     if inst is not None and _allowed_source(inst.source, allow_sample, allow_simulated):
         ps = PriceSeries(sym, inst.df["close"].dropna(), inst.source)
@@ -595,6 +600,7 @@ def resolve_series(
                     close = hist["Close"].copy()
                     close.index = pd.to_datetime(close.index).tz_localize(None)
                     ps = PriceSeries(sym, close.dropna(), "live")
+                    fetched_live = True
             except Exception:
                 ps = None
         # 3) deterministic simulation
@@ -615,4 +621,7 @@ def resolve_series(
         if sym not in _PRICE_CACHE and len(_PRICE_CACHE) >= MAX_PRICE_CACHE:
             _PRICE_CACHE.pop(next(iter(_PRICE_CACHE)), None)
         _PRICE_CACHE[sym] = ps
+    if fetched_live:
+        # A freshly fetched live series is new data for anything built on it.
+        analytics_cache.invalidate()
     return ps

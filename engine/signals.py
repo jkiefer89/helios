@@ -45,6 +45,32 @@ def _momentum_score(f: pd.DataFrame, i: int) -> float:
     return float((rsi - 50) / 50 * 0.4)
 
 
+def _trend_scores(f: pd.DataFrame) -> np.ndarray:
+    """Vectorized _trend_score over every row of the indicator frame."""
+    close = f["close"].to_numpy(dtype=float)
+    sma50 = f["sma50"].to_numpy(dtype=float)
+    sma200 = f["sma200"].to_numpy(dtype=float)
+    macd_hist = f["macd_hist"].to_numpy(dtype=float)
+    score = np.zeros(len(f))
+    score += np.where(np.isfinite(sma50) & np.isfinite(sma200),
+                      np.where(sma50 > sma200, 0.5, -0.5), 0.0)
+    score += np.where(np.isfinite(close) & np.isfinite(sma50),
+                      np.where(close > sma50, 0.25, -0.25), 0.0)
+    finite_hist = np.isfinite(macd_hist)
+    score += np.where(finite_hist, 0.25 * np.sign(np.where(finite_hist, macd_hist, 0.0)), 0.0)
+    return np.clip(score, -1, 1)
+
+
+def _momentum_scores(f: pd.DataFrame) -> np.ndarray:
+    """Vectorized _momentum_score over every row of the indicator frame."""
+    rsi = f["rsi"].to_numpy(dtype=float)
+    finite = np.isfinite(rsi)
+    safe = np.where(finite, rsi, 50.0)
+    score = np.where(safe < 30, (30 - safe) / 30,
+                     np.where(safe > 70, -(safe - 70) / 30, (safe - 50) / 50 * 0.4))
+    return np.where(finite, score, 0.0)
+
+
 def _forecast_score(expected_return_pct: float) -> float:
     # ~+/-5% over the horizon saturates the component.
     return float(np.clip(expected_return_pct / 5.0, -1, 1))
@@ -217,10 +243,22 @@ def historical_signals(close: pd.Series) -> pd.Series:
     """Per-day trend+momentum score over history (for chart markers & backtest).
 
     Uses only causally-available indicators (no forward-looking forecast) so it
-    is honest for backtesting.
+    is honest for backtesting. Vectorized over the indicator columns; matches
+    the per-row scalar scores exactly (regression-tested).
     """
     f = ind.indicator_frame(close)
-    scores = np.zeros(len(f))
-    for i in range(len(f)):
-        scores[i] = 0.6 * _trend_score(f, i) + 0.4 * _momentum_score(f, i)
+    scores = 0.6 * _trend_scores(f) + 0.4 * _momentum_scores(f)
     return pd.Series(scores, index=close.index)
+
+
+def latest_signal_score(close: pd.Series) -> float:
+    """Last-row causal trend+momentum score.
+
+    Equals historical_signals(close).iloc[-1] without building the full per-day
+    score series — for callers that only need the current signal.
+    """
+    f = ind.indicator_frame(close)
+    if not len(f):
+        raise ValueError("No price history available for signal scoring.")
+    i = len(f) - 1
+    return float(0.6 * _trend_score(f, i) + 0.4 * _momentum_score(f, i))

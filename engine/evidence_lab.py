@@ -12,7 +12,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from . import data, portfolio, provenance, regime, signal_journal, signals
+from . import analytics_cache, data, portfolio, provenance, regime, signal_journal, signals
 
 DEFAULT_HORIZONS = (5, 21, 63)
 
@@ -129,16 +129,28 @@ def analyze_series(
 
     bench = _clean_close(benchmark_close) if benchmark_close is not None else pd.Series(dtype=float)
     benchmark_status = "available" if len(bench) >= train_window else "unavailable"
-    base_windows = _walk_windows(px, bench, horizon_days, train_window, step, benchmark_status)
-    decay = [
-        _decay_row(horizon, _walk_windows(px, bench, horizon, train_window, step, benchmark_status))
-        for horizon in decay_horizons
-    ]
+    core_key = (
+        "evidence_core",
+        str(target.get("kind") or ""),
+        str(target.get("id") or ""),
+        analytics_cache.series_token(px),
+        analytics_cache.series_token(bench),
+        benchmark_status,
+        horizon_days,
+        train_window,
+        step,
+    )
+    core = analytics_cache.memoize(
+        core_key,
+        lambda: _evidence_core(px, bench, horizon_days, train_window, step, benchmark_status, decay_horizons),
+    )
+    base_windows = core["windows"]
+    decay = core["decay"]
     out_warnings = list(warnings or [])
     if benchmark_status != "available":
         out_warnings.append(f"Benchmark {benchmark_symbol} needs live or uploaded history for alpha evidence.")
 
-    summary = _summary(base_windows)
+    summary = core["summary"]
     return {
         "target": target,
         "data_mode": data_provenance.get("data_mode"),
@@ -155,13 +167,9 @@ def analyze_series(
             "decay_horizons": list(decay_horizons),
         },
         "summary": summary,
-        "false_positives": _false_positive_summary(base_windows),
-        "confidence_bands": {
-            "forward_result_pct": _bands(row.get("forward_result_pct") for row in base_windows),
-            "alpha_pct": _bands(row.get("alpha_pct") for row in base_windows),
-            "hit_rate_pct": _hit_rate_band(base_windows),
-        },
-        "regime_sensitivity": _regime_sensitivity(base_windows),
+        "false_positives": core["false_positives"],
+        "confidence_bands": core["confidence_bands"],
+        "regime_sensitivity": core["regime_sensitivity"],
         "decay": decay,
         "prospective_validation": _prospective_validation(target),
         "windows": base_windows,
@@ -321,6 +329,37 @@ def _journal_hit(entry: dict[str, Any]) -> bool | None:
     )
 
 
+def _evidence_core(
+    px: pd.Series,
+    bench: pd.Series,
+    horizon_days: int,
+    train_window: int,
+    step: int,
+    benchmark_status: str,
+    decay_horizons: tuple[int, ...],
+) -> dict[str, Any]:
+    """The expensive, purely price-derived part of analyze_series (memoized)."""
+    regime_cache: dict[pd.Timestamp, str] = {}
+    base_windows = _walk_windows(px, bench, horizon_days, train_window, step, benchmark_status, regime_cache)
+    decay = [
+        _decay_row(horizon, base_windows if horizon == horizon_days
+                   else _walk_windows(px, bench, horizon, train_window, step, benchmark_status, regime_cache))
+        for horizon in decay_horizons
+    ]
+    return {
+        "windows": base_windows,
+        "decay": decay,
+        "summary": _summary(base_windows),
+        "false_positives": _false_positive_summary(base_windows),
+        "confidence_bands": {
+            "forward_result_pct": _bands(row.get("forward_result_pct") for row in base_windows),
+            "alpha_pct": _bands(row.get("alpha_pct") for row in base_windows),
+            "hit_rate_pct": _hit_rate_band(base_windows),
+        },
+        "regime_sensitivity": _regime_sensitivity(base_windows),
+    }
+
+
 def _walk_windows(
     close: pd.Series,
     benchmark: pd.Series,
@@ -328,16 +367,23 @@ def _walk_windows(
     train_window: int,
     step: int,
     benchmark_status: str,
+    regime_cache: dict[pd.Timestamp, str] | None = None,
 ) -> list[dict[str, Any]]:
     rows = []
     if len(close) < train_window + horizon + 1:
         return rows
+    # The signal is causal (rolling/ewm indicators only), so the score at day i
+    # on the full series equals the last score of the prefix ending at day i.
+    # One vectorized pass replaces the former per-window prefix recomputation.
+    scores = signals.historical_signals(close)
+    regime_source = benchmark if len(benchmark) else close
+    regime_cache = {} if regime_cache is None else regime_cache
+    input_start_date = close.index[0].strftime("%Y-%m-%d")
     max_signal_index = len(close) - horizon - 1
     for signal_index in range(train_window - 1, max_signal_index + 1, step):
-        history = close.iloc[: signal_index + 1]
         signal_date = close.index[signal_index]
         forward_date = close.index[signal_index + horizon]
-        signal_score = float(signals.historical_signals(history).iloc[-1])
+        signal_score = float(scores.iloc[signal_index])
         action = _action(signal_score)
         start_price = float(close.iloc[signal_index])
         end_price = float(close.iloc[signal_index + horizon])
@@ -345,11 +391,13 @@ def _walk_windows(
         benchmark_result = _benchmark_return(benchmark, signal_date, forward_date) if benchmark_status == "available" else None
         alpha = round(float(forward - benchmark_result), 4) if forward is not None and benchmark_result is not None else None
         hit = _paper_hit(action, forward, alpha)
+        if signal_date not in regime_cache:
+            regime_cache[signal_date] = _regime_at(regime_source, signal_date)
         row = {
             "signal_date": signal_date.strftime("%Y-%m-%d"),
             "forward_end_date": forward_date.strftime("%Y-%m-%d"),
-            "input_start_date": history.index[0].strftime("%Y-%m-%d"),
-            "input_rows": int(len(history)),
+            "input_start_date": input_start_date,
+            "input_rows": int(signal_index + 1),
             "horizon_days": int(horizon),
             "signal_score": round(signal_score, 4),
             "action_label": action,
@@ -358,7 +406,7 @@ def _walk_windows(
             "alpha_pct": alpha,
             "paper_hit": hit,
             "false_positive": bool(action in {"BUY", "SELL"} and hit is False),
-            "regime": _regime_at(benchmark if len(benchmark) else close, signal_date),
+            "regime": regime_cache[signal_date],
         }
         rows.append(row)
     return rows
