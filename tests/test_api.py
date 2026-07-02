@@ -522,13 +522,10 @@ def test_analyze_sanitizes_ticker_and_requires_symbol(client):
 
 
 # --------------------------------------------------------------------------- #
-# CSP scoping — CDN exception only for the legacy dashboard pages
+# CSP — script-src is 'self' on every response, with no CDN carve-outs
 # --------------------------------------------------------------------------- #
-def test_csp_allows_cdn_only_on_legacy_dashboard(client):
-    legacy = client.get("/legacy")
-    assert "https://cdn.jsdelivr.net" in legacy.headers["Content-Security-Policy"]
-
-    api = client.get("/api/tickers")
-    csp = api.headers["Content-Security-Policy"]
-    assert "cdn.jsdelivr.net" not in csp
-    assert "script-src 'self';" in csp
+def test_csp_script_src_is_self_on_every_response(client):
+    for path in ("/", "/api/tickers"):
+        csp = client.get(path).headers["Content-Security-Policy"]
+        assert "cdn.jsdelivr.net" not in csp, path
+        assert "script-src 'self';" in csp, path

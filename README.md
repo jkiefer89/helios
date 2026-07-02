@@ -62,8 +62,9 @@ npm --prefix frontend run build
 ./run.sh
 ```
 
-If `frontend/dist/` is absent, Flask falls back to the legacy vanilla dashboard
-at `/`; the legacy page is also available at `/legacy`.
+The React app is the only UI. If `frontend/dist/` is absent, `/` serves a
+minimal self-contained page with those build instructions (the JSON API stays
+fully available) until the build exists.
 
 ### Going live on your network
 
@@ -123,7 +124,7 @@ HELIOS_AUTH=0 ./run.sh --dev
 npm --prefix frontend run dev
 ```
 
-Vite proxies `/api` and `/legacy` to Flask. The React app does not contain
+Vite proxies `/api` to Flask. The React app does not contain
 placeholder rankings or mock research rows; unavailable research surfaces render
 the backend's demo, mixed, or blocked provenance state.
 
@@ -457,7 +458,7 @@ helios_web/           Flask web layer — one blueprint per section
   models.py           model list/upload/analysis, library, editor, governance, validation, clinic, risk
   reports.py          advisor reports and saved snapshot exports
   ai.py               optional AI Copilot endpoints
-  spa.py              React SPA / legacy dashboard static serving
+  spa.py              React SPA static serving (build-instructions page when dist is absent)
 frontend/            React + Vite + TypeScript research terminal
   src/api/           typed client for the Flask APIs
   src/components/    charts (ECharts theme + adapters), layout, cards, forms, AI panel
@@ -501,9 +502,6 @@ engine/
   report_exports.py   saved snapshot store + HTML/PDF export renderers
   pdf_layout.py       shared ReportLab layout primitives
   ai_copilot.py       optional sanitized AI narrative provider layer
-templates/index.html  legacy vanilla dashboard fallback (/legacy)
-static/app.js         legacy front-end logic
-static/styles.css     legacy dashboard theme
 ```
 
 ### API
@@ -577,7 +575,6 @@ Common local commands:
 | Python tests with coverage (CI flags) | `./.venv/bin/python -m pytest --cov=engine --cov=app --cov-report=term-missing` |
 | Python syntax compile | `./.venv/bin/python -m compileall app.py serve.py engine tests` |
 | Design spec JSON validation | `./.venv/bin/python -m json.tool .design_spec.json >/dev/null` |
-| Legacy frontend syntax check | `node --check static/app.js` |
 
 ESLint is configured for the frontend (`frontend/eslint.config.js`); there is
 still no Python lint or formatter command in this repository. The CI-equivalent
@@ -590,7 +587,6 @@ npm --prefix frontend run typecheck
 npm --prefix frontend run build
 ./.venv/bin/python -m compileall app.py serve.py engine tests
 ./.venv/bin/python -m json.tool .design_spec.json >/dev/null
-node --check static/app.js
 ./.venv/bin/python -m pytest --cov=engine --cov=app --cov-report=term-missing
 ```
 
@@ -625,11 +621,11 @@ built in:
   plain HTTP the startup banner warns explicitly.
 - **XSS-safe rendering** — all user-supplied / external strings (instrument
   names, news headlines) are HTML-escaped before display; a strict
-  Content-Security-Policy (`script-src 'self'`, with a Chart.js CDN exception
-  only on the legacy dashboard pages) is the second layer.
+  Content-Security-Policy (`script-src 'self'` on every response, no CDN
+  exceptions) is the second layer.
 - **CSP tradeoff** — `style-src 'unsafe-inline'` remains because the current
   UI uses a few inline styles and dynamic bar widths. It is scoped to
-  styles only; scripts remain self-restricted (plus the legacy-only CDN).
+  styles only; scripts remain self-restricted.
 - **Governance sign-off (opt-in)** — configuring a local approver PIN
   (`HELIOS_GOVERNANCE_APPROVER_PIN[_HASH]`) makes approve/reject decisions
   require committee identity plus a SHA-256-verified PIN compared in constant

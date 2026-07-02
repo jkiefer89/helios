@@ -25,8 +25,8 @@ fi
 
 if [ ! -f "frontend/dist/index.html" ] && ! command -v npm >/dev/null 2>&1; then
   echo "⚠  React frontend is not built (frontend/dist missing) and npm is not installed."
-  echo "   Helios will fall back to the legacy dashboard. To build the React UI,"
-  echo "   install Node.js and run:  cd frontend && npm install && npm run build"
+  echo "   Helios will serve build instructions at / until the React UI is built."
+  echo "   Install Node.js, then run:  npm --prefix frontend ci && npm --prefix frontend run build"
 fi
 
 if [ "$1" = "--dev" ]; then

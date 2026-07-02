@@ -14,7 +14,7 @@ or a guarantee engine.
   `helios_web.init_app()`.
 - `helios_web/`: Flask web layer, one blueprint per section (`core`, `data`,
   `analysis`, `models`, `reports`, `ai`, `spa`, plus `localenv`); auth gate,
-  CSRF heuristic, security headers, React/legacy static serving.
+  CSRF heuristic, security headers, React static serving.
 - `serve.py`: local/LAN production entrypoint using waitress, or self-signed
   HTTPS when `HELIOS_TLS=1` (TLS setup failures abort rather than fall back).
 - `run.sh`: setup/start wrapper; creates `.venv`, installs pinned Python deps
@@ -22,8 +22,7 @@ or a guarantee engine.
 - `engine/`: deterministic analytics, persistence, portfolio parsing, signals,
   evidence lab, risk/exposure, governance/validation, reports, optional AI
   provider layer.
-- `frontend/`: React + Vite + TypeScript application.
-- `templates/`, `static/`: legacy vanilla dashboard fallback at `/legacy`.
+- `frontend/`: React + Vite + TypeScript application — the only UI.
 - `tests/`: offline pytest suite for engine behavior, API smoke paths,
   persistence, reports, frontend serving, and AI Copilot safety.
 - `.env.example`: placeholder-only runtime configuration.
@@ -90,9 +89,6 @@ npm --prefix frontend run build
 
 # Design spec JSON validation.
 ./.venv/bin/python -m json.tool .design_spec.json >/dev/null
-
-# Legacy frontend syntax check.
-node --check static/app.js
 ```
 
 Full CI-equivalent local verification:
@@ -104,7 +100,6 @@ npm --prefix frontend run typecheck
 npm --prefix frontend run build
 ./.venv/bin/python -m compileall app.py serve.py engine tests
 ./.venv/bin/python -m json.tool .design_spec.json >/dev/null
-node --check static/app.js
 ./.venv/bin/python -m pytest --cov=engine --cov=app --cov-report=term-missing
 ```
 
@@ -130,9 +125,10 @@ The frontend lint command is `npm --prefix frontend run lint` only.
   default `HELIOS_DB_PATH=off` and use temporary paths for persistence cases.
 - For API changes, update Flask route behavior, frontend typed client/types,
   and tests together.
-- For frontend changes, preserve the React app and legacy fallback contract:
-  React is served from `frontend/dist/` when present; `/legacy` serves the
-  vanilla dashboard.
+- For frontend changes, preserve the React serving contract: React is the only
+  UI, served from `frontend/dist/` when present; when the dist is absent, `/`
+  serves a self-contained build-instructions page (there is no legacy
+  dashboard or `/legacy` route).
 - Keep dependency changes deliberate. Update lockfiles for npm dependency
   changes and requirements files for Python dependency changes.
 
