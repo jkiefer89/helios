@@ -127,7 +127,12 @@ def _drawdown(curve: pd.Series) -> pd.Series:
 def _rolling_sharpe(rets: pd.Series, window: int = 63) -> pd.Series:
     mean = rets.rolling(window).mean() * TRADING_DAYS
     vol = rets.rolling(window).std() * np.sqrt(TRADING_DAYS)
-    return ((mean - 0.02) / vol.replace(0.0, np.nan)).replace([np.inf, -np.inf], np.nan)
+    # Windows with no real variance (flat or all-cash stretches) leave a
+    # float-noise std ~1e-8 that blows the ratio up into the millions; Sharpe
+    # is undefined there, so emit NaN. 1e-4 annualized sits orders of magnitude
+    # between that noise and the smallest genuine trading-window vol.
+    vol = vol.where(vol > 1e-4)
+    return ((mean - 0.02) / vol).replace([np.inf, -np.inf], np.nan)
 
 
 def _trade_episodes(position: pd.Series, rets: pd.Series) -> list[float]:

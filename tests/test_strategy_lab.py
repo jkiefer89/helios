@@ -51,6 +51,31 @@ def test_strategy_drawdown_curve_uses_negative_percentage_convention():
     assert result["strategy"]["max_drawdown_pct"] <= 0
 
 
+def test_rolling_sharpe_is_null_for_near_zero_variance_windows():
+    from engine.strategy import _rolling_sharpe
+
+    idx = pd.bdate_range("2024-01-02", periods=160)
+    noise = np.where(np.arange(160) % 2 == 0, 1e-9, -1e-9)
+    flat = pd.Series(noise, index=idx)
+    real = pd.Series(np.where(np.arange(160) % 2 == 0, 0.01, -0.009), index=idx)
+
+    assert _rolling_sharpe(flat).iloc[63:].isna().all()
+    assert np.isfinite(_rolling_sharpe(real).iloc[63:]).all()
+
+
+def test_strategy_rolling_sharpe_has_no_degenerate_outliers_on_demo_data(monkeypatch):
+    monkeypatch.setattr("engine.data.HAS_YF", False)
+    client = _client()
+
+    resp = client.get("/api/strategy/analyze?ticker=AAPL")
+    assert resp.status_code == 200
+    curve = resp.get_json()["rolling_sharpe_curve"]
+    finite = [v for v in curve if v is not None]
+
+    assert finite
+    assert all(abs(v) < 100 for v in finite)
+
+
 def test_strategy_endpoint_labels_sample_data_as_demo_not_real_evidence(monkeypatch):
     monkeypatch.setattr("engine.data.HAS_YF", False)
     client = _client()

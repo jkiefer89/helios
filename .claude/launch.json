@@ -6,6 +6,21 @@
       "runtimeExecutable": "./.venv/bin/python",
       "runtimeArgs": ["app.py"],
       "port": 5000
+    },
+    {
+      "name": "helios-live",
+      "runtimeExecutable": "./.venv/bin/python",
+      "runtimeArgs": ["serve.py"],
+      "port": 5000
+    },
+    {
+      "name": "helios-smoke",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": [
+        "-c",
+        "HELIOS_AUTH=0 HELIOS_HOST=127.0.0.1 HELIOS_PORT=5599 HELIOS_DB_PATH=off HELIOS_AUTO_LIVE_SYMBOLS=off ./.venv/bin/python serve.py"
+      ],
+      "port": 5599
     }
   ]
 }
