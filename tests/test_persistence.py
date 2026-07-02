@@ -459,6 +459,57 @@ def test_encrypted_database_does_not_load_as_plaintext(monkeypatch, tmp_path):
     assert "encrypted sqlite persistence" in plaintext_store.warning.lower()
 
 
+def test_startup_warns_on_unencrypted_sqlite_files_in_db_directory(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION", "required")
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION_KEY", "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=")
+    _use_db(monkeypatch, tmp_path)
+
+    stray = tmp_path / "qa-rehearsal.sqlite"
+    with sqlite3.connect(stray) as conn:
+        conn.execute("CREATE TABLE marker(value TEXT NOT NULL)")
+    nested = tmp_path / "corrupt-backups" / "helios.db.corrupt-123"
+    nested.parent.mkdir()
+    with sqlite3.connect(nested) as conn:
+        conn.execute("CREATE TABLE marker(value TEXT NOT NULL)")
+
+    capsys.readouterr()
+    persistence.reset_store_for_tests()
+    store = persistence.get_store()
+
+    assert store.available is True
+    assert store.plaintext_artifacts == [str(nested), str(stray)]
+    assert store.status()["plaintext_artifacts"] == [str(nested), str(stray)]
+    stderr = capsys.readouterr().err
+    assert "unencrypted SQLite file(s)" in stderr
+    assert "qa-rehearsal.sqlite" in stderr
+    assert "helios.db.corrupt-123" in stderr
+
+
+def test_plaintext_scan_skips_cloud_evicted_placeholder_files(monkeypatch, tmp_path):
+    evicted = tmp_path / "evicted.sqlite"
+    with sqlite3.connect(evicted) as conn:
+        conn.execute("CREATE TABLE marker(value TEXT NOT NULL)")
+    local = tmp_path / "local.sqlite"
+    with sqlite3.connect(local) as conn:
+        conn.execute("CREATE TABLE marker(value TEXT NOT NULL)")
+
+    monkeypatch.setattr(persistence, "_is_dataless", lambda candidate: candidate == evicted)
+
+    found = persistence._plaintext_sqlite_artifacts(tmp_path, ignore=set())
+
+    assert found == [local]
+
+
+def test_configured_plaintext_store_is_not_flagged_as_artifact(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION", "off")
+    store = _use_db(monkeypatch, tmp_path)
+
+    assert store.path.read_bytes().startswith(SQLITE_HEADER)
+    assert store.plaintext_artifacts == []
+    assert store.status()["plaintext_artifacts"] == []
+    assert "unencrypted SQLite file(s)" not in capsys.readouterr().err
+
+
 def _ohlcv(days=90):
     close = price_series(days=days)
     return pd.DataFrame({

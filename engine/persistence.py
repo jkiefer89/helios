@@ -11,6 +11,7 @@ import json
 import os
 import re
 import sqlite3
+import stat
 import sys
 import tempfile
 import threading
@@ -244,35 +245,6 @@ def _configured_cipher(path: Path | None) -> tuple[_FieldCipher | None, dict[str
         return None, _disabled_encryption_status(mode=mode, required=required, warning=warning), warning
 
 
-def plaintext_database_files(data_dir: Path) -> list[str]:
-    """Names of unencrypted SQLite files inside the data directory."""
-    names: list[str] = []
-    try:
-        candidates = sorted(data_dir.glob("*.sqlite")) + sorted(data_dir.glob("*.db"))
-    except OSError:
-        return names
-    for candidate in candidates:
-        try:
-            with open(candidate, "rb") as fh:
-                if fh.read(len(SQLITE_HEADER)) == SQLITE_HEADER:
-                    names.append(candidate.name)
-        except OSError:
-            continue
-    return names
-
-
-def _warn_plaintext_databases(data_dir: Path) -> list[str]:
-    names = plaintext_database_files(data_dir)
-    if names:
-        print(
-            f"  ⚠  Unencrypted database files in {data_dir}: {', '.join(names)} — "
-            "enable HELIOS_DB_ENCRYPTION to protect data at rest.",
-            file=sys.stderr,
-            flush=True,
-        )
-    return names
-
-
 def get_store() -> "SQLiteStore":
     global _STORE
     if _STORE is None:
@@ -299,6 +271,7 @@ class SQLiteStore:
         self._memory_conn: sqlite3.Connection | None = None
         self._snapshot_dirty = False
         self._flush_timer: threading.Timer | None = None
+        self.plaintext_artifacts: list[str] = []
         if disabled:
             self.warning = "SQLite persistence is disabled by HELIOS_DB_PATH."
             return
@@ -308,8 +281,7 @@ class SQLiteStore:
         self._ensure()
         if self._memory_conn is not None:
             atexit.register(self.flush)
-        if self.path is not None:
-            _warn_plaintext_databases(self.path.parent)
+        self._warn_on_plaintext_artifacts()
 
     @classmethod
     def from_env(cls) -> "SQLiteStore":
@@ -461,6 +433,32 @@ class SQLiteStore:
                 self.path.with_name(f"{self.path.name}{suffix}").unlink()
             except FileNotFoundError:
                 pass
+
+    def _warn_on_plaintext_artifacts(self) -> None:
+        if self.path is None:
+            return
+        expected: set[Path] = set()
+        if self._cipher is None:
+            expected = {self.path, self.path.with_name(f"{self.path.name}.tmp")}
+            if self.available and self.path.is_file():
+                print(
+                    f"  ⚠  Unencrypted database files in {self.path.parent}: {self.path.name} — "
+                    "enable HELIOS_DB_ENCRYPTION to protect data at rest.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+        artifacts = _plaintext_sqlite_artifacts(self.path.parent, ignore=expected)
+        self.plaintext_artifacts = [str(p) for p in artifacts]
+        if not artifacts:
+            return
+        listed = ", ".join(self.plaintext_artifacts)
+        print(
+            f"[helios] WARNING: unencrypted SQLite file(s) found in {self.path.parent}: {listed}. "
+            "Helios does not read these files, but they may expose client data at rest. "
+            "Delete them or re-encrypt them with the configured database key.",
+            file=sys.stderr,
+            flush=True,
+        )
 
     def _connect(self):
         if self.path is None:
@@ -673,6 +671,7 @@ class SQLiteStore:
             "schema_version": SCHEMA_VERSION if self.available else None,
             "encryption": dict(self.encryption),
             "backups": self.backup_status(),
+            "plaintext_artifacts": list(self.plaintext_artifacts),
             "real_instrument_count": 0,
             "persisted_model_count": 0,
             "last_refresh": None,
@@ -1587,6 +1586,35 @@ def _normalise_price_frame(frame: pd.DataFrame) -> pd.DataFrame:
     keep = [col for col in ("open", "high", "low", "close", "volume") if col in out]
     out = out[keep]
     return out[~out["close"].isna()]
+
+
+_SF_DATALESS = getattr(stat, "SF_DATALESS", 0x40000000)
+
+
+def _is_dataless(candidate: Path) -> bool:
+    """True for cloud-evicted placeholder files (macOS); reading one blocks on download."""
+    try:
+        flags = getattr(os.stat(candidate, follow_symlinks=False), "st_flags", 0)
+    except OSError:
+        return False
+    return bool(flags & _SF_DATALESS)
+
+
+def _plaintext_sqlite_artifacts(directory: Path, *, ignore: set[Path]) -> list[Path]:
+    if not directory.is_dir():
+        return []
+    found: list[Path] = []
+    for candidate in sorted(directory.rglob("*")):
+        if not candidate.is_file() or candidate in ignore or _is_dataless(candidate):
+            continue
+        try:
+            with candidate.open("rb") as handle:
+                header = handle.read(len(SQLITE_HEADER))
+        except OSError:
+            continue
+        if header == SQLITE_HEADER:
+            found.append(candidate)
+    return found
 
 
 def _deserialize_sqlite_payload(conn: sqlite3.Connection, payload: bytes) -> None:
