@@ -11,8 +11,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import app as helios
 from engine import analytics_cache, data, evidence_lab, regime, signals
+from helios_web import analysis as web_analysis
 from tests.conftest import price_series
 
 
@@ -181,8 +181,8 @@ def test_command_center_screen_uses_cache():
     series = price_series(days=300, daily=0.001)
     inst = data.Instrument("SCREEN1", "Screen One", pd.DataFrame({"close": series}), "upload", [])
     data.register(inst)  # register clears the cache before the first screen
-    first = helios._quick_instrument_screen(inst)
+    first = web_analysis._quick_instrument_screen(inst)
     assert first is not None
     assert analytics_cache.size() == 1  # memoized opportunity candidate evidence
-    second = helios._quick_instrument_screen(inst)
+    second = web_analysis._quick_instrument_screen(inst)
     assert second == first

@@ -1,0 +1,412 @@
+"""Analysis blueprint: command center, instrument analysis, strategy evidence,
+opportunity radar, evidence lab, and the signal journal."""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+import pandas as pd
+from flask import Blueprint, request
+
+from engine import (
+    backtest, data, evidence_lab, forecast, indicators, opportunity, portfolio,
+    provenance, regime, sentiment, signal_journal, signals, strategy,
+)
+
+from .core import (
+    ANALYSIS_ONLY_DISCLAIMER, _safe_float_arg, _safe_int_arg, app, err, ok,
+)
+
+bp = Blueprint("analysis", __name__)
+
+
+# --------------------------------------------------------------------------- #
+# Command Center helpers
+# --------------------------------------------------------------------------- #
+def _quick_instrument_screen(inst: data.Instrument, market: dict | None = None) -> dict | None:
+    """Command-center card for one instrument, scored by the shared engine.
+
+    Delegates to opportunity.instrument_candidate / score_candidate so the
+    Command Center and the Opportunity Radar report identical numbers. The
+    candidate evidence is memoized per price series inside the engine.
+    """
+    try:
+        candidate = opportunity.instrument_candidate(inst)
+    except Exception:
+        app.logger.exception("command-center screen failed for %s", inst.symbol)
+        return None
+    if candidate is None:
+        return None
+    scored = opportunity.score_candidate(candidate, regime=market)
+    return {
+        "id": scored["id"],
+        "kind": scored["kind"],
+        "symbol": scored["symbol"],
+        "name": scored["name"],
+        "source": scored["source"],
+        "action": scored["action"],
+        "score": scored["opportunity_score"],
+        "risk_score": scored["risk_score"],
+        "evidence_score": scored["evidence_score"],
+        "expected_return_pct": scored["expected_return_pct"],
+        "expected_vol_pct": scored["expected_vol_pct"],
+        "max_drawdown_pct": scored["max_drawdown_pct"],
+        "strategy_return_pct": scored["strategy_return_pct"],
+        "benchmark_return_pct": scored["benchmark_return_pct"],
+        "beat_benchmark": scored["beat_benchmark"],
+        "reason": scored["reason"],
+        "warnings": scored["warnings"][:3],
+    }
+
+
+def _command_center_payload() -> dict:
+    instruments = data.all_instruments()
+    prov = provenance.universe(instruments)
+    market = regime.market_regime(instruments)
+    real_instruments = [inst for inst in instruments if provenance.is_real_source(inst.source)]
+    cards = [c for inst in real_instruments if (c := _quick_instrument_screen(inst, market))]
+    ranked = sorted(cards, key=lambda c: c["score"], reverse=True)
+    risks = sorted(cards, key=lambda c: (c["risk_score"], abs(c["max_drawdown_pct"])), reverse=True)
+
+    model_alerts = []
+    for mdl in portfolio.all_models():
+        try:
+            ps = portfolio.build_series(mdl, allow_sample=False, allow_simulated=False)
+            pprov = provenance.portfolio(ps.provenance)
+            if not pprov["eligible_for_real_research"]:
+                model_alerts.append({
+                    "id": mdl.id,
+                    "name": mdl.name,
+                    "severity": "high",
+                    "message": f"{mdl.name}: data quality blocked. {pprov['reason']}",
+                    "next_step": pprov["required_action"],
+                    "eligible_for_real_research": False,
+                    "missing_tickers": pprov["missing_tickers"],
+                })
+                continue
+            metrics = indicators.metrics_summary(ps.close)
+            source_weights = ps.provenance.get("source_weight_pct", {})
+            source_summary = ", ".join(
+                f"{src} {weight:.0f}%" for src, weight in sorted(source_weights.items()) if weight
+            ) or "live/uploaded history"
+            model_alerts.append({
+                "id": mdl.id,
+                "name": mdl.name,
+                "severity": "medium",
+                "message": (
+                    f"{mdl.name}: vol {metrics['annual_vol_pct']:.1f}%, "
+                    f"max drawdown {metrics['max_drawdown_pct']:.1f}%, "
+                    f"sources {source_summary}."
+                ),
+                "next_step": "Open Portfolio Clinic when this model is selected.",
+                "eligible_for_real_research": True,
+            })
+        except Exception as exc:
+            model_alerts.append({
+                "id": mdl.id,
+                "name": mdl.name,
+                "severity": "high",
+                "message": f"{mdl.name}: data quality blocked ({exc}).",
+                "next_step": "Upload real price history for every model holding before running Pro research.",
+                "eligible_for_real_research": False,
+            })
+
+    research_queue = []
+    if ranked:
+        top = ranked[0]
+        research_queue.append({
+            "priority": "high",
+            "title": f"Validate {top['symbol']} before any recommendation",
+            "detail": "Check data source, forecast quality, historical strategy evidence, and invalidating risks.",
+        })
+    if risks:
+        risk = risks[0]
+        research_queue.append({
+            "priority": "medium",
+            "title": f"Review risk in {risk['symbol']}",
+            "detail": f"Risk score {risk['risk_score']}/100 with max drawdown {risk['max_drawdown_pct']:.1f}%.",
+        })
+    if not ranked and not risks:
+        research_queue.append({
+            "priority": "high",
+            "title": "Demo mode: real research is locked",
+            "detail": provenance.DEMO_ACTION,
+        })
+    if not model_alerts:
+        research_queue.append({
+            "priority": "medium",
+            "title": "Upload a client model for portfolio-level diagnostics",
+            "detail": "Use uploaded or live price history for every holding to unlock Pro model alerts.",
+        })
+    for warning in market.get("warnings", []):
+        research_queue.append({"priority": "medium", "title": "Verify regime proxy", "detail": warning})
+
+    return {
+        "data_mode": prov["data_mode"],
+        "display_label": prov["display_label"],
+        "eligible_for_real_research": bool(ranked or risks),
+        "reason": "" if ranked or risks else prov["reason"],
+        "required_action": "" if ranked or risks else prov["required_action"],
+        "data_provenance": {
+            "source_counts": prov["source_counts"],
+            "warnings": prov["warnings"],
+        },
+        "regime": {**market, "data_mode": prov["data_mode"], "display_label": prov["display_label"]},
+        "top_opportunities": ranked[:5],
+        "top_risks": risks[:5],
+        "model_alerts": model_alerts[:5],
+        "research_queue": research_queue[:6],
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Series helpers for the price/indicator chart (downsampled for transport)
+# --------------------------------------------------------------------------- #
+def _series_payload(close, lookback: int = 400, *, markers: bool = False):
+    close = close.dropna()
+    ind_df = indicators.indicator_frame(close).tail(lookback)
+    dates = [d.strftime("%Y-%m-%d") for d in ind_df.index]
+
+    def col(name):
+        return [None if pd.isna(v) else float(v) for v in ind_df[name]]
+
+    # Buy/sell markers where the causal score crosses thresholds.
+    marker_rows = []
+    if markers:
+        sigs = signals.historical_signals(close).tail(lookback)
+        prev = 0.0
+        for d, s in zip(ind_df.index, sigs):
+            if prev <= 0.15 < s:
+                marker_rows.append({"date": d.strftime("%Y-%m-%d"), "type": "buy",
+                                    "price": float(close.loc[d])})
+            elif prev >= -0.05 > s:
+                marker_rows.append({"date": d.strftime("%Y-%m-%d"), "type": "sell",
+                                    "price": float(close.loc[d])})
+            prev = s
+
+    return {
+        "dates": dates,
+        "close": col("close"),
+        "sma50": col("sma50"),
+        "sma200": col("sma200"),
+        "bb_upper": col("bb_upper"),
+        "bb_lower": col("bb_lower"),
+        "rsi": col("rsi"),
+        "macd": col("macd"),
+        "macd_signal": col("macd_signal"),
+        "macd_hist": col("macd_hist"),
+        "markers": marker_rows,
+    }
+
+
+def _record_instrument_signal(inst: data.Instrument, close: pd.Series, sig: dict, horizon_days: int) -> dict | None:
+    try:
+        p = provenance.instrument(inst.source, len(close.dropna()))
+        return signal_journal.record_signal(
+            target_kind="instrument",
+            target_id=inst.symbol,
+            target_name=inst.name,
+            close=close,
+            input_close=close,
+            signal=sig,
+            horizon_days=horizon_days,
+            benchmark="SPY",
+            source_counts={inst.source: 1},
+            eligible_for_real_research=p["eligible_for_real_research"],
+            data_mode=p["data_mode"],
+            metadata={"endpoint": "/api/analyze"},
+        )
+    except Exception:
+        return None
+
+
+def _record_model_signal(mdl: portfolio.Model, ps: portfolio.PortfolioSeries, close: pd.Series, sig: dict, horizon_days: int) -> dict | None:
+    try:
+        p = provenance.portfolio(ps.provenance)
+        return signal_journal.record_signal(
+            target_kind="model",
+            target_id=mdl.id,
+            target_name=mdl.name,
+            close=close,
+            input_close=close,
+            signal=sig,
+            horizon_days=horizon_days,
+            benchmark=signal_journal.benchmark_for_model(mdl),
+            source_counts={str(k): int(v) for k, v in ps.sources.items()},
+            eligible_for_real_research=p["eligible_for_real_research"],
+            data_mode=p["data_mode"],
+            metadata={"endpoint": "/api/model/analyze", "mandate": mdl.mandate_key},
+        )
+    except Exception:
+        return None
+
+
+def _strategy_request_args():
+    cost_bps, cost_error = _safe_float_arg("cost_bps", 5.0, 0.0, 500.0)
+    if cost_error:
+        return None, None, None, cost_error
+    slippage_bps, slippage_error = _safe_float_arg("slippage_bps", 0.0, 0.0, 500.0)
+    if slippage_error:
+        return None, None, None, slippage_error
+    return cost_bps, slippage_bps, {
+        "start": request.args.get("start") or None,
+        "end": request.args.get("end") or None,
+    }, None
+
+
+@bp.route("/api/command-center")
+def command_center():
+    return ok(_command_center_payload())
+
+
+@bp.route("/api/analyze")
+def analyze():
+    symbol = data.clean_symbol(request.args.get("ticker", ""), fallback="")
+    if not symbol:
+        return err("Provide a ticker symbol.", 400)
+    horizon, error = _safe_int_arg("horizon", 21, 5, 90)
+    if error:
+        return err(error, 400)
+    inst = data.get(symbol)
+    if inst is None:
+        return err(f"Unknown ticker '{symbol}'.", 404)
+
+    close = inst.df["close"].dropna()
+    if len(close) < 60:
+        return err("Need at least 60 rows of history to analyze.", 400)
+
+    fc = forecast.forecast(close, horizon=horizon)
+    sent = sentiment.score_headlines(inst.headlines)
+    sig = signals.evaluate(close, fc, sent)
+    bt = backtest.run(close)
+    metrics = indicators.metrics_summary(close)
+    journal_entry = _record_instrument_signal(inst, close, sig, horizon)
+
+    return ok({
+        "symbol": inst.symbol,
+        "name": inst.name,
+        "source": inst.source,
+        "metrics": metrics,
+        "series": _series_payload(close, markers=True),
+        "forecast": fc,
+        "sentiment": sent,
+        "signal": sig,
+        "signal_journal_entry": journal_entry,
+        "backtest": bt,
+    })
+
+
+@bp.route("/api/strategy/analyze")
+def strategy_analyze():
+    symbol = data.clean_symbol(request.args.get("ticker", ""), fallback="")
+    if not symbol:
+        return err("Provide a ticker symbol.", 400)
+    inst = data.get(symbol)
+    if inst is None:
+        return err(f"Unknown ticker '{symbol}'.", 404)
+    cost_bps, slippage_bps, window, arg_error = _strategy_request_args()
+    if arg_error:
+        return err(arg_error, 400)
+    try:
+        result = strategy.analyze_strategy(
+            inst.df["close"], cost_bps=cost_bps, slippage_bps=slippage_bps, **window)
+    except ValueError as e:
+        return err(str(e), 400)
+    p = provenance.instrument(inst.source, len(inst.df["close"].dropna()))
+    return ok({
+        "series_kind": "instrument",
+        "symbol": inst.symbol,
+        "name": inst.name,
+        "source": inst.source,
+        "data_mode": p["data_mode"],
+        "display_label": (
+            "Demo strategy result — synthetic data, not investment evidence."
+            if p["data_mode"] == "demo" else p["display_label"]
+        ),
+        "eligible_for_real_research": p["eligible_for_real_research"],
+        "reason": p["reason"],
+        "required_action": p["required_action"],
+        "data_provenance": p,
+        "warnings": p["warnings"],
+        **result,
+        "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+    })
+
+
+@bp.route("/api/opportunities")
+def opportunities_api():
+    limit, limit_error = _safe_int_arg("limit", 25, 1, 100)
+    if limit_error:
+        return err(limit_error, 400)
+    min_score, score_error = _safe_float_arg("min_score", 0.0, 0.0, 100.0)
+    if score_error:
+        return err(score_error, 400)
+    kind = (request.args.get("kind") or "all").lower()
+    if kind not in {"all", "instrument", "model"}:
+        return err("kind must be all, instrument, or model.", 400)
+    include_hold = (request.args.get("include_hold", "1").lower() not in {"0", "false", "no"})
+    payload = opportunity.opportunities(
+        kind=kind,
+        include_hold=include_hold,
+        min_score=min_score,
+        limit=limit,
+    )
+    return ok({**payload, "disclaimer": ANALYSIS_ONLY_DISCLAIMER})
+
+
+@bp.route("/api/evidence-lab")
+def evidence_lab_endpoint():
+    kind = (request.args.get("kind") or "model").strip().lower()
+    target_id = (request.args.get("id") or request.args.get("ticker") or "").strip()
+    horizon, horizon_error = _safe_int_arg("horizon", 21, 5, 252)
+    if horizon_error:
+        return err(horizon_error, 400)
+    train_window, train_error = _safe_int_arg("train_window", 252, 90, 756)
+    if train_error:
+        return err(train_error, 400)
+    step, step_error = _safe_int_arg("step", 21, 5, 63)
+    if step_error:
+        return err(step_error, 400)
+    if kind == "model":
+        mdl = portfolio.get(target_id)
+        if mdl is None:
+            return err("Unknown model.", 404)
+        return ok({
+            **evidence_lab.analyze_model(mdl, horizon_days=horizon or 21, train_window=train_window or 252, step=step or 21),
+            "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+        })
+    if kind == "instrument":
+        symbol = data.clean_symbol(target_id, fallback="")
+        if not symbol:
+            return err("Provide an instrument symbol.", 400)
+        inst = data.get(symbol)
+        if inst is None:
+            return err(f"Unknown ticker '{symbol}'.", 404)
+        return ok({
+            **evidence_lab.analyze_instrument(inst, horizon_days=horizon or 21, train_window=train_window or 252, step=step or 21),
+            "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+        })
+    return err("kind must be instrument or model.", 400)
+
+
+@bp.route("/api/signal-journal")
+def signal_journal_endpoint():
+    limit, error = _safe_int_arg("limit", 100, 1, 500)
+    if error:
+        return err(error, 400)
+    entries = signal_journal.list_entries(limit=limit)
+    dashboard = signal_journal.dashboard_payload(entries)
+    return ok({
+        "entries": entries,
+        "count": len(entries),
+        **dashboard,
+        "methodology": {
+            "analysis_only": True,
+            "paper_tracking_only": True,
+            "raw_price_history_stored": False,
+            "hit_rate_basis": "Measured paper signals are scored against their action intent: BUY/ADD/OVERWEIGHT must beat the benchmark when alpha is available; SELL/REDUCE/UNDERWEIGHT must underperform; HOLD/REVIEW must avoid material benchmark lag.",
+            "forward_results": "Pending results resolve only after later live or persisted price history covers the original signal horizon.",
+        },
+        "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+    })

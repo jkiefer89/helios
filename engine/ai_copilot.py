@@ -488,6 +488,50 @@ def get_provider(config: AIConfig | None = None) -> AIProvider:
     return NoopProvider(cfg)
 
 
+def payload_data_quality(payload: dict) -> dict:
+    """Summarize the data-quality/provenance facts embedded in an AI request payload."""
+    found = _find_quality(payload)
+    return {
+        "data_mode": found.get("data_mode") or found.get("mode"),
+        "display_label": found.get("display_label"),
+        "eligible_for_real_research": found.get("eligible_for_real_research"),
+        "source": found.get("source"),
+        "row_count": found.get("row_count") or found.get("history_days"),
+        "first_date": found.get("first_date"),
+        "last_date": found.get("last_date"),
+        "last_refresh": found.get("last_refresh"),
+        "reason": found.get("reason"),
+        "required_action": found.get("required_action"),
+        "warnings": found.get("warnings") or [],
+        "missing_tickers": found.get("missing_tickers") or [],
+    }
+
+
+def _find_quality(value) -> dict:
+    if isinstance(value, dict):
+        provenance_payload = value.get("data_provenance") or value.get("provenance")
+        base = provenance_payload if isinstance(provenance_payload, dict) else {}
+        keys = {
+            "data_mode", "mode", "display_label", "eligible_for_real_research", "source",
+            "row_count", "history_days", "first_date", "last_date", "last_refresh",
+            "reason", "required_action", "warnings", "missing_tickers",
+        }
+        out = {key: value.get(key) for key in keys if key in value}
+        out.update({key: base.get(key) for key in keys if key not in out and key in base})
+        if out:
+            return out
+        for child in value.values():
+            found = _find_quality(child)
+            if found:
+                return found
+    if isinstance(value, list):
+        for child in value:
+            found = _find_quality(child)
+            if found:
+                return found
+    return {}
+
+
 def sanitize_payload(payload: dict[str, Any], config: AIConfig | None = None) -> dict[str, Any]:
     cfg = config or AIConfig.from_env()
     sanitized = _sanitize_value(payload, cfg, path=())

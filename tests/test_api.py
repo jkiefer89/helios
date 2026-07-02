@@ -5,6 +5,8 @@ import pytest
 
 import app as helios
 from engine import data, persistence, portfolio
+from helios_web import core as web_core
+from helios_web import data as web_data
 from tests.conftest import price_csv, price_series
 
 
@@ -82,7 +84,7 @@ def test_auto_live_config_defaults_to_core_universe(monkeypatch):
     monkeypatch.delenv("HELIOS_AUTO_LIVE_SYMBOLS", raising=False)
     monkeypatch.setenv("HELIOS_DB_PATH", ".helios/test-auto-live.db")
 
-    config = helios._auto_live_config()
+    config = web_data._auto_live_config()
 
     assert config["enabled"] is True
     assert config["source"] == "core"
@@ -92,7 +94,7 @@ def test_auto_live_config_defaults_to_core_universe(monkeypatch):
 def test_auto_live_config_can_be_explicitly_disabled(monkeypatch):
     monkeypatch.setenv("HELIOS_AUTO_LIVE_SYMBOLS", "off")
 
-    config = helios._auto_live_config()
+    config = web_data._auto_live_config()
 
     assert config["enabled"] is False
     assert config["symbols"] == []
@@ -105,7 +107,7 @@ def test_auto_live_config_parses_core_universe_and_interval(monkeypatch):
     monkeypatch.setenv("HELIOS_AUTO_LIVE_MAX_WORKERS", "99")
     monkeypatch.setenv("HELIOS_AUTO_LIVE_PERIOD", "1y")
 
-    config = helios._auto_live_config()
+    config = web_data._auto_live_config()
 
     assert config["enabled"] is True
     assert config["period"] == "1y"
@@ -421,19 +423,19 @@ def _basic_auth_header(username: str, password: str) -> dict:
 
 @pytest.fixture()
 def auth_client(monkeypatch):
-    monkeypatch.setattr(helios, "AUTH_ENABLED", True)
-    monkeypatch.setattr(helios, "AUTH_USER", "advisor")
-    monkeypatch.setattr(helios, "AUTH_PASSWORD", "correct-horse-battery")
-    monkeypatch.setattr(helios, "_AUTH_FAILURE_DELAY_SECONDS", 0.0)
-    monkeypatch.setattr(helios, "_AUTH_FAILURES", {})
+    monkeypatch.setattr(web_core, "AUTH_ENABLED", True)
+    monkeypatch.setattr(web_core, "AUTH_USER", "advisor")
+    monkeypatch.setattr(web_core, "AUTH_PASSWORD", "correct-horse-battery")
+    monkeypatch.setattr(web_core, "_AUTH_FAILURE_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr(web_core, "_AUTH_FAILURES", {})
     helios.app.config.update(TESTING=True, PROPAGATE_EXCEPTIONS=False)
     return helios.app.test_client()
 
 
 def test_failed_basic_auth_sleeps_and_logs(auth_client, monkeypatch, caplog):
     sleeps = []
-    monkeypatch.setattr(helios, "_AUTH_FAILURE_DELAY_SECONDS", 0.3)
-    monkeypatch.setattr(helios.time, "sleep", sleeps.append)
+    monkeypatch.setattr(web_core, "_AUTH_FAILURE_DELAY_SECONDS", 0.3)
+    monkeypatch.setattr(web_core.time, "sleep", sleeps.append)
 
     with caplog.at_level("WARNING"):
         resp = auth_client.get("/api/tickers", headers=_basic_auth_header("advisor", "wrong"))
@@ -447,11 +449,11 @@ def test_missing_credentials_challenge_does_not_count_as_failure(auth_client):
     resp = auth_client.get("/api/tickers")
 
     assert resp.status_code == 401
-    assert helios._AUTH_FAILURES == {}
+    assert web_core._AUTH_FAILURES == {}
 
 
 def test_repeated_auth_failures_lock_out_the_remote_ip(auth_client):
-    for _ in range(helios._AUTH_LOCKOUT_THRESHOLD):
+    for _ in range(web_core._AUTH_LOCKOUT_THRESHOLD):
         assert auth_client.get(
             "/api/tickers", headers=_basic_auth_header("advisor", "wrong")
         ).status_code == 401
@@ -466,15 +468,15 @@ def test_repeated_auth_failures_lock_out_the_remote_ip(auth_client):
 
 
 def test_lockout_expires_and_success_clears_failures(auth_client, monkeypatch):
-    for _ in range(helios._AUTH_LOCKOUT_THRESHOLD):
+    for _ in range(web_core._AUTH_LOCKOUT_THRESHOLD):
         auth_client.get("/api/tickers", headers=_basic_auth_header("advisor", "wrong"))
-    monkeypatch.setattr(helios, "_AUTH_LOCKOUT_SECONDS", 0.0)
+    monkeypatch.setattr(web_core, "_AUTH_LOCKOUT_SECONDS", 0.0)
 
     resp = auth_client.get(
         "/api/tickers", headers=_basic_auth_header("advisor", "correct-horse-battery"))
 
     assert resp.status_code == 200
-    assert helios._AUTH_FAILURES == {}
+    assert web_core._AUTH_FAILURES == {}
 
 
 # --------------------------------------------------------------------------- #
@@ -483,7 +485,7 @@ def test_lockout_expires_and_success_clears_failures(auth_client, monkeypatch):
 def test_upload_is_rejected_when_parse_semaphore_is_saturated(client):
     make_csv = price_csv
     acquired = []
-    while helios._UPLOAD_SEMAPHORE.acquire(blocking=False):
+    while web_core._UPLOAD_SEMAPHORE.acquire(blocking=False):
         acquired.append(True)
     try:
         resp = client.post(
@@ -495,7 +497,7 @@ def test_upload_is_rejected_when_parse_semaphore_is_saturated(client):
         assert "busy" in resp.get_json()["error"].lower()
     finally:
         for _ in acquired:
-            helios._UPLOAD_SEMAPHORE.release()
+            web_core._UPLOAD_SEMAPHORE.release()
 
     ok_resp = client.post(
         "/api/upload",

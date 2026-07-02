@@ -17,6 +17,8 @@ Modules:
     portfolio_clinic - model diagnostics and hypothetical rebalance suggestions
     reporting   - printable advisor report composition
     report_exports - saved advisor report snapshots and export renderers
+    report_snapshots - snapshot composition, versioning, and narrative orchestration
+    data_quality - freshness/coverage dashboard and research-readiness evidence
     provenance  - demo/real/mixed data eligibility gates
     persistence - local SQLite store for live/uploaded data
     ai_copilot  - optional narrative provider layer over sanitized Helios facts
@@ -45,6 +47,8 @@ __all__ = [
     "portfolio_clinic",
     "reporting",
     "report_exports",
+    "report_snapshots",
+    "data_quality",
     "provenance",
     "persistence",
     "ai_copilot",

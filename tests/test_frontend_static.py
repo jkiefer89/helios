@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import app as helios
+from helios_web import core as web_core
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -493,7 +494,7 @@ def test_flask_serves_react_build_when_present(tmp_path, monkeypatch):
     assets.mkdir(parents=True)
     (dist / "index.html").write_text("<!doctype html><div id=\"root\"></div>", encoding="utf-8")
     (assets / "app.js").write_text("console.log('helios')", encoding="utf-8")
-    monkeypatch.setattr(helios, "FRONTEND_DIST", dist)
+    monkeypatch.setattr(web_core, "FRONTEND_DIST", dist)
     helios.app.config.update(TESTING=True, PROPAGATE_EXCEPTIONS=False)
     client = helios.app.test_client()
 
@@ -510,7 +511,7 @@ def test_flask_serves_react_build_when_present(tmp_path, monkeypatch):
 
 
 def test_flask_falls_back_to_legacy_when_react_build_absent(tmp_path, monkeypatch):
-    monkeypatch.setattr(helios, "FRONTEND_DIST", tmp_path / "missing-dist")
+    monkeypatch.setattr(web_core, "FRONTEND_DIST", tmp_path / "missing-dist")
     helios.app.config.update(TESTING=True, PROPAGATE_EXCEPTIONS=False)
     client = helios.app.test_client()
 

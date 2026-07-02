@@ -8,9 +8,19 @@ Signal Journal.
 from __future__ import annotations
 
 import math
+import os
 from typing import Any, Iterable
 
 import pandas as pd
+
+
+def env_int(name: str, default: int, min_value: int, max_value: int) -> int:
+    """Read an integer environment variable, clamped into [min_value, max_value]."""
+    try:
+        value = int(str(os.environ.get(name, default)).strip())
+    except (TypeError, ValueError):
+        value = default
+    return max(min_value, min(max_value, value))
 
 
 def dedupe(items: Iterable[str]) -> list[str]:

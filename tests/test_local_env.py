@@ -1,6 +1,7 @@
+import os
 from pathlib import Path
 
-import app as helios
+from helios_web import localenv
 
 
 def test_local_env_loader_respects_opt_out_and_existing_values(monkeypatch, tmp_path):
@@ -17,7 +18,7 @@ def test_local_env_loader_respects_opt_out_and_existing_values(monkeypatch, tmp_
     )
 
     monkeypatch.setenv("HELIOS_LOAD_DOTENV", "0")
-    skipped = helios._load_local_env_file(env_file)
+    skipped = localenv._load_local_env_file(env_file)
     assert skipped["loaded"] is False
 
     monkeypatch.setenv("HELIOS_LOAD_DOTENV", "1")
@@ -26,13 +27,13 @@ def test_local_env_loader_respects_opt_out_and_existing_values(monkeypatch, tmp_
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("HELIOS_AI_MODEL_ANTHROPIC", raising=False)
 
-    loaded = helios._load_local_env_file(Path(env_file))
+    loaded = localenv._load_local_env_file(Path(env_file))
 
     assert loaded["loaded"] is True
     assert loaded["count"] == 3
     assert loaded["path"] == str(env_file)
-    assert helios.os.environ["HELIOS_AI_ENABLED"] == "1"
-    assert helios.os.environ["HELIOS_AI_PROVIDER"] == "already-set"
-    assert helios.os.environ["ANTHROPIC_API_KEY"] == "TEST_LOCAL_KEY"
-    assert helios.os.environ["HELIOS_AI_MODEL_ANTHROPIC"] == "claude-test"
-    assert "BAD-KEY" not in helios.os.environ
+    assert os.environ["HELIOS_AI_ENABLED"] == "1"
+    assert os.environ["HELIOS_AI_PROVIDER"] == "already-set"
+    assert os.environ["ANTHROPIC_API_KEY"] == "TEST_LOCAL_KEY"
+    assert os.environ["HELIOS_AI_MODEL_ANTHROPIC"] == "claude-test"
+    assert "BAD-KEY" not in os.environ

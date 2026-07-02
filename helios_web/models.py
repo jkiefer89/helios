@@ -1,0 +1,437 @@
+"""Models blueprint: model list/upload/analysis, library, editor, governance,
+validation, portfolio clinic, and risk analytics."""
+from __future__ import annotations
+
+from flask import Blueprint, Response, request
+
+from engine import (
+    analytics_cache, backtest, data, data_quality, forecast, indicators, insights,
+    mandate, model_governance, model_library, model_validation, portfolio,
+    portfolio_clinic, provenance, risk_exposure, sentiment, signals, strategy,
+)
+
+from .analysis import _record_model_signal, _series_payload, _strategy_request_args
+from .core import ANALYSIS_ONLY_DISCLAIMER, _UPLOAD_SEMAPHORE, _safe_int_arg, app, err, ok
+
+bp = Blueprint("models", __name__)
+
+
+@bp.route("/api/mandates")
+def mandates():
+    return ok({"mandates": mandate.public_list()})
+
+
+@bp.route("/api/models")
+def models():
+    out = []
+    for mdl in portfolio.all_models():
+        coverage = data_quality.model_coverage(mdl)
+        out.append({
+            "id": mdl.id, "name": mdl.name, "mandate": mdl.mandate_key,
+            "mandate_label": mandate.get(mdl.mandate_key)["label"],
+            "n_holdings": len(mdl.holdings),
+            "top": mdl.holdings[0].ticker if mdl.holdings else None,
+            "holdings": [
+                {
+                    "ticker": holding.ticker,
+                    "weight": round(float(holding.weight), 6),
+                    "weight_pct": round(float(holding.weight) * 100, 2),
+                    "source": holding.source or "pending",
+                }
+                for holding in mdl.holdings
+            ],
+            "real_coverage_count": coverage["real_coverage_count"],
+            "missing_tickers": coverage["missing_tickers"],
+            "coverage_state": coverage["coverage_state"],
+        })
+    out.sort(key=lambda d: d["name"])
+    return ok({"models": out})
+
+
+@bp.route("/api/model-library")
+def model_library_list():
+    return ok({"templates": model_library.public_list()})
+
+
+@bp.route("/api/model-library/import", methods=["POST"])
+def model_library_import():
+    payload = request.get_json(silent=True) or {}
+    slug = str(payload.get("slug") or "")
+    template = model_library.get(slug)
+    if not template:
+        return err("Unknown model library template.", 404)
+    mdl = model_library.import_template(slug)
+    if not mdl:
+        return err("Unknown model library template.", 404)
+    analytics_cache.invalidate()
+    coverage = data_quality.model_coverage(mdl)
+    return ok({
+        "id": mdl.id,
+        "name": mdl.name,
+        "mandate": mdl.mandate_key,
+        "n_holdings": len(mdl.holdings),
+        "coverage_state": coverage["coverage_state"],
+        "missing_tickers": coverage["missing_tickers"],
+        "template_only": template["template_only"],
+        "benchmark": template["benchmark"],
+        "rebalance_rules": template["rebalance_rules"],
+        "risk_limits": template["risk_limits"],
+        "provenance": template["provenance"],
+    })
+
+
+@bp.route("/api/model-governance")
+def model_governance_workspace():
+    return ok(model_governance.payload())
+
+
+@bp.route("/api/model-validation")
+def model_validation_dashboard():
+    horizon, horizon_error = _safe_int_arg("horizon", 21, 5, 252)
+    if horizon_error:
+        return err(horizon_error, 400)
+    train_window, train_error = _safe_int_arg("train_window", 252, 90, 756)
+    if train_error:
+        return err(train_error, 400)
+    step, step_error = _safe_int_arg("step", 21, 5, 63)
+    if step_error:
+        return err(step_error, 400)
+    return ok(model_validation.dashboard(
+        horizon_days=horizon or 21,
+        train_window=train_window or 252,
+        step=step or 21,
+    ))
+
+
+@bp.route("/api/model-governance/<model_id>/events", methods=["POST"])
+def model_governance_event(model_id):
+    mdl = portfolio.get(model_id)
+    if mdl is None:
+        return err("Unknown model.", 404)
+    payload = request.get_json(silent=True) or {}
+    result = model_governance.record_event(
+        mdl,
+        actor=str(payload.get("actor") or "Advisor Console"),
+        action=str(payload.get("action") or ""),
+        note=str(payload.get("note") or ""),
+        approval_status=str(payload.get("approval_status") or ""),
+        committee_identity=payload.get("committee_identity") if isinstance(payload.get("committee_identity"), dict) else None,
+    )
+    if not result.get("recorded"):
+        return err(result.get("warning") or "Could not record model governance event.", int(result.get("status_code") or 503))
+    return ok({"event": result["event"]})
+
+
+@bp.route("/api/model-governance/<model_id>/approval-packet")
+def model_governance_approval_packet(model_id):
+    mdl = portfolio.get(model_id)
+    if mdl is None:
+        return err("Unknown model.", 404)
+    packet = model_governance.approval_packet(mdl)
+    if not packet.get("available", True):
+        return err(packet.get("warning") or "Model approval packet unavailable.", 503)
+    return ok({"packet": packet})
+
+
+@bp.route("/api/model-governance/<model_id>/approval-packet.html")
+def model_governance_approval_packet_html(model_id):
+    mdl = portfolio.get(model_id)
+    if mdl is None:
+        return err("Unknown model.", 404)
+    packet = model_governance.approval_packet(mdl)
+    if not packet.get("available", True):
+        return err(packet.get("warning") or "Model approval packet unavailable.", 503)
+    return Response(
+        model_governance.render_approval_packet_html(packet),
+        mimetype="text/html",
+        headers={"Content-Disposition": f'inline; filename="helios-model-approval-{model_id}.html"'},
+    )
+
+
+@bp.route("/api/model-governance/<model_id>/approval-packet.pdf")
+def model_governance_approval_packet_pdf(model_id):
+    mdl = portfolio.get(model_id)
+    if mdl is None:
+        return err("Unknown model.", 404)
+    packet = model_governance.approval_packet(mdl)
+    if not packet.get("available", True):
+        return err(packet.get("warning") or "Model approval packet unavailable.", 503)
+    return Response(
+        model_governance.render_approval_packet_pdf(packet),
+        mimetype="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="helios-model-approval-{model_id}.pdf"'},
+    )
+
+
+@bp.route("/api/models/<model_id>/editor", methods=["GET"])
+def model_editor(model_id):
+    mdl = portfolio.get(model_id)
+    if mdl is None:
+        return err("Unknown model.", 404)
+    return ok(model_governance.preview_edit(mdl, holdings=[
+        {"ticker": holding.ticker, "weight_pct": float(holding.weight) * 100}
+        for holding in mdl.holdings
+    ]))
+
+
+@bp.route("/api/models/<model_id>/editor/preview", methods=["POST"])
+def model_editor_preview(model_id):
+    mdl = portfolio.get(model_id)
+    if mdl is None:
+        return err("Unknown model.", 404)
+    payload = request.get_json(silent=True) or {}
+    try:
+        result = model_governance.preview_edit(
+            mdl,
+            holdings=payload.get("holdings") or [],
+            rebalance_to_target=bool(payload.get("rebalance_to_target")),
+        )
+    except ValueError as exc:
+        return err(str(exc), 400)
+    return ok(result)
+
+
+@bp.route("/api/models/<model_id>/editor", methods=["POST"])
+def model_editor_save(model_id):
+    mdl = portfolio.get(model_id)
+    if mdl is None:
+        return err("Unknown model.", 404)
+    payload = request.get_json(silent=True) or {}
+    try:
+        result = model_governance.save_edit(
+            mdl,
+            holdings=payload.get("holdings") or [],
+            change_note=str(payload.get("change_note") or ""),
+            actor=str(payload.get("actor") or "Advisor Console"),
+            rebalance_to_target=bool(payload.get("rebalance_to_target")),
+        )
+    except ValueError as exc:
+        return err(str(exc), 400)
+    if not result.get("saved"):
+        return err(result.get("warning") or "Could not save model edits.", 400)
+    # Reweighting can keep row count and last date unchanged, so drop memos.
+    analytics_cache.invalidate()
+    return ok(result)
+
+
+@bp.route("/api/model/upload", methods=["POST"])
+def model_upload():
+    if "file" not in request.files:
+        return err("No file uploaded.")
+    f = request.files["file"]
+    name = request.form.get("name") or (f.filename or "Client Model").rsplit(".", 1)[0]
+    mkey = mandate.key_or_default(request.form.get("mandate"))
+    context = request.form.get("context", "")
+    if not _UPLOAD_SEMAPHORE.acquire(blocking=False):
+        return err("Server busy parsing another upload — try again in a moment.", 429)
+    try:
+        mdl = portfolio.parse_model_file(f.read(), f.filename or "", name, mkey, context)
+    except ValueError as e:
+        return err(str(e), 400)
+    except Exception:
+        app.logger.exception("model parse failed")
+        return err("Could not read that file. Expected columns for Ticker and (optionally) Weight.", 400)
+    finally:
+        _UPLOAD_SEMAPHORE.release()
+    analytics_cache.invalidate()
+    coverage = data_quality.model_coverage(mdl)
+    return ok({
+        "id": mdl.id,
+        "name": mdl.name,
+        "mandate": mdl.mandate_key,
+        "n_holdings": len(mdl.holdings),
+        "missing_tickers": coverage["missing_tickers"],
+        "coverage_state": coverage["coverage_state"],
+    })
+
+
+def _resolve_horizon(raw: str):
+    """Return (kind, value, error). kind 'short' -> int days; 'long' -> preset days."""
+    raw = (raw or "21").strip().upper()
+    if raw in forecast.LONG_HORIZONS:
+        return "long", forecast.LONG_HORIZONS[raw], None
+    try:
+        return "short", max(5, min(int(float(raw)), 90)), None
+    except (TypeError, ValueError, OverflowError):
+        return None, None, "horizon must be an integer between 5 and 90 or one of 6M, 1Y, 3Y, 5Y."
+
+
+def _available_long(n_days: int) -> list[str]:
+    out = []
+    if n_days >= 90:           # don't project 6 months from < ~4 months of data
+        out.append("6M")
+    if n_days >= 126:
+        out.append("1Y")
+    if n_days >= 252:
+        out += ["3Y", "5Y"]
+    return out
+
+
+@bp.route("/api/model/analyze")
+def model_analyze():
+    mdl = portfolio.get(request.args.get("id", ""))
+    if mdl is None:
+        return err("Unknown model.", 404)
+    hkind, hval, horizon_error = _resolve_horizon(request.args.get("horizon"))
+    if horizon_error:
+        return err(horizon_error, 400)
+
+    try:
+        ps = portfolio.build_series(mdl)
+    except ValueError as e:
+        return err(str(e), 400)
+    close = ps.close
+    if len(close) < 60:
+        return err("Holdings have too little available analyzed history (need 60+ sessions).", 400)
+
+    avail = _available_long(ps.n_days)
+    long_label = forecast._long_label(hval) if hkind == "long" else None
+    if hkind == "long" and long_label not in avail:
+        hkind, hval = "short", 21  # requested long horizon unavailable for this history
+        long_label = None
+
+    # Aggregate any known headlines from holdings (sample tickers carry demo news).
+    headlines = []
+    for h in mdl.holdings:
+        inst = data.get(h.ticker)
+        if inst and inst.headlines:
+            headlines.extend(inst.headlines[:2])
+    sent = sentiment.score_headlines(headlines)
+
+    signal_horizon = hval if hkind == "short" else 21
+    fc_short = forecast.forecast(close, horizon=signal_horizon)
+    metrics = indicators.metrics_summary(close)
+    pmeta = {"n_holdings": len(mdl.holdings),
+             "top_weight": mdl.holdings[0].weight if mdl.holdings else 0,
+             "top_ticker": mdl.holdings[0].ticker if mdl.holdings else "?"}
+    sig = signals.evaluate(close, fc_short, sent, mandate_key=mdl.mandate_key,
+                           portfolio_meta=pmeta, history_days=ps.n_days, data_honesty=ps.provenance)
+    bt = backtest.run(close)
+    journal_entry = _record_model_signal(mdl, ps, close, sig, signal_horizon)
+
+    # 1Y projection always computed for the drawdown-breach insight; reuse if displayed.
+    fc_long_1y = forecast.forecast_long(close, 252, mdl.mandate_key) if ps.n_days >= 126 else None
+    if hkind == "long":
+        forecast_panel = (fc_long_1y if hval == 252 and fc_long_1y
+                          else forecast.forecast_long(close, hval, mdl.mandate_key))
+    else:
+        forecast_panel = fc_short
+
+    ins = insights.generate(mdl, ps, metrics, sig, fc_short, fc_long_1y)
+    holdings = _holdings_with_signals(ps, mdl)
+
+    return ok({
+        "id": mdl.id, "name": mdl.name,
+        "mandate": {"key": mdl.mandate_key, **mandate.get(mdl.mandate_key)},
+        "context": mdl.mandate_context,
+        "metrics": metrics,
+        "series": _series_payload(close),
+        "holdings": holdings,
+        "concentration": {"hhi": ps.hhi, "n_eff": ps.n_eff, "corr_mean": ps.corr_mean},
+        "provenance": ps.provenance,
+        "horizon": {"kind": hkind, "value": hval, "label": long_label,
+                    "available_long": avail},
+        "forecast": forecast_panel,
+        "forecast_short": fc_short,
+        "signal": sig,
+        "signal_journal_entry": journal_entry,
+        "backtest": bt,
+        "insights": ins,
+        "warnings": ps.warnings,
+    })
+
+
+@bp.route("/api/model/strategy/analyze")
+def model_strategy_analyze():
+    mdl = portfolio.get(request.args.get("id", ""))
+    if mdl is None:
+        return err("Unknown model.", 404)
+    cost_bps, slippage_bps, window, arg_error = _strategy_request_args()
+    if arg_error:
+        return err(arg_error, 400)
+    try:
+        ps = portfolio.build_series(mdl, allow_sample=False, allow_simulated=False)
+        p = provenance.portfolio(ps.provenance)
+        if not p["eligible_for_real_research"]:
+            return ok({
+                "series_kind": "model",
+                "id": mdl.id,
+                "name": mdl.name,
+                "data_mode": p["data_mode"],
+                "display_label": p["display_label"],
+                "eligible_for_real_research": False,
+                "reason": p["reason"],
+                "required_action": p["required_action"],
+                "missing_tickers": p["missing_tickers"],
+                "warnings": p["warnings"],
+                "data_provenance": p,
+                "methodology": {"analysis_only": True, "no_lookahead": True},
+                "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+            })
+        result = strategy.analyze_strategy(
+            ps.close, cost_bps=cost_bps, slippage_bps=slippage_bps, **window)
+    except ValueError as e:
+        return ok({
+            "series_kind": "model",
+            "id": mdl.id,
+            "name": mdl.name,
+            "data_mode": "invalid_for_research",
+            "display_label": "Data Quality Blocked",
+            "eligible_for_real_research": False,
+            "reason": str(e),
+            "required_action": "Upload real price history for every model holding before running Strategy Lab.",
+            "missing_tickers": [h.ticker for h in mdl.holdings],
+            "warnings": [str(e)],
+            "data_provenance": {"missing_tickers": [h.ticker for h in mdl.holdings]},
+            "methodology": {"analysis_only": True, "no_lookahead": True},
+            "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+        })
+    return ok({
+        "series_kind": "model",
+        "id": mdl.id,
+        "name": mdl.name,
+        "mandate": {"key": mdl.mandate_key, **mandate.get(mdl.mandate_key)},
+        "provenance": ps.provenance,
+        "data_mode": p["data_mode"],
+        "display_label": p["display_label"],
+        "eligible_for_real_research": p["eligible_for_real_research"],
+        "reason": p["reason"],
+        "required_action": p["required_action"],
+        "data_provenance": p,
+        "warnings": ps.warnings,
+        **result,
+        "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+    })
+
+
+@bp.route("/api/model/clinic")
+def model_clinic():
+    mdl = portfolio.get(request.args.get("id", ""))
+    if mdl is None:
+        return err("Unknown model.", 404)
+    try:
+        result = portfolio_clinic.analyze_clinic(mdl)
+    except ValueError as e:
+        return err(str(e), 400)
+    return ok({**result, "disclaimer": ANALYSIS_ONLY_DISCLAIMER})
+
+
+@bp.route("/api/model/risk")
+def model_risk():
+    mdl = portfolio.get(request.args.get("id", ""))
+    if mdl is None:
+        return err("Unknown model.", 404)
+    return ok({**risk_exposure.analyze_model_risk(mdl), "disclaimer": ANALYSIS_ONLY_DISCLAIMER})
+
+
+def _holdings_with_signals(ps: portfolio.PortfolioSeries, mdl: portfolio.Model) -> list:
+    out = []
+    for h in ps.holdings:
+        try:
+            psr = data.resolve_series(h["ticker"])
+            sc = signals.latest_signal_score(psr.close)
+            action = "BUY" if sc > 0.15 else "SELL" if sc < -0.05 else "HOLD"
+        except Exception:
+            action = "—"
+        out.append({**h, "signal": action})
+    return out
