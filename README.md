@@ -12,11 +12,19 @@ momentum, the return forecast, and news sentiment.
 
 ## Quick start
 
-Source-of-truth tooling is intentionally simple: Python dependencies live in
-`requirements.txt` / `requirements-dev.txt`, frontend dependencies are npm-based
+Source-of-truth tooling is intentionally simple: Python dependency *ranges*
+live in `requirements.txt` / `requirements-dev.txt`, the exact tested pins live
+in `requirements.lock` (what CI installs), frontend dependencies are npm-based
 and locked by `frontend/package-lock.json`, and CI is defined in
 `.github/workflows/ci.yml`. There is no Makefile, Dockerfile, or
 `pyproject.toml` in this repo.
+
+The lockfile flow: `requirements.lock` is what both CI and `./run.sh` install,
+so runtime and tests always use the exact versions the suite was verified
+against. `requirements.txt` / `requirements-dev.txt` hold the human-edited
+compatible ranges the lock is resolved from. When a Python dependency changes,
+update the range file *and* regenerate the lock from a clean venv
+(`pip freeze`) so CI keeps testing real pins.
 
 Local development needs Python 3 with `venv`/`pip`; React frontend work also
 needs Node/npm on `PATH`.
@@ -61,7 +69,9 @@ at `/`; the legacy page is also available at `/legacy`.
 
 Use placeholders only in committed docs/config. For local overrides, copy
 `.env.example` to an untracked `.env` or export variables in the shell that
-starts Helios.
+starts Helios. A repo-local `.env` is loaded automatically at startup without
+overriding variables already exported in the shell; set `HELIOS_LOAD_DOTENV=0`
+to disable that.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
@@ -76,10 +86,18 @@ starts Helios.
 | `HELIOS_DB_ENCRYPTION` | `auto` | Encrypt sensitive local persistence payloads; use `required` to fail closed without a key |
 | `HELIOS_DB_ENCRYPTION_KEY` | empty | Optional Fernet key for persistence encryption; keep it local and never commit it |
 | `HELIOS_DB_ENCRYPTION_KEY_PATH` | `.helios/helios.key` | Optional local key-file path when `HELIOS_DB_ENCRYPTION=auto` |
+| `HELIOS_LOAD_DOTENV` | `1` | Load a repo-local `.env` at startup (`0` disables; exported shell vars always win) |
 | `HELIOS_AUTO_LIVE_SYMBOLS` | `core` | Automatic live polling universe; use `off` to disable or provide tickers/presets |
+| `HELIOS_AUTO_LIVE_PERIOD` | `2y` | Provider history window fetched by automatic live polling |
 | `HELIOS_DATA_QUALITY_STALE_DAYS` | `7` | Data Quality stale-symbol diagnostic threshold |
 | `HELIOS_DATA_QUALITY_MIN_RESEARCH_ROWS` | `60` | Minimum valid rows for research-readiness diagnostics |
 | `HELIOS_DATA_QUALITY_INSTITUTIONAL_ROWS` | `252` | Institutional history target for short-history diagnostics |
+| `HELIOS_GOVERNANCE_APPROVER_PIN` | empty | Local committee PIN; when set, governance approve/reject requires identity + PIN |
+| `HELIOS_GOVERNANCE_APPROVER_PIN_HASH` | empty | SHA-256 hex of the PIN — preferred over the plain PIN on shared machines |
+
+Failed Basic-Auth attempts are throttled per remote IP: after 10 failures the
+address gets a 60-second lockout (HTTP 429). The thresholds are intentional
+constants, not configuration.
 
 ```bash
 HELIOS_USER=jkiefer HELIOS_PASSWORD='choose-a-strong-one' ./run.sh
@@ -126,8 +144,14 @@ the backend's demo, mixed, or blocked provenance state.
 | **Long-horizon projection** | 5–90 day tactical signal **plus** 6-month / 1-year / 3-year / 5-year strategic value cones (terminal value, CAGR bands, probability of meeting the mandate, drawdown-breach odds) |
 | **Conviction rationale** | Every signal explains itself: per-component clauses with the actual numbers, the mandate tilt, the vol penalty, and honesty caveats |
 | **Signal Journal** | Dedicated paper-performance workspace for signal history, pending/measured forward results, hit rate, benchmark comparison, model-by-model evidence and drift over time |
+| **Evidence Lab** | Walk-forward validation: freezes history at prior dates, replays the causal trend/momentum signal, and measures forward returns vs a benchmark — hit rate, false positives, regime sensitivity, signal decay and confidence bands, plus prospective Signal Journal tracking |
+| **Risk Analytics** | Sector/factor exposure, volatility budget vs mandate, correlation clusters, deterministic scenario stress, historical stress replay, liquidity flags and a client-ready risk pack with break-the-model language |
+| **Model Governance** | Versioned audit trail with committee notes, a risk gate that blocks approval while limits are breached, and exportable JSON/HTML/PDF approval packets with optional PIN-verified committee identity |
+| **Model Validation** | Champion/challenger review dashboard scoring each model on walk-forward hit rate, alpha, false positives, signal decay and governance state, with drift alerts |
+| **Native model editor** | Edit holdings in-app with a non-mutating preview, weight normalization, a mandatory change note, and a governance snapshot recorded on every save |
 | **Report Export + History** | Advisor report snapshots are saved locally with branded HTML/PDF exports, source/date range/row counts, model metadata, caveats and optional AI narrative |
 | **Institutional Data Quality** | Dedicated research-readiness dashboard for stale symbols, missing data, short histories, source conflicts, refresh failures and model coverage gaps |
+| **Data-quality alerts** | Blocker/warning alerts persisted across runs with stable ids, occurrence counts and a reopen/resolve lifecycle, so freshness regressions are auditable |
 | **Insights** | 12 rule-based suggestions per model — concentration, mandate fit, drawdown, correlation, forecast skill, data honesty — each with a concrete action |
 
 ### Data quality modes
@@ -145,11 +169,27 @@ Helios separates interface demos from advisor-grade research:
 
 Helios creates a small SQLite database on first use. It stores parsed
 live/uploaded price history, instrument provenance, uploaded model metadata,
-holdings, live-refresh logs, Signal Journal entries, and saved advisor report
-snapshots. It does **not** store raw uploaded files, API
-keys, secrets, browser artifacts, generated builds, screenshots, or sample data
-as real research evidence. The database path is controlled by `HELIOS_DB_PATH`;
-set `HELIOS_DB_PATH=off` for an ephemeral session.
+holdings, live-refresh logs, Signal Journal entries, model-governance events,
+data-quality alert state, and saved advisor report snapshots. It does **not**
+store raw uploaded files, API keys, secrets, browser artifacts, generated
+builds, screenshots, or sample data as real research evidence. The database
+path is controlled by `HELIOS_DB_PATH`; set `HELIOS_DB_PATH=off` for an
+ephemeral session.
+
+The default `.helios/` workspace layout is:
+
+```
+.helios/
+  helios.db      encrypted database snapshot (not readable SQLite at rest)
+  helios.key     auto-created Fernet key when HELIOS_DB_ENCRYPTION=auto
+  backups/       startup safety copies of the encrypted snapshot (newest 5 kept)
+```
+
+At startup Helios copies the previous encrypted snapshot into
+`.helios/backups/` before reusing it, rotating out all but the newest five
+copies. While running, snapshot writes are debounced (about 3 seconds after the
+last change) and flushed at process exit, so bursts of persistence activity do
+not rewrite the encrypted file on every call.
 
 Local persistence encryption is enabled by default. When
 `HELIOS_DB_ENCRYPTION=auto`, Helios creates a local `.helios/helios.key` file if
@@ -178,6 +218,12 @@ variables, and live histories are checked for persisted provider refresh
 evidence so the dashboard can flag when freshness cannot be audited from the
 local log. It is a diagnostic surface only; it does not change opportunity
 scoring, strategy evidence, or provenance gates.
+
+Data-quality issues are also synced into persistent alerts: each issue gets a
+stable id, severity (`blocker` or `warning`), occurrence count, and a
+new/changed/reopened/resolved lifecycle, so an alert that disappears and
+returns is auditable rather than silently forgotten. Alerts live in the same
+local encrypted store as the rest of the research workspace.
 
 The **Reports** workspace can save an analysis-only snapshot of the current
 instrument or model report. Saved snapshots are local persistence records and
@@ -222,6 +268,71 @@ model-by-model evidence, and drift over time. It is paper tracking only and
 never represents live orders, brokerage execution, or a performance guarantee.
 
 Set `HELIOS_AUTO_LIVE_SYMBOLS=off` to disable automatic polling explicitly.
+
+### Evidence Lab (walk-forward validation)
+
+The **Evidence Lab** answers "would this signal have worked?" without touching
+the live methodology. It freezes history at a series of prior dates, computes
+the same causal trend/momentum signal Strategy Lab uses, then measures the
+subsequent forward return over 5/21/63-day horizons against a benchmark. The
+payload includes hit rate with a 90% confidence band, false-positive rate on
+directional calls, per-regime (risk-on/neutral/risk-off) sensitivity, and
+signal-decay rows across horizons. Every input is strictly backward-looking —
+no lookahead — and the lab is blocked entirely for demo/simulated data or
+histories shorter than the training window plus the longest horizon. A
+prospective-validation panel layers in same-target Signal Journal entries so
+historical walk-forward evidence and live paper tracking sit side by side.
+
+### Risk Analytics and the client risk pack
+
+The **Risk Analytics** workspace (`/api/model/risk`) summarizes deterministic
+portfolio risk evidence: sector and factor exposure, volatility budget versus
+the mandate target, marginal risk contribution per holding, correlation
+clusters, drawdown stress, deterministic scenario shocks (equity, rates,
+growth compression, defensive rotation, liquidity), historical stress replay,
+and liquidity flags built from observed live/uploaded dollar volume where
+available. A client-ready risk pack condenses this into advisor language,
+including "what breaks this model" drivers and a risk posture
+(review_ready/watch/elevated). It is analysis-only and never alters signal or
+forecast methodology.
+
+### Model governance, validation, and approval packets
+
+The **Models** workspace records a versioned governance audit trail per model:
+every edit, review, approval, or rejection is archived with actor, committee
+note, holding snapshot, version diff, and the risk-gate state at that moment.
+Approval is gated: a model with active risk-limit violations (single-position
+cap, minimum holdings, non-normalized weights) cannot be approved until the
+breach is resolved, and approve/reject decisions require a committee note.
+
+When `HELIOS_GOVERNANCE_APPROVER_PIN` or `HELIOS_GOVERNANCE_APPROVER_PIN_HASH`
+is configured, approve/reject additionally requires signer name, role,
+committee, and a matching local PIN (verified as a SHA-256 hash in constant
+time). Prefer the hash form on shared machines so the plain PIN never sits in
+the environment. Without a configured PIN, decisions are recorded as unverified
+local attestations.
+
+An **approval packet** for committee review is exportable per model as JSON,
+escaped HTML, or a branded PDF: current risk gate, risk limits,
+before/after holding snapshots, version diff, committee notes with identity,
+and the full audit trail.
+
+The **Model Validation** dashboard ranks eligible models champion-first using
+existing walk-forward evidence: hit rate, benchmark alpha, false-positive rate,
+signal decay, and governance state combine into a 0–100 validation score and
+letter grade, with drift alerts (negative alpha, elevated false positives,
+prospective journal drift, governance breaches) surfaced per model and
+workspace-wide. Blocked models stay blocked — validation never bypasses
+provenance gates.
+
+### Native model editor
+
+Imported models can be edited in-app instead of re-uploading a spreadsheet.
+The editor previews proposed holdings without mutating the model (weight
+normalization, optional rebalance-to-target, per-row validation), requires a
+change note of at least five characters, and every save records a
+`model_edit` governance event with a before/after snapshot and version diff,
+then resets approval status to pending review.
 
 ### Optional AI Copilot
 
@@ -336,22 +447,53 @@ platform degrades gracefully to sample/uploaded data when offline.
 ## Architecture
 
 ```
-serve.py              production entrypoint — waitress on the local network
-app.py                Flask app + JSON API + Basic-Auth gate + payload sanitation
+serve.py              production entrypoint — waitress on the local network; TLS fails closed
+app.py                thin entry point: loads the local .env, then wires helios_web.init_app()
+helios_web/           Flask web layer — one blueprint per section
+  core.py             shared app, Basic-Auth gate + lockout, CSRF heuristic, security headers
+  localenv.py         repo-local .env loading (before the engine reads the environment)
+  data.py             tickers, uploads, live fetch/refresh, data status, data quality
+  analysis.py         command center, analyze, strategy, opportunities, evidence lab, journal
+  models.py           model list/upload/analysis, library, editor, governance, validation, clinic, risk
+  reports.py          advisor reports and saved snapshot exports
+  ai.py               optional AI Copilot endpoints
+  spa.py              React SPA / legacy dashboard static serving
 frontend/            React + Vite + TypeScript research terminal
-  src/api/           typed client for existing Flask APIs
-  src/views/         Command Center, Opportunity Radar, Strategy Lab, Clinic, Reports, Data Quality
+  src/api/           typed client for the Flask APIs
+  src/components/    charts (ECharts theme + adapters), layout, cards, forms, AI panel
+  src/hooks/         shared view-fetch hook
+  src/views/         Command Center, Instruments, Models, Opportunity Radar, Strategy Lab,
+                     Evidence Lab, Portfolio Clinic, Risk Analytics, Reports, Signal Journal,
+                     Data Quality, Analysis
 engine/
+  _common.py          shared deterministic helpers (paper-hit rule, env parsing, series utils)
   data.py             data store, samples, CSV import, live fetch, holding resolution
-  persistence.py      local SQLite schema, reload, refresh logs, provenance metadata
+  persistence.py      encrypted SQLite store, snapshot debounce, startup backups, refresh logs
+  provenance.py       data-provenance gates for real-research eligibility
+  data_quality.py     freshness/coverage diagnostics and persisted alert inputs
+  analytics_cache.py  bounded keyed memo cache for per-series analytics
   indicators.py       SMA/EMA/RSI/MACD/Bollinger + performance metrics
   forecast.py         Ridge cone (short) + long-horizon strategic projection
+  regime.py           price-only market-regime classification for the Command Center
   mandate.py          mandate presets + intentional risk/return/weight parameters
   portfolio.py        Excel/CSV model parsing, NAV build, risk decomposition
+  portfolio_clinic.py clinic diagnostics and hypothetical rebalance suggestions
   insights.py         12 rule-based model-improvement suggestions
   sentiment.py        finance-lexicon news sentiment
   signals.py          mandate-aware BUY/SELL/HOLD with numbers-backed rationale
-  backtest.py         historical validation vs buy-and-hold
+  strategy.py         Strategy Lab causal signal evidence
+  backtest.py         historical validation vs buy-and-hold (wraps strategy)
+  opportunity.py      conservative Opportunity Radar review scoring
+  evidence_lab.py     walk-forward evidence windows + prospective validation
+  signal_journal.py   paper-performance journal and forward-result measurement
+  risk_exposure.py    exposure/stress/liquidity analytics + client risk pack
+  model_library.py    governed starter model templates
+  model_governance.py audit trail, risk gate, PIN-verified approval packets
+  model_validation.py champion/challenger validation dashboard
+  reporting.py        printable advisor report composition
+  report_snapshots.py snapshot orchestration: compose, version, enrich
+  report_exports.py   saved snapshot store + HTML/PDF export renderers
+  pdf_layout.py       shared ReportLab layout primitives
   ai_copilot.py       optional sanitized AI narrative provider layer
 templates/index.html  legacy vanilla dashboard fallback (/legacy)
 static/app.js         legacy front-end logic
@@ -366,11 +508,20 @@ static/styles.css     legacy dashboard theme
 | `GET /api/data/status` | SQLite/database health, real-data counts, model coverage, missing tickers and refresh log |
 | `GET /api/data-quality` | institutional research-readiness dashboard: stale symbols, missing data, short histories, source conflicts, refresh failures and coverage gaps |
 | `GET /api/signal-journal` | local paper-performance journal with recorded signals, summary hit-rate metrics, benchmark comparison, model evidence and drift |
+| `GET /api/evidence-lab` | walk-forward evidence for an instrument or model (`kind`, `id`, optional `horizon`/`train_window`/`step`) |
 | `POST /api/data/refresh` | refresh existing live instruments (`{ "symbol": "AAPL" }` or `{ "all": true }`) |
 | `GET /api/opportunities` | Opportunity Radar rankings; returns no placeholder rows when real data is unavailable |
 | `GET /api/strategy/analyze` | Strategy Lab for a single instrument with no-lookahead evidence |
 | `GET /api/model/strategy/analyze` | Strategy Lab for a client model; blocks when model provenance is invalid |
 | `GET /api/model/clinic` | Portfolio Clinic diagnostics and hypothetical, analysis-only suggestions |
+| `GET /api/model/risk` | risk and exposure analytics plus the client risk pack for a model |
+| `GET /api/model-governance` | governance workspace: per-model version, approval status, risk gate and recent events |
+| `POST /api/model-governance/<id>/events` | record a governance event; approve/reject requires a committee note (and PIN when configured) |
+| `GET /api/model-governance/<id>/approval-packet` | committee approval packet as JSON (`.html` / `.pdf` variants export the same packet) |
+| `GET /api/model-validation` | champion/challenger validation dashboard with scores, grades and drift alerts |
+| `GET /api/models/<id>/editor` | current editable holdings with a save preview |
+| `POST /api/models/<id>/editor/preview` | non-mutating preview of proposed holdings (normalization, validation, diff) |
+| `POST /api/models/<id>/editor` | save edited holdings with a mandatory change note; records a governance snapshot |
 | `GET /api/report/instrument` | Analysis-only advisor report for an instrument |
 | `GET /api/report/model` | Analysis-only advisor report for a model |
 | `GET /api/report/snapshots` | list saved local report snapshots and export links |
@@ -404,30 +555,34 @@ Common local commands:
 | Task | Command |
 |------|---------|
 | Create virtualenv if needed | `python3 -m venv .venv` |
-| Install runtime + dev Python deps | `./.venv/bin/python -m pip install -r requirements-dev.txt` |
+| Install tested Python pins (CI parity) | `./.venv/bin/python -m pip install -r requirements.lock` |
+| Install by ranges instead (fresh resolve) | `./.venv/bin/python -m pip install -r requirements-dev.txt` |
 | Install frontend deps | `npm --prefix frontend ci` |
 | Local/LAN server | `./run.sh` |
 | Localhost Flask dev server | `./run.sh --dev` |
 | Vite dev server | `npm --prefix frontend run dev` |
 | Frontend typecheck | `npm --prefix frontend run typecheck` |
+| Frontend lint (ESLint) | `npm --prefix frontend run lint` |
 | Frontend production build | `npm --prefix frontend run build` |
 | Python tests | `./.venv/bin/python -m pytest` |
+| Python tests with coverage (CI flags) | `./.venv/bin/python -m pytest --cov=engine --cov=app --cov-report=term-missing` |
 | Python syntax compile | `./.venv/bin/python -m compileall app.py serve.py engine tests` |
 | Design spec JSON validation | `./.venv/bin/python -m json.tool .design_spec.json >/dev/null` |
 | Legacy frontend syntax check | `node --check static/app.js` |
 
-There is no configured lint or formatter command in this repository today. The
-CI-equivalent local ladder is:
+ESLint is configured for the frontend (`frontend/eslint.config.js`); there is
+still no Python lint or formatter command in this repository. The CI-equivalent
+local ladder is:
 
 ```bash
-./.venv/bin/python -m pip install -r requirements-dev.txt
+./.venv/bin/python -m pip install -r requirements.lock
 npm --prefix frontend ci
 npm --prefix frontend run typecheck
 npm --prefix frontend run build
 ./.venv/bin/python -m compileall app.py serve.py engine tests
 ./.venv/bin/python -m json.tool .design_spec.json >/dev/null
 node --check static/app.js
-./.venv/bin/python -m pytest
+./.venv/bin/python -m pytest --cov=engine --cov=app --cov-report=term-missing
 ```
 
 The test suite is offline-only: it exercises deterministic sample/upload data,
@@ -451,16 +606,25 @@ built in:
 
 - **Authentication** — HTTP Basic Auth gates *every* route (pages, API, static
   assets) with a constant-time credential check.
+- **Brute-force throttle** — failed logins are counted per remote IP with a
+  short per-attempt delay; ten failures trigger a 60-second lockout (HTTP 429).
+- **CSRF heuristic** — non-GET requests with cross-site browser fetch metadata
+  (`Sec-Fetch-Site`/`Origin`) are rejected with 403 before any handler runs.
 - **Encryption (opt-in)** — `HELIOS_TLS=1` serves self-signed HTTPS so the login
-  is not sent in cleartext. Recommended on any network you do not fully trust;
-  on plain HTTP the startup banner warns about this explicitly.
+  is not sent in cleartext, and it fails closed: if the certificate cannot be
+  created, startup aborts instead of silently falling back to plain HTTP. On
+  plain HTTP the startup banner warns explicitly.
 - **XSS-safe rendering** — all user-supplied / external strings (instrument
   names, news headlines) are HTML-escaped before display; a strict
-  Content-Security-Policy (`script-src 'self'` + the Chart.js CDN) is the second
-  layer.
+  Content-Security-Policy (`script-src 'self'`, with a Chart.js CDN exception
+  only on the legacy dashboard pages) is the second layer.
 - **CSP tradeoff** — `style-src 'unsafe-inline'` remains because the current
-  single-file UI uses a few inline styles and dynamic bar widths. It is scoped to
-  styles only; scripts remain self/CDN restricted.
+  UI uses a few inline styles and dynamic bar widths. It is scoped to
+  styles only; scripts remain self-restricted (plus the legacy-only CDN).
+- **Governance sign-off (opt-in)** — configuring a local approver PIN
+  (`HELIOS_GOVERNANCE_APPROVER_PIN[_HASH]`) makes approve/reject decisions
+  require committee identity plus a SHA-256-verified PIN compared in constant
+  time.
 - **Input sanitization** — ticker symbols are constrained to valid characters
   (closes injection / SSRF surface); request bodies are capped at 16 MB and CSV
   parsing is row-bounded.

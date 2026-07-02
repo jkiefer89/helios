@@ -216,5 +216,187 @@
       "suggested_action": "Supply longer price history for the shortest-history holdings or substitute longer-history proxies before relying on 1Y/3Y/5Y projections. Short-horizon (<=90d) signals remain usable.",
       "rationale": "Annualized vol/return and the long-horizon cone need enough data to be stable; 252 days = 1 year is the minimum for more credible annualization. The union/rescaled methodology avoids discarding longer-history holdings but must be disclosed as forward-analysis, not a performance track record."
     }
-  ]
+  ],
+  "evidence_lab_walk_forward": {
+    "source": "engine/evidence_lab.py analyze_series/_walk_windows",
+    "parameter_clamps": {
+      "horizon_days": "clip to 5-252, default 21",
+      "train_window": "clip to 90-756, default 252",
+      "step": "clip to 5-63, default 21",
+      "decay_horizons": "sorted union of {5, horizon_days, 63}",
+      "rationale": "Clamped API inputs keep walk-forward runs tractable and comparable: 21d matches the default signal horizon, 252d training is one year of context, and the fixed 5/63 decay endpoints let every target answer 'does the edge decay with horizon' on the same axes."
+    },
+    "history_gate": {
+      "trigger": "blocked unless len(clean close) >= train_window + max(decay_horizons) + 5 sessions",
+      "rationale": "Anything shorter cannot produce even a handful of non-overlapping windows, so a hit rate would be noise presented as evidence."
+    },
+    "provenance_gate": {
+      "trigger": "blocked unless data_provenance.eligible_for_real_research (sample/simulated data always blocked; models via build_series(allow_sample=False, allow_simulated=False))",
+      "rationale": "Walk-forward 'proof' on demo or simulated prices is the exact honesty failure the platform forbids; the lab refuses rather than caveats."
+    },
+    "action_bands": {
+      "buy": "historical signal score > +0.15",
+      "sell": "historical signal score < -0.15",
+      "hold": "otherwise",
+      "rationale": "Wider than the live +/-0.25 trade bands so the lab measures more directional calls and false positives; it grades the signal, it never places the trade."
+    },
+    "paper_hit_rule": {
+      "definition": "evidence = alpha vs benchmark when available else raw forward return; BUY/ADD/OVERWEIGHT hit iff evidence > 0, SELL/REDUCE/UNDERWEIGHT hit iff evidence < 0, HOLD/REVIEW hit iff evidence >= -1.0",
+      "rationale": "Directional calls must land on the right side of zero, while HOLD tolerates a 1% drag because 'do nothing' is only wrong when it materially lags the benchmark (shared with the Signal Journal so both layers score identically)."
+    },
+    "false_positive_definition": {
+      "trigger": "BUY/SELL windows whose paper hit is False, reported as count and rate over directional windows only",
+      "rationale": "A confident directional call that fails is the costliest error for an advisor, so it is tracked separately from the blended hit rate."
+    },
+    "confidence_bands": {
+      "definition": "p05/p25/p50/p75/p95 percentiles plus a normal-approximation 90% CI (mean +/- 1.645*SE) on forward return, alpha, and hit rate",
+      "rationale": "Bands stop a lucky mean from being read as skill; 1.645 is the standard two-sided 90% z so the interval is deliberately conservative for small window counts."
+    },
+    "no_lookahead": {
+      "definition": "signal scores and regime labels are computed once on the full series from strictly backward-looking inputs and sliced at each signal date (equivalence to frozen-prefix recomputation asserted in tests)",
+      "rationale": "Slicing precomputed causal series is a pure performance win only because every input is backward-looking; the test assertion keeps that invariant honest."
+    },
+    "prospective_layer": {
+      "definition": "same-target Signal Journal entries reported alongside historical windows with status not_started/measuring/active/measured",
+      "rationale": "Historical walk-forward and live paper tracking answer different questions; showing both prevents backtest evidence from masquerading as prospective performance."
+    }
+  },
+  "governance_risk_gate": {
+    "source": "engine/model_governance.py _risk_gate/_risk_limits/_risk_limit_violations/record_event",
+    "gate_behavior": {
+      "definition": "can_approve is false and state is 'blocked' while any risk-limit violation is active; approval events are rejected with HTTP 400 until resolved",
+      "rationale": "A committee should never be able to sign off a model that already breaches its own written limits."
+    },
+    "max_single_position_pct": {
+      "limit": "library template risk_limits when the model came from a template, else mandate single_name_cap * 100 (default 35%)",
+      "rationale": "Reuses the mandate/insight single-name cap so governance and insights can never disagree about the same breach."
+    },
+    "min_holdings": {
+      "limit": "template value or 5 for uploaded models",
+      "rationale": "Below five holdings a 'model' is a concentrated bet; the floor forces that to be an explicit template decision, not a default."
+    },
+    "total_weight_pct": {
+      "limit": "sum of weights must be within 100% +/- 0.5pp",
+      "rationale": "Half a point absorbs rounding from percentage inputs while catching genuinely unnormalized allocations."
+    },
+    "committee_note": {
+      "limit": "approve/reject requires a note of at least 5 characters",
+      "rationale": "An unexplained approval is worthless in an audit; five characters is the minimal 'you must say something' bar."
+    },
+    "pin_verification": {
+      "definition": "when HELIOS_GOVERNANCE_APPROVER_PIN or _PIN_HASH is set, approve/reject requires signer_name, signer_role, committee, and a PIN matched as SHA-256 via hmac.compare_digest; otherwise decisions record as unverified local_attestation",
+      "rationale": "Hash-form config keeps the plain PIN out of shared-machine environments, and constant-time comparison closes the timing side channel; without a PIN the packet still records who claimed the decision but marks it unverified."
+    }
+  },
+  "model_validation_thresholds": {
+    "source": "engine/model_validation.py _validation_score/_grade/_drift_alerts",
+    "score_weights": {
+      "hit_rate_pct": 0.35,
+      "alpha_component": 0.25,
+      "false_positive_component": 0.2,
+      "decay_component": 0.15,
+      "governance_component": 0.05,
+      "rationale": "Hit rate and alpha carry 60% because they are the direct paper-performance evidence; false positives and decay penalize fragile edges; governance gets a deliberate 5% so process state can tilt a ranking but never rescue a model with no measured edge."
+    },
+    "alpha_component": {
+      "definition": "clamp(50 + avg_alpha_pct * 10, 0, 100)",
+      "rationale": "Centers 'no alpha' at 50 and saturates at +/-5% average alpha, beyond which more claimed edge is more likely noise than skill."
+    },
+    "false_positive_component": {
+      "definition": "clamp(100 - false_positive_rate_pct, 0, 100)",
+      "rationale": "A direct inversion keeps the penalty linear and legible: every extra point of false-positive rate costs exactly one component point."
+    },
+    "governance_component": {
+      "definition": "75 base, -25 when risk_limit_state is breach, +10 when approval_status is approved, clamped 0-100",
+      "rationale": "Breaching written limits must cost more than committee approval earns, so paperwork can never outweigh an active violation."
+    },
+    "grade_bands": {
+      "A": ">= 80",
+      "B": ">= 65",
+      "C": ">= 50",
+      "D": "< 50",
+      "rationale": "Coarse letter bands force conversation about evidence rather than false precision from a two-decimal score."
+    },
+    "champion_selection": {
+      "definition": "eligible models sorted by (validation_score, window_count, name) descending; top row is champion, remaining eligible rows are challengers, ineligible rows stay blocked",
+      "rationale": "Window count breaks score ties toward the model with more measured evidence; blocked models can never rank because validation must not bypass provenance gates."
+    },
+    "drift_alerts": {
+      "governance_breach": "high when risk_limit_state is breach",
+      "negative_walk_forward_alpha": "high when avg_alpha_pct < 0",
+      "false_positives_elevated": "medium when false-positive rate >= 35%",
+      "signal_decay_warning": "medium when longest-horizon decay alpha < 0",
+      "prospective_drift": "medium when Signal Journal avg alpha < 0",
+      "rationale": "Zero is the honest line for alpha alerts (paper evidence is net-negative), and 35% false positives means roughly one in three directional calls failed - past the point an advisor should quote the signal without caveats."
+    }
+  },
+  "risk_pack_limits": {
+    "source": "engine/risk_exposure.py _concentration_warnings/_volatility_budget/_correlation_clusters/_liquidity_flags/_risk_posture",
+    "single_name_warning": {
+      "trigger": "top holding >= 20% weight (medium), >= 30% (high)",
+      "rationale": "Warns a full tier earlier than the 35% governance block so the pack prompts a trim conversation before the hard gate fires."
+    },
+    "top_5_concentration": {
+      "trigger": ">= 60% combined weight in the top five holdings (medium)",
+      "rationale": "Mirrors the insight-layer top-3 > 60% intent at pack granularity: past 60% the tail holdings are decoration, not diversification."
+    },
+    "sector_concentration": {
+      "trigger": "any sector >= 45% of model weight (medium)",
+      "rationale": "45% is roughly double a diversified benchmark's largest sector weight, the point where one macro theme drives the book."
+    },
+    "volatility_budget": {
+      "trigger": "over_budget (high) when realized annualized vol > mandate target_vol_pct with no tolerance band",
+      "rationale": "The pack states the raw gap for client review; the 1.15x insight-layer band still governs when the mandate-fit insight fires."
+    },
+    "correlation_clusters": {
+      "high_correlation": "pairwise correlation >= 0.75",
+      "diversifier": "pairwise correlation <= 0.20",
+      "rationale": "0.75 is where two holdings behave as one position under stress; 0.20 marks pairs that still plausibly diversify, with the standard caveat that correlations rise in crises."
+    },
+    "liquidity_flags": {
+      "score_tiers": "ADV >= $5B -> 95, >= $1B -> 85, >= $250M -> 70, below -> 55, unmapped ticker -> 40",
+      "flags": "score < 45 unknown_liquidity, < 65 watch, else normal",
+      "basis": "observed 60-day live/uploaded dollar volume when available, else a static public large-cap proxy",
+      "rationale": "Observed volume outranks the static proxy so real uploaded evidence always wins; unmapped names default below the watch line because unknown liquidity must be verified, never assumed."
+    },
+    "scenario_shocks": {
+      "definition": "fixed deterministic sector/exposure shocks (equity -10%, rates +100bps, growth compression, defensive rotation, liquidity stress) plus a growth-factor unwind when growth exposure > 40%",
+      "rationale": "Hardcoded shock tables are transparent and reproducible - stress illustrations, not forecasts, and never Monte-Carlo dressed up as scenarios."
+    },
+    "risk_posture": {
+      "definition": "elevated when vol budget is over_budget or any high-severity stress/concentration row; watch when any liquidity flag is non-normal; else review_ready",
+      "rationale": "One conservative word summarizes the pack, and the ladder only escalates - a clean posture requires every check to pass."
+    }
+  },
+  "data_quality_alert_severity": {
+    "source": "engine/data_quality.py dashboard_payload/alert_inputs + persistence.sync_data_quality_alerts",
+    "blocker_rules": {
+      "short_history_below_research_floor": "non-sample symbol rows < min_research_rows (default 60)",
+      "missing_model_data": "a model holding has no eligible real history",
+      "zero_coverage_model": "coverage gap where 0 holdings have real research coverage",
+      "rationale": "Blockers are exactly the states where research output would be wrong, not merely degraded - below 60 rows or with missing holdings there is no honest analysis to show."
+    },
+    "warning_rules": {
+      "stale_symbols": "latest data older than stale_days (default 7 calendar days)",
+      "short_histories": "rows below institutional target (default 252) but at or above the research floor",
+      "refresh_failures": "provider refresh attempts logged with status error",
+      "refresh_observability_gaps": "live-sourced symbols with no persisted refresh attempt in the local log",
+      "partial_coverage_and_source_conflicts": "models with mixed real/sample/missing holdings or mixed sources",
+      "rationale": "Warnings mark evidence that is usable but not presentable to a client unchallenged; a week of staleness spans any market holiday cluster without flagging every weekend, and 252 rows is the one-year annualization floor."
+    },
+    "research_ready": {
+      "definition": "workspace is research_ready only when blocker count is 0 and at least one symbol or model is individually research-ready",
+      "rationale": "An empty workspace with no blockers is not 'ready' - readiness requires actual eligible evidence, not just the absence of problems."
+    },
+    "alert_lifecycle": {
+      "definition": "alerts persist with stable ids (data_quality:<category>:<target>), occurrence counts, and new/changed/reopened/resolved notification states synced on every dashboard build",
+      "rationale": "Stable ids make a recurring problem visibly recurring (reopened, count incremented) instead of resetting to a fresh alert each run, which is the difference between a log and an audit trail."
+    },
+    "threshold_guards": {
+      "stale_days": "env HELIOS_DATA_QUALITY_STALE_DAYS clamped 1-3650",
+      "min_research_rows": "env HELIOS_DATA_QUALITY_MIN_RESEARCH_ROWS clamped 20-10000",
+      "institutional_history_rows": "env HELIOS_DATA_QUALITY_INSTITUTIONAL_ROWS clamped min_research_rows-20000",
+      "rationale": "Range guards keep misconfigured environments from silently disabling diagnostics (0 days) or demanding impossible history; the institutional floor can never drop below the research floor."
+    }
+  }
 }
