@@ -10,7 +10,7 @@ Modules:
                validation, clinic, risk
     reports  - advisor reports and saved snapshot exports
     ai       - optional AI Copilot proxy
-    spa      - React SPA / legacy dashboard static serving
+    spa      - React SPA static serving (build instructions when dist absent)
 
 Import ordering matters: ``app.py`` loads the local .env first, then calls
 ``init_app()`` which imports the engine-backed blueprint modules.

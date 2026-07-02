@@ -7,13 +7,6 @@ from helios_web import core as web_core
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_return_metric_labels_are_explicit_about_mean_annualization():
-    text = (ROOT / "static" / "app.js").read_text()
-
-    assert text.count("Mean annual return") == 2
-    assert '"Annual return"' not in text
-
-
 def test_react_frontend_scaffold_exists():
     assert (ROOT / "frontend" / "package.json").is_file()
     assert (ROOT / "frontend" / "vite.config.ts").is_file()
@@ -510,18 +503,44 @@ def test_flask_serves_react_build_when_present(tmp_path, monkeypatch):
     assert b'id="root"' in spa.data
 
 
-def test_flask_falls_back_to_legacy_when_react_build_absent(tmp_path, monkeypatch):
+def test_legacy_dashboard_route_is_retired(tmp_path, monkeypatch):
+    monkeypatch.setattr(web_core, "FRONTEND_DIST", tmp_path / "missing-dist")
+    helios.app.config.update(TESTING=True, PROPAGATE_EXCEPTIONS=False)
+    client = helios.app.test_client()
+
+    legacy = client.get("/legacy")
+
+    assert legacy.status_code == 404
+    assert legacy.is_json
+
+
+def test_flask_serves_build_instructions_when_react_build_absent(tmp_path, monkeypatch):
     monkeypatch.setattr(web_core, "FRONTEND_DIST", tmp_path / "missing-dist")
     helios.app.config.update(TESTING=True, PROPAGATE_EXCEPTIONS=False)
     client = helios.app.test_client()
 
     root = client.get("/")
-    legacy = client.get("/legacy")
     api_miss = client.get("/api/nope")
 
     assert root.status_code == 200
-    assert legacy.status_code == 200
     assert b"Helios" in root.data
-    assert b"Helios" in legacy.data
+    assert b"npm --prefix frontend ci" in root.data
+    assert b"npm --prefix frontend run build" in root.data
+    # Self-contained: no external scripts, stylesheets, or images.
+    assert b"http://" not in root.data
+    assert b"https://" not in root.data
+    assert b"<script" not in root.data
+    assert root.headers["Content-Security-Policy"].count("script-src 'self';") == 1
     assert api_miss.status_code == 404
     assert api_miss.is_json
+
+
+def test_csp_script_src_is_self_with_no_cdn_exception(tmp_path, monkeypatch):
+    monkeypatch.setattr(web_core, "FRONTEND_DIST", tmp_path / "missing-dist")
+    helios.app.config.update(TESTING=True, PROPAGATE_EXCEPTIONS=False)
+    client = helios.app.test_client()
+
+    for path in ("/", "/api/tickers", "/api/nope"):
+        csp = client.get(path).headers["Content-Security-Policy"]
+        assert "jsdelivr" not in csp, path
+        assert "script-src 'self';" in csp, path

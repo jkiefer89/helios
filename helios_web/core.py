@@ -24,7 +24,9 @@ from werkzeug.exceptions import HTTPException
 
 from .localenv import APP_ROOT
 
-app = Flask(__name__, root_path=str(APP_ROOT))
+# No Flask template/static folders: the React dist (plus the inline build-
+# instructions fallback) is served by the spa blueprint from frontend/dist.
+app = Flask(__name__, root_path=str(APP_ROOT), static_folder=None, template_folder=None)
 # Cap request bodies so a huge upload can't exhaust memory (16 MB is ample for CSVs).
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024
 FRONTEND_DIST = APP_ROOT / "frontend" / "dist"
@@ -133,24 +135,16 @@ def _serve_react_index():
     return send_from_directory(FRONTEND_DIST, "index.html")
 
 
-def _legacy_dashboard_request() -> bool:
-    """Only the legacy template pages load Chart.js from the CDN."""
-    if request.path == "/legacy":
-        return True
-    return request.path == "/" and not _react_frontend_ready()
-
-
 @app.after_request
 def _security_headers(resp: Response) -> Response:
-    """Defense-in-depth headers. The CSP restricts scripts to our own origin;
-    the legacy dashboard alone gets a Chart.js CDN script-src exception."""
-    script_src = "'self' https://cdn.jsdelivr.net" if _legacy_dashboard_request() else "'self'"
+    """Defense-in-depth headers. The CSP restricts scripts to our own origin
+    on every response — there are no per-route exceptions."""
     resp.headers["X-Content-Type-Options"] = "nosniff"
     resp.headers["X-Frame-Options"] = "DENY"
     resp.headers["Referrer-Policy"] = "no-referrer"
     resp.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
-        f"script-src {script_src}; "
+        "script-src 'self'; "
         "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data:; "
         "connect-src 'self'; "
