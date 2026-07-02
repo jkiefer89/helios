@@ -1,6 +1,8 @@
 import type { EChartsOption } from "echarts";
 
 type ChartTone = "positive" | "negative" | "warning" | "info" | "neutral";
+/** Tones plus the two non-semantic chart inks (violet accent, primary ink). */
+type ChartPaint = ChartTone | "accent" | "ink";
 type TooltipDatum = {
   marker?: string;
   seriesName?: string;
@@ -18,19 +20,22 @@ export const HELIOS_CHART_COLORS = {
   warning: "#f4c542",
   info: "#4c9dff",
   neutral: "#9aa8ba",
+  accent: "#a78bfa",
   panel: "#0b1522",
-  grid: "rgba(148, 163, 184, 0.16)",
+  grid: "rgba(148, 163, 184, 0.14)",
   axis: "rgba(148, 163, 184, 0.22)",
   text: "#cbd7e6",
   muted: "#8fa1b6",
 };
 
-const HELIOS_CHART_COLOR_CHANNELS: Record<ChartTone, string> = {
+const HELIOS_CHART_COLOR_CHANNELS: Record<ChartPaint, string> = {
   positive: "71, 214, 111",
   negative: "255, 92, 103",
   warning: "244, 197, 66",
   info: "76, 157, 255",
   neutral: "154, 168, 186",
+  accent: "167, 139, 250",
+  ink: "203, 215, 230",
 };
 
 export const HELIOS_CHART_FORMATTERS = {
@@ -54,6 +59,11 @@ export const HELIOS_CHART_FORMATTERS = {
     if (number == null) return "n/a";
     return `$${number.toLocaleString(undefined, { maximumFractionDigits: Math.abs(number) >= 100 ? 2 : 4 })}`;
   },
+  count(value: unknown): string {
+    const number = finiteNumber(value);
+    if (number == null) return "n/a";
+    return Math.round(number).toLocaleString();
+  },
   date(value: unknown): string {
     if (typeof value !== "string" || !value.trim()) return "n/a";
     const date = new Date(value);
@@ -62,21 +72,69 @@ export const HELIOS_CHART_FORMATTERS = {
   },
 } satisfies Record<string, ChartValueFormatter>;
 
+const HELIOS_AXIS_LABEL = {
+  color: HELIOS_CHART_COLORS.muted,
+  fontSize: 10,
+  fontWeight: 600,
+} as const;
+
+/** Dashed crosshair with dark value chips; y chip honours the chart's own formatter. */
+function chartAxisPointer(formatValue: ChartValueFormatter = HELIOS_CHART_FORMATTERS.number) {
+  const pointerLine = { color: chartAlpha("info", 0.4), type: [3, 3] as number[], width: 1 };
+  return {
+    type: "cross" as const,
+    lineStyle: pointerLine,
+    crossStyle: pointerLine,
+    label: {
+      backgroundColor: "rgba(9, 14, 21, 0.94)",
+      borderColor: "rgba(76, 157, 255, 0.35)",
+      borderWidth: 1,
+      color: HELIOS_CHART_COLORS.text,
+      fontSize: 10,
+      fontWeight: 600,
+      padding: [3, 7],
+      formatter: (params: { axisDimension?: string; value?: unknown }) =>
+        params.axisDimension === "y"
+          ? formatValue(params.value)
+          : HELIOS_CHART_FORMATTERS.date(String(params.value ?? "")).toUpperCase(),
+    },
+  };
+}
+
 const HELIOS_CHART_TOOLTIP = {
   trigger: "axis",
-  backgroundColor: "rgba(7, 12, 20, 0.96)",
-  borderColor: "rgba(76, 157, 255, 0.35)",
+  backgroundColor: "rgba(7, 12, 20, 0.94)",
+  borderColor: "rgba(76, 157, 255, 0.32)",
   borderWidth: 1,
-  textStyle: { color: HELIOS_CHART_COLORS.text },
+  padding: [8, 11] as number[],
+  textStyle: { color: HELIOS_CHART_COLORS.text, fontSize: 11 },
+  extraCssText: "border-radius: 6px; box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45); backdrop-filter: blur(6px);",
   confine: true,
 } as const;
 
 const HELIOS_CHART_LEGEND = {
+  show: true,
   bottom: 0,
   icon: "roundRect",
-  itemWidth: 16,
-  itemHeight: 3,
-  textStyle: { color: HELIOS_CHART_COLORS.text },
+  itemWidth: 14,
+  itemHeight: 4,
+  itemGap: 16,
+  textStyle: { color: HELIOS_CHART_COLORS.muted, fontSize: 10, fontWeight: 600 },
+  inactiveColor: "rgba(148, 163, 184, 0.3)",
+} as const;
+
+export const HELIOS_CHART_GRID = {
+  left: 10,
+  right: 14,
+  top: 24,
+  bottom: 8,
+  containLabel: true,
+} as const;
+
+/** Grid variant leaving room for the curated bottom legend strip. */
+export const HELIOS_CHART_GRID_WITH_LEGEND = {
+  ...HELIOS_CHART_GRID,
+  bottom: 30,
 } as const;
 
 export const HELIOS_CHART_THEME: EChartsOption = {
@@ -88,31 +146,120 @@ export const HELIOS_CHART_THEME: EChartsOption = {
     HELIOS_CHART_COLORS.neutral,
   ],
   backgroundColor: "transparent",
+  animationDuration: 400,
+  animationEasing: "cubicOut",
+  animationDurationUpdate: 240,
+  animationEasingUpdate: "cubicOut",
   textStyle: {
     color: HELIOS_CHART_COLORS.text,
     fontFamily: "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
     fontSize: 11,
   },
-  tooltip: HELIOS_CHART_TOOLTIP,
-  grid: {
-    left: 44,
-    right: 18,
-    top: 22,
-    bottom: 34,
-    containLabel: true,
-  },
-  legend: HELIOS_CHART_LEGEND,
+  tooltip: { ...HELIOS_CHART_TOOLTIP, axisPointer: chartAxisPointer() },
+  grid: HELIOS_CHART_GRID,
+  // Legends are curated per adapter; single-series charts stay clutter-free.
+  legend: { ...HELIOS_CHART_LEGEND, show: false },
 };
 
-export function chartAlpha(tone: ChartTone, alpha: number) {
+export function chartAlpha(tone: ChartPaint, alpha: number) {
   const safeAlpha = Math.max(0, Math.min(1, alpha));
   return `rgba(${HELIOS_CHART_COLOR_CHANNELS[tone]}, ${safeAlpha})`;
+}
+
+/** Vertical gradient fill fading to transparent under a primary series. */
+export function chartAreaGradient(tone: ChartPaint, from = 0.26, to = 0) {
+  return {
+    type: "linear" as const,
+    x: 0,
+    y: 0,
+    x2: 0,
+    y2: 1,
+    colorStops: [
+      { offset: 0, color: chartAlpha(tone, from) },
+      { offset: 1, color: chartAlpha(tone, to) },
+    ],
+  };
+}
+
+/** Subtle self-coloured glow for a chart's primary line only. */
+export function chartGlow(tone: ChartPaint, alpha = 0.38) {
+  return {
+    shadowBlur: 9,
+    shadowColor: chartAlpha(tone, alpha),
+    shadowOffsetY: 3,
+  };
+}
+
+/** Dashed horizontal reference lines (zero, thresholds) via markLine. */
+export function chartGuides(guides: Array<{ value: number; tone?: ChartPaint; label?: string }>) {
+  return {
+    silent: true,
+    symbol: "none",
+    animation: false,
+    data: guides.map((guide) => ({
+      yAxis: guide.value,
+      lineStyle: { color: chartAlpha(guide.tone ?? "neutral", 0.42), type: [4, 4] as number[], width: 1 },
+      label: {
+        show: Boolean(guide.label),
+        formatter: guide.label ?? "",
+        position: "insideEndTop" as const,
+        color: chartAlpha(guide.tone ?? "neutral", 0.85),
+        fontSize: 9,
+        fontWeight: 700,
+      },
+    })),
+  };
+}
+
+/** Category (date) x-axis: no hard axis line, small uppercase muted labels. */
+export function chartCategoryAxis(dates: string[], overrides: Record<string, unknown> = {}) {
+  return {
+    type: "category" as const,
+    data: dates,
+    boundaryGap: false,
+    axisTick: { show: false },
+    axisLine: { show: false },
+    axisLabel: {
+      ...HELIOS_AXIS_LABEL,
+      hideOverlap: true,
+      margin: 12,
+      formatter: (value: string | number) => HELIOS_CHART_FORMATTERS.date(String(value)).toUpperCase(),
+    },
+    ...overrides,
+  };
+}
+
+/** Value y-axis: sparse low-opacity dashed gridlines, no axis line. */
+export function chartValueAxis(
+  formatter: ChartValueFormatter = HELIOS_CHART_FORMATTERS.number,
+  overrides: Record<string, unknown> = {},
+) {
+  return {
+    type: "value" as const,
+    scale: true,
+    splitNumber: 4,
+    axisLine: { show: false },
+    axisTick: { show: false },
+    axisLabel: { ...HELIOS_AXIS_LABEL, formatter },
+    splitLine: { lineStyle: { color: HELIOS_CHART_COLORS.grid, type: [2, 6] as number[] } },
+    ...overrides,
+  };
 }
 
 export function chartTooltip(formatValue: ChartValueFormatter = HELIOS_CHART_FORMATTERS.number) {
   return {
     ...HELIOS_CHART_TOOLTIP,
+    axisPointer: chartAxisPointer(formatValue),
     formatter: axisTooltipFormatter(formatValue),
+  };
+}
+
+/** Item-trigger variant of the glass tooltip (scatter, pie). */
+export function chartItemTooltip(formatter?: (params: unknown) => string) {
+  return {
+    ...HELIOS_CHART_TOOLTIP,
+    trigger: "item" as const,
+    ...(formatter ? { formatter } : {}),
   };
 }
 
@@ -141,10 +288,18 @@ export function axisTooltipFormatter(formatValue: ChartValueFormatter = HELIOS_C
 }
 
 export function toneColor(tone?: string) {
+  return HELIOS_CHART_COLORS[safeChartTone(tone)];
+}
+
+export function safeChartTone(tone?: string): ChartTone {
   if (tone === "positive" || tone === "negative" || tone === "warning" || tone === "info" || tone === "neutral") {
-    return HELIOS_CHART_COLORS[tone];
+    return tone;
   }
-  return HELIOS_CHART_COLORS.neutral;
+  return "neutral";
+}
+
+export function escapeChartHtml(value: string): string {
+  return escapeHtml(value);
 }
 
 function finiteNumber(value: unknown): number | null {

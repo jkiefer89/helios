@@ -1,5 +1,5 @@
 import type { EChartsOption, SeriesOption } from "echarts";
-import { chartAlpha, chartLegend, HELIOS_CHART_COLORS, HELIOS_CHART_FORMATTERS, toneColor } from "../chartTheme";
+import { chartAlpha, chartGlow, chartLegend, HELIOS_CHART_COLORS, HELIOS_CHART_FORMATTERS, HELIOS_CHART_GRID_WITH_LEGEND, toneColor } from "../chartTheme";
 import { lineOption } from "./equity";
 
 export type ForecastConePoint = {
@@ -73,7 +73,7 @@ export function forecastConeOption(points: ForecastConePoint[], baseline?: numbe
       type: "line",
       data: pick("actual"),
       showSymbol: false,
-      lineStyle: { width: 1.8, color: HELIOS_CHART_COLORS.text },
+      lineStyle: { width: 1.8, color: HELIOS_CHART_COLORS.text, ...chartGlow("ink", 0.28) },
       itemStyle: { color: HELIOS_CHART_COLORS.text },
       emphasis: { focus: "series" },
     },
@@ -92,6 +92,7 @@ export function forecastConeOption(points: ForecastConePoint[], baseline?: numbe
   }
   return {
     ...lineOption(dates, series, HELIOS_CHART_FORMATTERS.price),
+    grid: HELIOS_CHART_GRID_WITH_LEGEND,
     legend: chartLegend({
       data: ["Actual", "Median path", "P25–P75 band", "P05–P95 band"],
     }),

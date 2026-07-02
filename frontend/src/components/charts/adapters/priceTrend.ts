@@ -1,6 +1,6 @@
 import type { EChartsOption, SeriesOption } from "echarts";
 import { lineOption } from "./equity";
-import { chartAlpha, chartLegend, HELIOS_CHART_COLORS, HELIOS_CHART_FORMATTERS, toneColor } from "../chartTheme";
+import { chartAlpha, chartGlow, chartLegend, HELIOS_CHART_COLORS, HELIOS_CHART_FORMATTERS, HELIOS_CHART_GRID_WITH_LEGEND, toneColor } from "../chartTheme";
 
 export type PriceTrendPoint = {
   date: string;
@@ -70,7 +70,7 @@ export function priceTrendOption(points: PriceTrendPoint[], markers: PriceTrendM
       data: points.map((point) => point.close),
       showSymbol: false,
       smooth: true,
-      lineStyle: { width: 2.2, color: HELIOS_CHART_COLORS.text },
+      lineStyle: { width: 2.2, color: HELIOS_CHART_COLORS.text, ...chartGlow("ink", 0.28) },
       itemStyle: { color: HELIOS_CHART_COLORS.text },
       emphasis: { focus: "series" },
     },
@@ -98,6 +98,7 @@ export function priceTrendOption(points: PriceTrendPoint[], markers: PriceTrendM
   ];
   return {
     ...lineOption(dates, series, HELIOS_CHART_FORMATTERS.price),
+    grid: HELIOS_CHART_GRID_WITH_LEGEND,
     legend: chartLegend({ data: ["Close", "SMA 50", "SMA 200"] }),
   };
 }

@@ -1,5 +1,14 @@
 import type { EChartsOption, SeriesOption } from "echarts";
-import { chartAlpha, chartTooltip, HELIOS_CHART_COLORS, HELIOS_CHART_FORMATTERS, toneColor } from "../chartTheme";
+import {
+  chartAlpha,
+  chartCategoryAxis,
+  chartGlow,
+  chartGuides,
+  chartTooltip,
+  chartValueAxis,
+  HELIOS_CHART_FORMATTERS,
+  toneColor,
+} from "../chartTheme";
 
 export type MacdPoint = {
   date: string;
@@ -17,9 +26,11 @@ export function macdOption(points: MacdPoint[]): EChartsOption {
       data: points.map((point) => point.histogram),
       barMaxWidth: 5,
       itemStyle: {
+        borderRadius: 1,
         color: (params: { value?: unknown }) =>
           typeof params.value === "number" && params.value < 0 ? chartAlpha("negative", 0.5) : chartAlpha("positive", 0.5),
       },
+      markLine: chartGuides([{ value: 0, tone: "neutral" }]),
       emphasis: { disabled: true },
     },
     {
@@ -27,7 +38,7 @@ export function macdOption(points: MacdPoint[]): EChartsOption {
       type: "line",
       data: points.map((point) => point.macd),
       showSymbol: false,
-      lineStyle: { width: 1.5, color: toneColor("info") },
+      lineStyle: { width: 1.5, color: toneColor("info"), ...chartGlow("info", 0.3) },
       itemStyle: { color: toneColor("info") },
       emphasis: { focus: "series" },
     },
@@ -43,25 +54,8 @@ export function macdOption(points: MacdPoint[]): EChartsOption {
   ];
   return {
     tooltip: chartTooltip(HELIOS_CHART_FORMATTERS.ratio),
-    legend: { show: false },
-    xAxis: {
-      type: "category",
-      data: dates,
-      axisTick: { show: false },
-      axisLine: { lineStyle: { color: HELIOS_CHART_COLORS.axis } },
-      axisLabel: {
-        color: HELIOS_CHART_COLORS.muted,
-        hideOverlap: true,
-        margin: 12,
-        formatter: (value: string | number) => HELIOS_CHART_FORMATTERS.date(String(value)),
-      },
-    },
-    yAxis: {
-      type: "value",
-      scale: true,
-      axisLabel: { color: HELIOS_CHART_COLORS.muted, formatter: HELIOS_CHART_FORMATTERS.ratio },
-      splitLine: { lineStyle: { color: HELIOS_CHART_COLORS.grid } },
-    },
+    xAxis: chartCategoryAxis(dates, { boundaryGap: true }),
+    yAxis: chartValueAxis(HELIOS_CHART_FORMATTERS.ratio),
     series,
   };
 }

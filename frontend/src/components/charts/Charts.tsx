@@ -2,13 +2,17 @@ import { lazy, Suspense } from "react";
 import type { EChartsOption } from "echarts";
 import { fmtNumber } from "../../utils/format";
 import { EmptyChartState, LoadingChartState } from "./chartStates";
+import { donutOption } from "./adapters/donut";
 import { drawdownOption } from "./adapters/drawdown";
 import { equityCurveOption } from "./adapters/equity";
 import { forecastConeOption, type ForecastConePoint } from "./adapters/forecastCone";
+import { histogramOption } from "./adapters/histogram";
 import { macdOption } from "./adapters/macd";
+import { multiLineOption } from "./adapters/multiLine";
 import { priceTrendOption, type PriceTrendMarker } from "./adapters/priceTrend";
 import { rollingSharpeOption } from "./adapters/rollingSharpe";
 import { rsiOption } from "./adapters/rsi";
+import { scoreScatterOption } from "./adapters/scoreScatter";
 
 type ChartTone = "positive" | "negative" | "warning" | "info" | "neutral";
 type ChartPoint = { label: string; x: number; y: number; size?: number; tone?: string; meta?: string };
@@ -17,25 +21,9 @@ type NullableNumber = number | null | undefined;
 
 const HeliosEChart = lazy(() => import("./HeliosEChart").then((module) => ({ default: module.HeliosEChart })));
 
-const TONE_COLORS: Record<ChartTone, string> = {
-  positive: "#47d66f",
-  negative: "#ff5c67",
-  warning: "#f4c542",
-  info: "#4c9dff",
-  neutral: "#9aa8ba",
-};
-
 function safeTone(tone?: string): ChartTone {
   if (tone === "positive" || tone === "negative" || tone === "warning" || tone === "info" || tone === "neutral") return tone;
   return "neutral";
-}
-
-function finiteNumber(value: unknown, fallback = 0): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
-}
-
-function clamp(value: number, min = 0, max = 100): number {
-  return Math.max(min, Math.min(max, value));
 }
 
 export function ScoreBar({ value, tone = "positive" }: { value?: number; tone?: string }) {
@@ -89,6 +77,7 @@ export function HistogramChart({
   tone = "info",
   min,
   max,
+  height = 190,
 }: {
   values: Array<number | null | undefined>;
   label?: string;
@@ -96,44 +85,18 @@ export function HistogramChart({
   tone?: string;
   min?: number;
   max?: number;
+  height?: number;
 }) {
   const clean = values.filter((value): value is number => typeof value === "number" && Number.isFinite(value));
-  if (clean.length < 2) return <div className="chart-empty">Histogram appears when enough real-data points are available.</div>;
-  const bucketCount = Math.max(3, Math.min(12, Math.round(buckets)));
-  const floor = typeof min === "number" ? min : Math.min(...clean);
-  const ceiling = typeof max === "number" ? max : Math.max(...clean);
-  const span = ceiling - floor || 1;
-  const counts = Array.from({ length: bucketCount }, () => 0);
-  clean.forEach((value) => {
-    const rawIndex = Math.floor(((value - floor) / span) * bucketCount);
-    counts[clamp(rawIndex, 0, bucketCount - 1)] += 1;
-  });
-  const high = Math.max(...counts, 1);
-  const toneClass = safeTone(tone);
+  if (clean.length < 2) {
+    return <EmptyChartState body="Histogram appears when enough real-data points are available." minHeight={height} />;
+  }
   return (
-    <div className="histogram-chart" role="img" aria-label={`${label} distribution histogram`}>
-      <div className="histogram-chart__bars" style={{ gridTemplateColumns: `repeat(${bucketCount}, minmax(0, 1fr))` }}>
-        {counts.map((count, index) => {
-          const bucketStart = floor + (span / bucketCount) * index;
-          const bucketEnd = floor + (span / bucketCount) * (index + 1);
-          return (
-            <span
-              key={`${bucketStart}-${bucketEnd}`}
-              className={`tone-${toneClass}`}
-              style={{ height: `${Math.max(4, (count / high) * 100)}%` }}
-              title={`${fmtNumber(bucketStart, 1)} to ${fmtNumber(bucketEnd, 1)}: ${count}`}
-            >
-              <b>{count}</b>
-            </span>
-          );
-        })}
-      </div>
-      <div className="histogram-chart__axis">
-        <span>{fmtNumber(floor, 1)}</span>
-        <b>{label}</b>
-        <span>{fmtNumber(ceiling, 1)}</span>
-      </div>
-    </div>
+    <LazyHeliosEChart
+      option={histogramOption(clean, { label, buckets, tone, min, max })}
+      height={height}
+      ariaLabel={`${label} distribution histogram`}
+    />
   );
 }
 
@@ -149,45 +112,15 @@ export function ScoreScatter({
   height?: number;
 }) {
   const clean = points.filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
-  if (!clean.length) return <div className="chart-empty">Score map appears when real ranked candidates are available.</div>;
-  const width = 520;
-  const pad = 34;
-  const toX = (value: number) => pad + (clamp(value) / 100) * (width - pad * 2);
-  const toY = (value: number) => pad + (1 - clamp(value) / 100) * (height - pad * 2);
+  if (!clean.length) {
+    return <EmptyChartState body="Score map appears when real ranked candidates are available." minHeight={height} />;
+  }
   return (
-    <div className="score-scatter">
-      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${yLabel} by ${xLabel}`} style={{ height }}>
-        <g className="grid-lines">
-          {[25, 50, 75].map((value) => (
-            <g key={value}>
-              <line x1={toX(value)} x2={toX(value)} y1={pad} y2={height - pad} />
-              <line x1={pad} x2={width - pad} y1={toY(value)} y2={toY(value)} />
-            </g>
-          ))}
-        </g>
-        <line className="chart-axis-line" x1={pad} x2={width - pad} y1={height - pad} y2={height - pad} />
-        <line className="chart-axis-line" x1={pad} x2={pad} y1={pad} y2={height - pad} />
-        <text className="chart-axis-label" x={width / 2} y={height - 8}>{xLabel}</text>
-        <text className="chart-axis-label" x={12} y={height / 2} transform={`rotate(-90 12 ${height / 2})`}>{yLabel}</text>
-        {clean.map((point) => {
-          const toneClass = safeTone(point.tone || (point.y >= 70 ? "positive" : point.y >= 50 ? "warning" : "neutral"));
-          const radius = clamp(finiteNumber(point.size, 7), 4, 11);
-          return (
-            <g key={`${point.label}-${point.x}-${point.y}`}>
-              <circle
-                className={`score-scatter__dot tone-${toneClass}`}
-                cx={toX(point.x)}
-                cy={toY(point.y)}
-                r={radius}
-              >
-                <title>{`${point.label}: ${yLabel} ${fmtNumber(point.y, 1)}, ${xLabel} ${fmtNumber(point.x, 1)}${point.meta ? `, ${point.meta}` : ""}`}</title>
-              </circle>
-              {radius >= 8 && <text className="score-scatter__label" x={toX(point.x) + radius + 3} y={toY(point.y) + 3}>{point.label}</text>}
-            </g>
-          );
-        })}
-      </svg>
-    </div>
+    <LazyHeliosEChart
+      option={scoreScatterOption(clean, xLabel, yLabel)}
+      height={height}
+      ariaLabel={`${yLabel} by ${xLabel} scatter chart`}
+    />
   );
 }
 
@@ -203,16 +136,10 @@ export function DonutChart({
   const clean = segments.filter((segment) => Number.isFinite(segment.value) && segment.value > 0);
   if (!clean.length) return <div className="chart-empty">Donut chart appears when weighted rows are available.</div>;
   const total = clean.reduce((sum, segment) => sum + segment.value, 0) || 1;
-  let cursor = 0;
-  const gradient = clean.map((segment) => {
-    const start = cursor;
-    cursor += (segment.value / total) * 100;
-    const color = TONE_COLORS[safeTone(segment.tone || "info")];
-    return `${color} ${start.toFixed(2)}% ${cursor.toFixed(2)}%`;
-  }).join(", ");
   return (
     <div className="donut-chart">
-      <div className="donut-chart__ring" style={{ background: `conic-gradient(${gradient})` }}>
+      <div className="donut-chart__ring">
+        <LazyHeliosEChart option={donutOption(clean)} height={156} ariaLabel={`${centerLabel} allocation donut chart`} />
         <span><b>{centerValue || fmtNumber(total, 1)}</b><small>{centerLabel}</small></span>
       </div>
       <div className="donut-chart__legend">
@@ -220,7 +147,7 @@ export function DonutChart({
           <span key={segment.label} className={`tone-${safeTone(segment.tone || "info")}`}>
             <i />
             <b>{segment.label}</b>
-            <small>{fmtNumber(segment.value, 1)}</small>
+            <small>{fmtNumber(segment.value, 1)} · {fmtNumber((segment.value / total) * 100, 0)}%</small>
           </span>
         ))}
       </div>
@@ -275,7 +202,12 @@ export function RollingSharpeChart({
   values: NullableNumber[];
   height?: number;
 }) {
-  const points = labels.map((date, index) => ({ date, sharpe: chartNumber(values[index]) }));
+  const points = labels.map((date, index) => {
+    const value = chartNumber(values[index]);
+    // Guard against degenerate windows (near-zero volatility) whose ratios
+    // explode by orders of magnitude and destroy the axis scale.
+    return { date, sharpe: value !== null && Math.abs(value) <= 10 ? value : null };
+  });
   if (!hasEnoughPoints(points.map((point) => point.sharpe))) {
     return <EmptyChartState body="Rolling Sharpe appears after enough strategy windows are available." minHeight={height} />;
   }
@@ -384,54 +316,15 @@ export function LineChart({
   height?: number;
 }) {
   const points = series.flatMap((item) => item.values.filter((value): value is number => typeof value === "number" && Number.isFinite(value)));
-  if (labels.length < 2 || points.length < 2) return <div className="chart-empty">Chart appears when enough history is available.</div>;
-  const min = Math.min(...points);
-  const max = Math.max(...points);
-  const span = max - min || 1;
-  const width = 640;
-  const pad = 12;
-  const toPoint = (value: number, index: number) => {
-    const x = pad + (index / Math.max(1, labels.length - 1)) * (width - pad * 2);
-    const y = pad + (1 - (value - min) / span) * (height - pad * 2);
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
-  };
-  const segmentsFor = (values: Array<number | null | undefined>) => {
-    const segments: string[][] = [];
-    let current: string[] = [];
-    labels.forEach((_, index) => {
-      const value = values[index];
-      if (typeof value === "number" && Number.isFinite(value)) {
-        current.push(toPoint(value, index));
-        return;
-      }
-      if (current.length > 1) segments.push(current);
-      current = [];
-    });
-    if (current.length > 1) segments.push(current);
-    return segments;
-  };
+  if (labels.length < 2 || points.length < 2) {
+    return <EmptyChartState body="Chart appears when enough history is available." minHeight={height} />;
+  }
   return (
-    <div className="line-chart">
-      <div className="line-chart__scale" aria-hidden="true">
-        <span>{fmtNumber(max, 2)}</span>
-        <span>{fmtNumber(min, 2)}</span>
-      </div>
-      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Historical line chart" style={{ height }}>
-        <g className="grid-lines">
-          {[0.25, 0.5, 0.75].map((pct) => <line key={pct} x1="0" x2={width} y1={height * pct} y2={height * pct} />)}
-        </g>
-        <line className="chart-axis-line" x1={pad} x2={width - pad} y1={height - pad} y2={height - pad} />
-        {series.flatMap((item) => {
-          const toneClass = safeTone(item.tone || "info");
-          return segmentsFor(item.values).map((segment, index) => (
-            <polyline key={`${item.label}-${index}`} className={`line-chart__line tone-${toneClass}`} points={segment.join(" ")} />
-          ));
-        })}
-      </svg>
-      <div className="chart-legend">
-        {series.map((item) => <span key={item.label} className={`tone-${safeTone(item.tone || "info")}`}>{item.label}</span>)}
-      </div>
-    </div>
+    <LazyHeliosEChart
+      option={multiLineOption(labels, series)}
+      height={height}
+      ariaLabel={`Historical line chart: ${series.map((item) => item.label).join(", ")}`}
+    />
   );
 }
 
