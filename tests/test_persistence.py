@@ -482,6 +482,21 @@ def test_startup_warns_on_unencrypted_sqlite_files_in_db_directory(monkeypatch, 
     assert "helios.db.corrupt-123" in stderr
 
 
+def test_plaintext_scan_skips_cloud_evicted_placeholder_files(monkeypatch, tmp_path):
+    evicted = tmp_path / "evicted.sqlite"
+    with sqlite3.connect(evicted) as conn:
+        conn.execute("CREATE TABLE marker(value TEXT NOT NULL)")
+    local = tmp_path / "local.sqlite"
+    with sqlite3.connect(local) as conn:
+        conn.execute("CREATE TABLE marker(value TEXT NOT NULL)")
+
+    monkeypatch.setattr(persistence, "_is_dataless", lambda candidate: candidate == evicted)
+
+    found = persistence._plaintext_sqlite_artifacts(tmp_path, ignore=set())
+
+    assert found == [local]
+
+
 def test_configured_plaintext_store_is_not_flagged_as_artifact(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("HELIOS_DB_ENCRYPTION", "off")
     store = _use_db(monkeypatch, tmp_path)

@@ -10,6 +10,7 @@ import json
 import os
 import re
 import sqlite3
+import stat
 import sys
 import tempfile
 import threading
@@ -1478,12 +1479,24 @@ def _normalise_price_frame(frame: pd.DataFrame) -> pd.DataFrame:
     return out[~out["close"].isna()]
 
 
+_SF_DATALESS = getattr(stat, "SF_DATALESS", 0x40000000)
+
+
+def _is_dataless(candidate: Path) -> bool:
+    """True for cloud-evicted placeholder files (macOS); reading one blocks on download."""
+    try:
+        flags = getattr(os.stat(candidate, follow_symlinks=False), "st_flags", 0)
+    except OSError:
+        return False
+    return bool(flags & _SF_DATALESS)
+
+
 def _plaintext_sqlite_artifacts(directory: Path, *, ignore: set[Path]) -> list[Path]:
     if not directory.is_dir():
         return []
     found: list[Path] = []
     for candidate in sorted(directory.rglob("*")):
-        if not candidate.is_file() or candidate in ignore:
+        if not candidate.is_file() or candidate in ignore or _is_dataless(candidate):
             continue
         try:
             with candidate.open("rb") as handle:
