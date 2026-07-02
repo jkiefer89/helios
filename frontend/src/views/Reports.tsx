@@ -225,6 +225,11 @@ function ReportSheet({ payload, dataStatus, onAiNarrative }: { payload: ReportRe
   }), [dataStatus, payload, previewLocked, title]);
   return (
     <article className="report-sheet">
+      <div className="report-masthead" aria-hidden="true">
+        <span className="report-masthead__mark" />
+        <b>Helios <i>Pro</i></b>
+        <em>Analysis-Only Research Report</em>
+      </div>
       <header>
         <div><div className="section-label">Helios Analysis-Only Report Preview</div><h1>{title}</h1><p>{fmtTimestamp(payload.timestamp)}</p></div>
         <span className="badge">{payload.kind}</span>

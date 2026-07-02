@@ -42,6 +42,6 @@ export function SourcePill({ source }: { source?: string }) {
 }
 
 function sourceTone(source?: string) {
-  if (source === "live" || source === "upload" || source === "model" || source === "demo") return source;
+  if (source === "live" || source === "upload" || source === "model" || source === "demo" || source === "sample" || source === "excluded") return source;
   return "unknown";
 }

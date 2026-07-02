@@ -15,27 +15,27 @@ type TooltipDatum = {
 type ChartValueFormatter = (value: unknown) => string;
 
 export const HELIOS_CHART_COLORS = {
-  positive: "#47d66f",
-  negative: "#ff5c67",
-  warning: "#f4c542",
-  info: "#4c9dff",
-  neutral: "#9aa8ba",
-  accent: "#a78bfa",
-  panel: "#0b1522",
-  grid: "rgba(148, 163, 184, 0.14)",
-  axis: "rgba(148, 163, 184, 0.22)",
-  text: "#cbd7e6",
-  muted: "#8fa1b6",
+  positive: "#3ecf80",
+  negative: "#ff6b74",
+  warning: "#eab660",
+  info: "#5c9dff",
+  neutral: "#93a0b4",
+  accent: "#a98ffa",
+  panel: "#0a0f17",
+  grid: "rgba(158, 176, 202, 0.12)",
+  axis: "rgba(158, 176, 202, 0.2)",
+  text: "#c7d1df",
+  muted: "#8d9ab0",
 };
 
 const HELIOS_CHART_COLOR_CHANNELS: Record<ChartPaint, string> = {
-  positive: "71, 214, 111",
-  negative: "255, 92, 103",
-  warning: "244, 197, 66",
-  info: "76, 157, 255",
-  neutral: "154, 168, 186",
-  accent: "167, 139, 250",
-  ink: "203, 215, 230",
+  positive: "62, 207, 128",
+  negative: "255, 107, 116",
+  warning: "234, 182, 96",
+  info: "92, 157, 255",
+  neutral: "147, 160, 180",
+  accent: "169, 143, 250",
+  ink: "199, 209, 223",
 };
 
 export const HELIOS_CHART_FORMATTERS = {
@@ -76,6 +76,8 @@ const HELIOS_AXIS_LABEL = {
   color: HELIOS_CHART_COLORS.muted,
   fontSize: 10,
   fontWeight: 600,
+  fontFamily:
+    'ui-monospace, "SF Mono", SFMono-Regular, "Cascadia Code", "Segoe UI Mono", "Roboto Mono", Menlo, Consolas, monospace',
 } as const;
 
 /** Dashed crosshair with dark value chips; y chip honours the chart's own formatter. */
@@ -86,12 +88,14 @@ function chartAxisPointer(formatValue: ChartValueFormatter = HELIOS_CHART_FORMAT
     lineStyle: pointerLine,
     crossStyle: pointerLine,
     label: {
-      backgroundColor: "rgba(9, 14, 21, 0.94)",
-      borderColor: "rgba(76, 157, 255, 0.35)",
+      backgroundColor: "rgba(8, 12, 19, 0.95)",
+      borderColor: "rgba(92, 157, 255, 0.35)",
       borderWidth: 1,
       color: HELIOS_CHART_COLORS.text,
       fontSize: 10,
       fontWeight: 600,
+      fontFamily:
+        'ui-monospace, "SF Mono", SFMono-Regular, "Cascadia Code", "Segoe UI Mono", "Roboto Mono", Menlo, Consolas, monospace',
       padding: [3, 7],
       formatter: (params: { axisDimension?: string; value?: unknown }) =>
         params.axisDimension === "y"
@@ -103,12 +107,12 @@ function chartAxisPointer(formatValue: ChartValueFormatter = HELIOS_CHART_FORMAT
 
 const HELIOS_CHART_TOOLTIP = {
   trigger: "axis",
-  backgroundColor: "rgba(7, 12, 20, 0.94)",
-  borderColor: "rgba(76, 157, 255, 0.32)",
+  backgroundColor: "rgba(7, 11, 18, 0.95)",
+  borderColor: "rgba(92, 157, 255, 0.3)",
   borderWidth: 1,
   padding: [8, 11] as number[],
   textStyle: { color: HELIOS_CHART_COLORS.text, fontSize: 11 },
-  extraCssText: "border-radius: 6px; box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45); backdrop-filter: blur(6px);",
+  extraCssText: "border-radius: 8px; box-shadow: 0 12px 28px rgba(0, 0, 0, 0.5); backdrop-filter: blur(6px);",
   confine: true,
 } as const;
 
@@ -152,7 +156,8 @@ export const HELIOS_CHART_THEME: EChartsOption = {
   animationEasingUpdate: "cubicOut",
   textStyle: {
     color: HELIOS_CHART_COLORS.text,
-    fontFamily: "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+    fontFamily:
+      '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif',
     fontSize: 11,
   },
   tooltip: { ...HELIOS_CHART_TOOLTIP, axisPointer: chartAxisPointer() },

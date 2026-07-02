@@ -247,7 +247,10 @@ function CandidateDetail({ item, onOpen }: { item: OpportunityItem; onOpen: () =
     <div className="candidate-detail">
       <div className="detail-title">
         <div><strong>{item.symbol} · {item.name}</strong><span>{item.plain_english_summary}</span></div>
-        <button type="button" onClick={onOpen}>Open analysis</button>
+        <div className="detail-title__actions">
+          <span className={`action action-${safeActionTone(item.action)}`}>{item.action}</span>
+          <button type="button" onClick={onOpen}>Open analysis</button>
+        </div>
       </div>
       <div className="metric-strip">
         <span><b>{fmtNumber(item.opportunity_score, 1)}</b> Opportunity</span>

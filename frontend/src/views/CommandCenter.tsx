@@ -59,6 +59,16 @@ export function CommandCenter({
             <em>Balance signal</em>
           </button>
         </div>
+        <div className="regime-scale" role="img" aria-label={`Regime score ${fmtNumber(regime.score, 0)} on a 0 to 100 scale`}>
+          <div className="regime-scale__track">
+            <i className="regime-scale__needle" style={{ left: `${Math.max(0, Math.min(100, regime.score))}%` }} />
+          </div>
+          <div className="regime-scale__legend">
+            <span>0 · Risk-off</span>
+            <b>Score {fmtNumber(regime.score, 0)}</b>
+            <span>100 · Risk-on</span>
+          </div>
+        </div>
         <div className="regime-drivers">
           <div className="panel-kicker">Key Drivers</div>
           {topDrivers.map((driver) => (
@@ -281,6 +291,7 @@ function ResearchUnlockCTA({
         <button type="button" onClick={() => onOpenView("instruments")}>Fetch live ticker data</button>
         <button type="button" onClick={() => onOpenView("instruments")}>Upload real price CSV</button>
         <button type="button" onClick={() => onOpenView("models")}>Upload model CSV/Excel</button>
+        <button type="button" onClick={() => onOpenView("data-quality")}>Review Real Data Center gates</button>
       </div>
     </section>
   );

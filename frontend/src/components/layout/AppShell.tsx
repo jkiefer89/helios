@@ -42,8 +42,22 @@ const views: Array<{ id: ViewId; label: string }> = [
   { id: "analysis", label: "Analysis" },
 ];
 
+// Workspace navigation grouped the way an advisor works: overview first,
+// then data intake, research surfaces, portfolio work, and client output.
+const navGroups: Array<{ label: string; ids: ViewId[] }> = [
+  { label: "Overview", ids: ["command"] },
+  { label: "Data", ids: ["instruments", "data-quality"] },
+  { label: "Research", ids: ["opportunities", "analysis", "strategy", "evidence", "journal"] },
+  { label: "Portfolio", ids: ["models", "clinic", "risk"] },
+  { label: "Output", ids: ["reports"] },
+];
+
 export function isViewId(value: string): value is ViewId {
   return views.some((view) => view.id === value);
+}
+
+function viewLabel(id: ViewId): string {
+  return views.find((view) => view.id === id)?.label || id;
 }
 
 function compactDataModeLabel(mode: DataMode | undefined, label: string) {
@@ -60,8 +74,27 @@ export function AppShell(props: ShellProps) {
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchActiveIndex, setSearchActiveIndex] = useState(0);
   const [advisorOpen, setAdvisorOpen] = useState(false);
+  const [density, setDensity] = useState<"comfortable" | "compact">(() => {
+    try {
+      return localStorage.getItem("helios_density") === "compact" ? "compact" : "comfortable";
+    } catch {
+      return "comfortable";
+    }
+  });
+  const toggleDensity = () => {
+    setDensity((current) => {
+      const next = current === "compact" ? "comfortable" : "compact";
+      try {
+        localStorage.setItem("helios_density", next);
+      } catch {
+        // Persistence is best-effort; the toggle still applies for this session.
+      }
+      return next;
+    });
+  };
   const searchListId = useId();
   const searchShellRef = useRef<HTMLDivElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
   const advisorShellRef = useRef<HTMLDivElement | null>(null);
   const activeViewLabel = views.find((view) => view.id === props.activeView)?.label || "Workspace";
   const selectedContext = props.selectedModel
@@ -71,6 +104,20 @@ export function AppShell(props: ShellProps) {
       : "No active selection";
   const dataModeFullLabel = props.dataMode?.label || "Data status pending";
   const dataModeShortLabel = compactDataModeLabel(props.dataMode?.mode, dataModeFullLabel);
+
+  // "/" focuses the global search from anywhere outside a form control.
+  useEffect(() => {
+    const focusSearch = (event: KeyboardEvent) => {
+      if (event.key !== "/" || event.metaKey || event.ctrlKey || event.altKey) return;
+      const target = event.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable)) return;
+      event.preventDefault();
+      searchInputRef.current?.focus();
+    };
+    window.addEventListener("keydown", focusSearch);
+    return () => window.removeEventListener("keydown", focusSearch);
+  }, []);
+
   const searchResults = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
     const viewResults = views.map((view) => ({
@@ -128,136 +175,148 @@ export function AppShell(props: ShellProps) {
     setAdvisorOpen(false);
   };
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${density === "compact" ? "density-compact" : ""}`}>
       <header className="topbar">
-        <button className="brand" type="button" onClick={() => props.onViewChange("command")} aria-label="Open Command Center">
-          <span className="brand-mark" aria-hidden="true" />
-          <span><b>Helios Pro</b><small>Advisor-grade research terminal</small></span>
-        </button>
-        <nav className="primary-nav" aria-label="Primary workspace">
-          {views.map((view) => (
-            <button
-              key={view.id}
-              className={props.activeView === view.id ? "active" : ""}
-              type="button"
-              onClick={() => props.onViewChange(view.id)}
-            >
-              <ShellIcon id={view.id} />
-              <span>{view.label}</span>
-            </button>
-          ))}
-        </nav>
-        <div className="topbar__tools">
-          <DataModeBadge mode={props.dataMode?.mode} label={dataModeShortLabel} title={dataModeFullLabel} />
-          <div className="search-shell" ref={searchShellRef} onBlur={closeSearchOnBlur}>
-            <form className="terminal-search" onSubmit={submitSearch}>
-              <span aria-hidden="true">/</span>
-              <input
-                role="combobox"
-                aria-label="Search instruments, models, and reports"
-                aria-expanded={searchOpen}
-                aria-controls={`${searchListId}-listbox`}
-                aria-autocomplete="list"
-                aria-activedescendant={searchOpen && searchResults[activeResultIndex] ? `${searchListId}-option-${activeResultIndex}` : undefined}
-                placeholder="Search instruments, models, reports..."
-                value={searchQuery}
-                onChange={(event) => {
-                  setSearchQuery(event.currentTarget.value);
-                  setSearchActiveIndex(0);
-                  setSearchOpen(true);
-                }}
-                onFocus={() => setSearchOpen(true)}
-                onKeyDown={(event) => {
-                  if (event.key === "Escape") {
-                    setSearchOpen(false);
-                    return;
-                  }
-                  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        <div className="topbar__main">
+          <button className="brand" type="button" onClick={() => props.onViewChange("command")} aria-label="Open Command Center">
+            <span className="brand-mark" aria-hidden="true" />
+            <span><b>Helios <i>Pro</i></b><small>Research Terminal</small></span>
+          </button>
+          <div className="topbar__center">
+            <div className="search-shell" ref={searchShellRef} onBlur={closeSearchOnBlur}>
+              <form className="terminal-search" onSubmit={submitSearch}>
+                <span aria-hidden="true">⌕</span>
+                <input
+                  ref={searchInputRef}
+                  role="combobox"
+                  aria-label="Search instruments, models, and reports"
+                  aria-expanded={searchOpen}
+                  aria-controls={`${searchListId}-listbox`}
+                  aria-autocomplete="list"
+                  aria-activedescendant={searchOpen && searchResults[activeResultIndex] ? `${searchListId}-option-${activeResultIndex}` : undefined}
+                  placeholder="Search instruments, models, reports..."
+                  value={searchQuery}
+                  onChange={(event) => {
+                    setSearchQuery(event.currentTarget.value);
+                    setSearchActiveIndex(0);
+                    setSearchOpen(true);
+                  }}
+                  onFocus={() => setSearchOpen(true)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") {
+                      setSearchOpen(false);
+                      return;
+                    }
+                    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                      event.preventDefault();
+                      if (!searchOpen) setSearchOpen(true);
+                      else moveSearchSelection(event.key === "ArrowDown" ? 1 : -1);
+                      return;
+                    }
+                    if (event.key !== "Enter") return;
                     event.preventDefault();
-                    if (!searchOpen) setSearchOpen(true);
-                    else moveSearchSelection(event.key === "ArrowDown" ? 1 : -1);
-                    return;
-                  }
-                  if (event.key !== "Enter") return;
-                  event.preventDefault();
-                  const active = searchResults[activeResultIndex];
-                  if (active) runSearchResult(active);
-                }}
-              />
-            </form>
-            {searchOpen && (
-              <div className="search-popover" id={`${searchListId}-listbox`} role="listbox" aria-label="Search results">
-                {searchResults.length === 0 ? (
-                  <span className="search-empty">No matching instruments, models, or views.</span>
-                ) : searchResults.map((result, index) => (
-                  <button
-                    type="button"
-                    key={result.key}
-                    id={`${searchListId}-option-${index}`}
-                    role="option"
-                    aria-selected={index === activeResultIndex}
-                    className={index === activeResultIndex ? "active" : ""}
-                    onClick={() => runSearchResult(result)}
-                  >
-                    <strong>{result.label}</strong>
-                    <small>{result.meta}</small>
-                  </button>
-                ))}
-              </div>
-            )}
+                    const active = searchResults[activeResultIndex];
+                    if (active) runSearchResult(active);
+                  }}
+                />
+                <kbd aria-hidden="true">/</kbd>
+              </form>
+              {searchOpen && (
+                <div className="search-popover" id={`${searchListId}-listbox`} role="listbox" aria-label="Search results">
+                  {searchResults.length === 0 ? (
+                    <span className="search-empty">No matching instruments, models, or views.</span>
+                  ) : searchResults.map((result, index) => (
+                    <button
+                      type="button"
+                      key={result.key}
+                      id={`${searchListId}-option-${index}`}
+                      role="option"
+                      aria-selected={index === activeResultIndex}
+                      className={index === activeResultIndex ? "active" : ""}
+                      onClick={() => runSearchResult(result)}
+                    >
+                      <strong>{result.label}</strong>
+                      <small>{result.meta}</small>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
-          <button className="tool-icon" type="button" aria-label="Open reports" onClick={() => props.onViewChange("reports")}>!</button>
-          <button className="tool-icon" type="button" aria-label="Open analysis" onClick={() => props.onViewChange("analysis")}>?</button>
-          <button className="tool-icon" type="button" aria-label="Open instruments" onClick={() => props.onViewChange("instruments")}>*</button>
-          <div className="advisor-shell" ref={advisorShellRef} onBlur={closeAdvisorOnBlur}>
-            <button
-              className="advisor-identity"
-              type="button"
-              aria-label="Advisor Console"
-              aria-expanded={advisorOpen}
-              aria-haspopup="menu"
-              onClick={() => setAdvisorOpen((open) => !open)}
-              onKeyDown={(event) => {
-                if (event.key === "Escape") setAdvisorOpen(false);
-              }}
-            >
-              <span className="advisor-avatar" aria-hidden="true">AC</span>
-              <span className="advisor-label">Advisor Console<small>Local workspace</small></span>
-            </button>
-            {advisorOpen && (
-              <div
-                className="advisor-menu"
-                role="menu"
+          <div className="topbar__tools">
+            <DataModeBadge mode={props.dataMode?.mode} label={dataModeShortLabel} title={dataModeFullLabel} />
+            <div className="advisor-shell" ref={advisorShellRef} onBlur={closeAdvisorOnBlur}>
+              <button
+                className="advisor-identity"
+                type="button"
+                aria-label="Advisor Console"
+                aria-expanded={advisorOpen}
+                aria-haspopup="menu"
+                onClick={() => setAdvisorOpen((open) => !open)}
                 onKeyDown={(event) => {
                   if (event.key === "Escape") setAdvisorOpen(false);
                 }}
               >
-                <header>
-                  <strong>Advisor Console</strong>
-                  <small>Local Helios workspace</small>
-                </header>
-                <dl>
-                  <div><dt>Data mode</dt><dd>{props.dataMode?.label || "Pending"}</dd></div>
-                  <div><dt>SQLite</dt><dd>{props.dataStatus?.database.available ? "Ready" : "Warning"}</dd></div>
-                  <div><dt>Real histories</dt><dd>{props.dataStatus?.real_instrument_count ?? 0}</dd></div>
-                  <div><dt>Current view</dt><dd>{activeViewLabel}</dd></div>
-                  <div><dt>Selection</dt><dd>{selectedContext}</dd></div>
-                </dl>
-                <div className="advisor-menu__actions">
-                  <button type="button" role="menuitem" onClick={() => runAdvisorAction("command")}>Command Center</button>
-                  <button type="button" role="menuitem" onClick={() => runAdvisorAction("instruments")}>Real Data Setup</button>
-                  <button type="button" role="menuitem" onClick={() => runAdvisorAction("models")}>Client Models</button>
-                  <button type="button" role="menuitem" onClick={() => runAdvisorAction("journal")}>Signal Journal</button>
-                  <button type="button" role="menuitem" onClick={() => runAdvisorAction("evidence")}>Evidence Lab</button>
-                  <button type="button" role="menuitem" onClick={() => runAdvisorAction("risk")}>Risk Analytics</button>
-                  <button type="button" role="menuitem" onClick={() => runAdvisorAction("data-quality")}>Data Quality</button>
-                  <button type="button" role="menuitem" onClick={() => runAdvisorAction("reports")}>Reports & Disclosures</button>
+                <span className="advisor-avatar" aria-hidden="true">AC</span>
+                <span className="advisor-label">Advisor Console<small>Local workspace</small></span>
+              </button>
+              {advisorOpen && (
+                <div
+                  className="advisor-menu"
+                  role="menu"
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") setAdvisorOpen(false);
+                  }}
+                >
+                  <header>
+                    <strong>Advisor Console</strong>
+                    <small>Local Helios workspace</small>
+                  </header>
+                  <dl>
+                    <div><dt>Data mode</dt><dd>{props.dataMode?.label || "Pending"}</dd></div>
+                    <div><dt>SQLite</dt><dd>{props.dataStatus?.database.available ? "Ready" : "Warning"}</dd></div>
+                    <div><dt>Real histories</dt><dd>{props.dataStatus?.real_instrument_count ?? 0}</dd></div>
+                    <div><dt>Current view</dt><dd>{activeViewLabel}</dd></div>
+                    <div><dt>Selection</dt><dd>{selectedContext}</dd></div>
+                  </dl>
+                  <div className="advisor-menu__actions">
+                    <button type="button" role="menuitem" aria-pressed={density === "compact"} onClick={toggleDensity}>
+                      {density === "compact" ? "Density: Compact ●" : "Density: Comfortable ●"}
+                    </button>
+                    <button type="button" role="menuitem" onClick={() => runAdvisorAction("command")}>Command Center</button>
+                    <button type="button" role="menuitem" onClick={() => runAdvisorAction("instruments")}>Real Data Setup</button>
+                    <button type="button" role="menuitem" onClick={() => runAdvisorAction("models")}>Client Models</button>
+                    <button type="button" role="menuitem" onClick={() => runAdvisorAction("journal")}>Signal Journal</button>
+                    <button type="button" role="menuitem" onClick={() => runAdvisorAction("evidence")}>Evidence Lab</button>
+                    <button type="button" role="menuitem" onClick={() => runAdvisorAction("risk")}>Risk Analytics</button>
+                    <button type="button" role="menuitem" onClick={() => runAdvisorAction("data-quality")}>Data Quality</button>
+                    <button type="button" role="menuitem" onClick={() => runAdvisorAction("reports")}>Reports & Disclosures</button>
+                  </div>
+                  <p>Authentication and data permissions are controlled by the Flask backend. Real research unlocks only after provenance checks pass.</p>
                 </div>
-                <p>Authentication and data permissions are controlled by the Flask backend. Real research unlocks only after provenance checks pass.</p>
-              </div>
-            )}
+              )}
+            </div>
           </div>
         </div>
+        <nav className="workspace-nav" aria-label="Primary workspace">
+          {navGroups.map((group) => (
+            <div className="nav-group" key={group.label}>
+              <span className="nav-group__label" aria-hidden="true">{group.label}</span>
+              {group.ids.map((id) => (
+                <button
+                  key={id}
+                  className={props.activeView === id ? "active" : ""}
+                  type="button"
+                  aria-current={props.activeView === id ? "page" : undefined}
+                  onClick={() => props.onViewChange(id)}
+                >
+                  <ShellIcon id={id} />
+                  <span>{viewLabel(id)}</span>
+                </button>
+              ))}
+            </div>
+          ))}
+        </nav>
       </header>
       <div className={`workspace ${props.activeView === "command" ? "workspace-command" : ""}`}>
         <aside className="sidebar">
@@ -434,9 +493,9 @@ function ImportPanel(props: ShellProps) {
       <p>{onboardingCopy.body}</p>
       {formNotice && <div className="form-feedback" role="status">{formNotice}</div>}
       <form onSubmit={liveForm}>
-        <label>Fetch live ticker</label>
+        <label htmlFor="shell-live-symbol">Fetch live ticker</label>
         <div className="inline-form">
-          <input name="liveSymbol" aria-label="Live ticker symbol" disabled={!props.liveAvailable || pendingForm !== ""} />
+          <input id="shell-live-symbol" name="liveSymbol" placeholder="e.g. SPY" aria-label="Live ticker symbol" disabled={!props.liveAvailable || pendingForm !== ""} />
           <button type="submit" disabled={!props.liveAvailable || pendingForm !== ""}>{pendingForm === "live" ? "Fetching..." : "Fetch"}</button>
         </div>
         {!props.liveAvailable && <small className="form-hint">Live fetch is unavailable in this environment. Upload a price CSV to unlock real-data analysis.</small>}
@@ -450,15 +509,15 @@ function ImportPanel(props: ShellProps) {
         {pendingForm === "refresh" ? "Refreshing live data..." : `Refresh live data (${liveCount})`}
       </button>
       <form onSubmit={priceForm}>
-        <label>Upload price CSV</label>
-        <input name="priceFile" type="file" accept=".csv" aria-label="Price CSV" disabled={pendingForm !== ""} />
-        <input name="priceSymbol" aria-label="Uploaded series symbol" disabled={pendingForm !== ""} />
+        <label htmlFor="shell-price-file">Upload price CSV</label>
+        <input id="shell-price-file" name="priceFile" type="file" accept=".csv" aria-label="Price CSV" disabled={pendingForm !== ""} />
+        <input name="priceSymbol" placeholder="Series symbol, e.g. MYFUND" aria-label="Uploaded series symbol" disabled={pendingForm !== ""} />
         <button type="submit" disabled={pendingForm !== ""}>{pendingForm === "price" ? "Uploading..." : "Upload price history"}</button>
       </form>
       <form onSubmit={modelForm}>
-        <label>Upload model CSV/Excel</label>
-        <input name="modelFile" type="file" accept=".xlsx,.xlsm,.csv,.tsv" aria-label="Model file" disabled={pendingForm !== ""} />
-        <input name="modelName" aria-label="Model name" disabled={pendingForm !== ""} />
+        <label htmlFor="shell-model-file">Upload model CSV/Excel</label>
+        <input id="shell-model-file" name="modelFile" type="file" accept=".xlsx,.xlsm,.csv,.tsv" aria-label="Model file" disabled={pendingForm !== ""} />
+        <input name="modelName" placeholder="Model name" aria-label="Model name" disabled={pendingForm !== ""} />
         <TerminalSelect
           name="modelMandate"
           ariaLabel="Model mandate"
@@ -468,7 +527,7 @@ function ImportPanel(props: ShellProps) {
           disabled={pendingForm !== ""}
           placeholder="Select mandate"
         />
-        <textarea name="modelContext" rows={2} aria-label="Model context" disabled={pendingForm !== ""} />
+        <textarea name="modelContext" rows={2} placeholder="Client context (optional)" aria-label="Model context" disabled={pendingForm !== ""} />
         <button type="submit" disabled={pendingForm !== ""}>{pendingForm === "model" ? "Uploading..." : "Upload model"}</button>
       </form>
     </section>
