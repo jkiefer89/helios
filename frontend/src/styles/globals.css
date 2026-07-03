@@ -7287,8 +7287,8 @@ button.locked-table-row:hover {
 .report-array-table__row {
   display: grid;
   gap: 0.5rem;
-  align-items: baseline;
-  padding: 0.42rem 0.6rem;
+  align-items: start;
+  padding: 0.38rem 0.6rem;
 }
 
 .report-array-table__head {

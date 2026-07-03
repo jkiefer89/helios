@@ -320,7 +320,13 @@ function ReportValue({ value, labelKey = "" }: { value: unknown; labelKey?: stri
     if (!value.length) return <span className="muted">None</span>;
     const tableKeys = uniformObjectKeys(value);
     if (tableKeys) {
-      const columns = { gridTemplateColumns: `repeat(${tableKeys.length}, minmax(96px, 1fr))` };
+      // Sentence-like columns (40+ chars) get a wider track so they wrap to a
+      // line or two instead of ballooning every row in the grid.
+      const widths = tableKeys.map((key) => {
+        const longest = Math.max(...value.map((item) => String((item as Record<string, unknown>)[key] ?? "").length));
+        return longest > 40 ? "minmax(220px, 2.2fr)" : "minmax(96px, 1fr)";
+      });
+      const columns = { gridTemplateColumns: widths.join(" ") };
       return (
         <div className="report-array-table" role="table" aria-label={`${titleCase(labelKey || "items")} table`}>
           <div className="report-array-table__head" role="row" style={columns}>
@@ -372,6 +378,9 @@ function uniformObjectKeys(rows: unknown[]): string[] | null {
     if (!row || typeof row !== "object" || Array.isArray(row)) return null;
     for (const [key, nested] of Object.entries(row as Record<string, unknown>)) {
       if (nested !== null && typeof nested === "object") return null;
+      // Prose-heavy fields (advisor language sentences) read badly in a grid
+      // cell; those arrays fall back to the stacked recursive renderer.
+      if (typeof nested === "string" && nested.length > 80) return null;
       if (!keys.includes(key)) keys.push(key);
     }
   }
