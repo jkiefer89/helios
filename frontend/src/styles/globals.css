@@ -1218,7 +1218,7 @@ kbd {
 }
 
 .workspace-command .content {
-  max-width: 1880px;
+  max-width: 1760px;
   margin: 0 auto;
   display: grid;
   padding: 0.9rem 1.35rem 0.4rem;
@@ -1244,8 +1244,8 @@ kbd {
 
 .view-head h1 {
   margin-bottom: 0.3rem;
-  font-size: clamp(1.3rem, 1.6vw, 1.72rem);
-  font-weight: 650;
+  font-size: clamp(1.5rem, 1.9vw, 2.05rem);
+  font-weight: 680;
   letter-spacing: -0.018em;
 }
 
@@ -1646,8 +1646,8 @@ kbd {
 .panel-card h2 {
   margin-bottom: 0;
   color: var(--soft);
-  font-size: 0.72rem;
-  font-weight: 660;
+  font-size: 0.74rem;
+  font-weight: 700;
   letter-spacing: 0.11em;
   text-transform: uppercase;
 }
@@ -1711,9 +1711,9 @@ kbd {
 }
 
 .hero-score {
-  font-family: var(--font-display);
-  font-size: 2.1rem;
-  font-weight: 680;
+  font-family: var(--font-mono);
+  font-size: 2.2rem;
+  font-weight: 600;
   letter-spacing: -0.02em;
 }
 
@@ -1757,9 +1757,9 @@ kbd {
 
 .stat-tile strong {
   color: var(--text);
-  font-family: var(--font-display);
-  font-size: 1.06rem;
-  font-weight: 640;
+  font-family: var(--font-mono);
+  font-size: 1.12rem;
+  font-weight: 600;
   letter-spacing: -0.01em;
   font-variant-numeric: tabular-nums;
   line-height: 1.2;
@@ -2652,9 +2652,9 @@ kbd {
 }
 
 .chart-summary b {
-  font-family: var(--font-display);
-  font-size: 1rem;
-  font-weight: 650;
+  font-family: var(--font-mono);
+  font-size: 1.08rem;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.01em;
 }
@@ -2699,9 +2699,9 @@ kbd {
 }
 
 .donut-chart__ring b {
-  font-family: var(--font-display);
+  font-family: var(--font-mono);
   font-size: 1.05rem;
-  font-weight: 660;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
 
@@ -2775,7 +2775,7 @@ kbd {
     radial-gradient(900px 320px at 92% -40%, rgba(56, 92, 142, 0.14), transparent 64%),
     linear-gradient(180deg, #0d1320, #080c13);
   box-shadow: var(--inset-sheen), var(--shadow);
-  padding: 1.15rem 1.3rem 1.2rem;
+  padding: 1.25rem 1.5rem 1.35rem;
   overflow: hidden;
 }
 
@@ -2872,11 +2872,11 @@ kbd {
 
 .regime-copy h1 {
   margin: 0;
-  font-size: clamp(1.9rem, 3vw, 2.7rem);
-  font-weight: 690;
-  letter-spacing: 0.02em;
-  line-height: 1.02;
-  background: linear-gradient(180deg, #f7fafd 30%, #b9c6d9);
+  font-size: clamp(2.4rem, 4.2vw, 4.2rem);
+  font-weight: 700;
+  letter-spacing: 0.015em;
+  line-height: 0.98;
+  background: linear-gradient(180deg, #f8fbff 28%, #aebfd8);
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
@@ -2893,10 +2893,10 @@ kbd {
 
 .regime-copy p {
   margin: 0.15rem 0 0;
-  max-width: 58ch;
+  max-width: 56ch;
   color: var(--muted);
-  font-size: 0.82rem;
-  line-height: 1.55;
+  font-size: 0.9rem;
+  line-height: 1.6;
 }
 
 .regime-meter {
@@ -2913,15 +2913,15 @@ kbd {
 .regime-segment {
   position: relative;
   display: grid;
-  gap: 0.24rem;
+  gap: 0.28rem;
   align-content: center;
   justify-items: start;
-  min-height: 108px;
+  min-height: 124px;
   border: 0;
   border-right: 1px solid var(--line);
   background: transparent;
   color: var(--soft);
-  padding: 0.75rem 0.85rem;
+  padding: 0.8rem 0.95rem;
   text-align: left;
   transition: background 140ms ease;
 }
@@ -2956,6 +2956,18 @@ kbd {
   background: linear-gradient(180deg, rgba(20, 29, 44, 0.9), rgba(12, 18, 28, 0.9));
 }
 
+.regime-segment.risk-on.active {
+  background: linear-gradient(180deg, rgba(20, 32, 26, 0.92), rgba(11, 18, 15, 0.92));
+}
+
+.regime-segment.risk-off.active {
+  background: linear-gradient(180deg, rgba(34, 20, 22, 0.9), rgba(19, 11, 12, 0.9));
+}
+
+.regime-segment.risk-on.active span { color: #93e6b8; }
+.regime-segment.risk-off.active span { color: #ffb7bc; }
+.regime-segment.neutral.active span { color: #a8ccff; }
+
 .regime-segment.active::before {
   opacity: 1;
   box-shadow: 0 0 12px currentColor;
@@ -2977,9 +2989,9 @@ kbd {
 
 .regime-segment b {
   color: var(--text);
-  font-family: var(--font-display);
-  font-size: 1.5rem;
-  font-weight: 680;
+  font-family: var(--font-mono);
+  font-size: 1.7rem;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.01em;
   line-height: 1;
@@ -3287,9 +3299,9 @@ kbd {
 .risk-row em {
   color: var(--text);
   font-family: var(--font-mono);
-  font-size: 0.82rem;
+  font-size: 0.94rem;
   font-style: normal;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .alert-row {
@@ -4391,9 +4403,9 @@ button.locked-table-row:hover {
 
 .metric-strip b {
   color: var(--text);
-  font-family: var(--font-display);
-  font-size: 1.02rem;
-  font-weight: 650;
+  font-family: var(--font-mono);
+  font-size: 1.08rem;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.01em;
 }
@@ -7140,8 +7152,8 @@ button.locked-table-row:hover {
 
 .regime-scale__track {
   position: relative;
-  height: 8px;
-  border-radius: 4px;
+  height: 10px;
+  border-radius: 5px;
   background:
     linear-gradient(90deg,
       rgba(255, 107, 116, 0.4),
