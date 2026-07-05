@@ -93,10 +93,11 @@ export function AppShell(props: ShellProps) {
     });
   };
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
+    // Collapsed rail is the default; keeping it open is the persisted choice.
     try {
-      return localStorage.getItem("helios_sidebar") === "collapsed";
+      return localStorage.getItem("helios_sidebar") !== "open";
     } catch {
-      return false;
+      return true;
     }
   });
   const toggleSidebar = () => {
