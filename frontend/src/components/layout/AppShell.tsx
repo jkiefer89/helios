@@ -92,6 +92,24 @@ export function AppShell(props: ShellProps) {
       return next;
     });
   };
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("helios_sidebar") === "collapsed";
+    } catch {
+      return false;
+    }
+  });
+  const toggleSidebar = () => {
+    setSidebarCollapsed((current) => {
+      const next = !current;
+      try {
+        localStorage.setItem("helios_sidebar", next ? "collapsed" : "open");
+      } catch {
+        // Persistence is best-effort; the toggle still applies for this session.
+      }
+      return next;
+    });
+  };
   const searchListId = useId();
   const searchShellRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
@@ -318,8 +336,33 @@ export function AppShell(props: ShellProps) {
           ))}
         </nav>
       </header>
-      <div className={`workspace ${props.activeView === "command" ? "workspace-command" : ""}`}>
+      <div className={`workspace ${props.activeView === "command" ? "workspace-command" : ""} ${sidebarCollapsed ? "workspace-docked" : ""}`}>
+        {sidebarCollapsed ? (
+          <button
+            className="sidebar-rail"
+            type="button"
+            onClick={toggleSidebar}
+            aria-expanded={false}
+            aria-label="Show data intake panel"
+            title="Show the data intake panel"
+          >
+            <span aria-hidden="true">⟩</span>
+            <b>Data Intake &amp; Selection</b>
+          </button>
+        ) : (
         <aside className="sidebar">
+          <div className="sidebar-head">
+            <span>Data Intake</span>
+            <button
+              type="button"
+              onClick={toggleSidebar}
+              aria-expanded={true}
+              aria-label="Hide data intake panel"
+              title="Hide the data intake panel"
+            >
+              ⟨ Hide
+            </button>
+          </div>
           <ImportPanel {...props} />
           <section className="side-section">
             <h2>Client Models</h2>
@@ -355,6 +398,7 @@ export function AppShell(props: ShellProps) {
             </div>
           </section>
         </aside>
+        )}
         <main className="content">
           {props.notice && <div className="notice" role="status" aria-live="polite">{props.notice}</div>}
           {props.children}

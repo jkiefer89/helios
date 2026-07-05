@@ -7257,6 +7257,116 @@ button.locked-table-row:hover {
 }
 
 /* --------------------------------------------------------------------------
+   Collapsible data-intake rail (persisted advisor preference)
+   -------------------------------------------------------------------------- */
+
+.sidebar-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.6rem;
+  margin: -0.15rem 0 0.9rem;
+}
+
+.sidebar-head > span {
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  font-weight: 620;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.sidebar-head button {
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--faint);
+  padding: 0.18rem 0.5rem;
+  font-size: 0.66rem;
+  font-weight: 620;
+  white-space: nowrap;
+  transition: border-color 120ms ease, color 120ms ease, background 120ms ease;
+}
+
+.sidebar-head button:hover {
+  border-color: var(--line);
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+.workspace-docked {
+  grid-template-columns: 34px minmax(0, 1fr);
+}
+
+.sidebar-rail {
+  position: sticky;
+  top: 93px;
+  height: calc(100vh - 93px);
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.55rem;
+  border: 0;
+  border-right: 1px solid var(--line);
+  background: linear-gradient(180deg, rgba(10, 15, 23, 0.6), rgba(7, 10, 16, 0.4));
+  color: var(--faint);
+  padding: 0.85rem 0;
+  cursor: pointer;
+  transition: color 120ms ease, background 120ms ease;
+}
+
+.sidebar-rail:hover {
+  color: var(--text);
+  background: rgba(18, 25, 38, 0.55);
+}
+
+.sidebar-rail span {
+  font-size: 0.72rem;
+}
+
+.sidebar-rail b {
+  writing-mode: vertical-rl;
+  color: currentColor;
+  font-family: var(--font-mono);
+  font-size: 0.56rem;
+  font-weight: 620;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.workspace-command .sidebar-rail {
+  display: none;
+}
+
+.density-compact .sidebar-rail {
+  top: 85px;
+  height: calc(100vh - 85px);
+}
+
+@media (max-width: 1180px) {
+  .workspace-docked {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar-rail {
+    position: static;
+    height: auto;
+    min-height: 44px;
+    flex-direction: row;
+    justify-content: center;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+    padding: 0.55rem 0.8rem;
+  }
+
+  .sidebar-rail b {
+    writing-mode: horizontal-tb;
+  }
+}
+
+/* --------------------------------------------------------------------------
    Report deep-nested payloads (long real-data reports)
    -------------------------------------------------------------------------- */
 
