@@ -1701,8 +1701,7 @@ kbd {
   letter-spacing: -0.01em;
   font-variant-numeric: tabular-nums;
   line-height: 1.2;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  overflow-wrap: anywhere;
 }
 
 .stat-tile.tone-positive strong { color: #7fe3ad; }
@@ -1738,9 +1737,8 @@ kbd {
   font-size: 0.88rem;
   font-weight: 640;
   font-variant-numeric: tabular-nums;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .key-values small {
@@ -5853,6 +5851,16 @@ button.locked-table-row:hover {
 
 .alert-terminal-list {
   display: grid;
+}
+
+/* Long alert feeds (e.g. 18 refresh warnings) scroll inside the panel so
+   the Active/Resolved columns stay balanced instead of one running the
+   full page height. */
+.quality-alert-feed .alert-terminal-list {
+  max-height: 460px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding-right: 0.2rem;
 }
 
 .quality-issue-list {
