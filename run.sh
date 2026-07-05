@@ -23,6 +23,24 @@ fi
 # exact tested versions; requirements.txt holds the human-edited ranges.
 ./.venv/bin/python -m pip install --quiet -r requirements.lock
 
+# yfinance <=1.5.1 only catches DNSError when its cookie host (fc.yahoo.com) is
+# blocked, so DNS sinkholes that resolve it to 0.0.0.0 surface as a plain
+# ConnectionError and skip yfinance's own guce.yahoo.com fallback — live data
+# then fails on ad-blocking networks. Widen that except clause (DNSError is a
+# ConnectionError subclass) until upstream ships a fix. Idempotent: no-op once
+# patched or when upstream changes the line.
+./.venv/bin/python - <<'PYEOF'
+import pathlib
+import yfinance
+p = pathlib.Path(yfinance.__file__).with_name("data.py")
+src = p.read_text()
+old = "        except requests.exceptions.DNSError as e:"
+new = "        except requests.exceptions.ConnectionError as e:  # incl. DNSError; 0.0.0.0-sinkhole blocking"
+if old in src:
+    p.write_text(src.replace(old, new, 1))
+    print("patched yfinance cookie-fetch except clause (DNS-sinkhole fallback)")
+PYEOF
+
 if [ ! -f "frontend/dist/index.html" ] && ! command -v npm >/dev/null 2>&1; then
   echo "⚠  React frontend is not built (frontend/dist missing) and npm is not installed."
   echo "   Helios will serve build instructions at / until the React UI is built."
