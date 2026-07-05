@@ -15,6 +15,68 @@
    Offline-first: no external fonts or assets (backend CSP is self-only).
    ========================================================================== */
 
+/* --------------------------------------------------------------------------
+   Self-hosted type: IBM Plex Sans + IBM Plex Mono (OFL license) — offline,
+   CSP-safe. Files live in ../assets/fonts/. Full system fallbacks below, so
+   a missing face degrades gracefully at runtime.
+   -------------------------------------------------------------------------- */
+
+@font-face {
+  font-family: "IBM Plex Sans";
+  src: url("../assets/fonts/IBMPlexSans-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "IBM Plex Sans";
+  src: url("../assets/fonts/IBMPlexSans-Medium.ttf") format("truetype");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "IBM Plex Sans";
+  src: url("../assets/fonts/IBMPlexSans-SemiBold.ttf") format("truetype");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "IBM Plex Sans";
+  src: url("../assets/fonts/IBMPlexSans-Bold.ttf") format("truetype");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("../assets/fonts/IBMPlexMono-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("../assets/fonts/IBMPlexMono-Medium.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("../assets/fonts/IBMPlexMono-SemiBold.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
   color-scheme: dark;
 
@@ -71,11 +133,11 @@
   --bar-ease: cubic-bezier(0.22, 1, 0.36, 1);
 
   /* --- Type ------------------------------------------------------------- */
-  --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text",
+  --font-ui: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text",
     "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --font-display: -apple-system, BlinkMacSystemFont, "SF Pro Display",
+  --font-display: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "SF Pro Display",
     "Segoe UI Variable Display", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, "Cascadia Code",
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", SFMono-Regular, "Cascadia Code",
     "Segoe UI Mono", "Roboto Mono", Menlo, Consolas, monospace;
 
   font-family: var(--font-ui);
@@ -103,7 +165,7 @@ body {
   font-size: 13.5px;
   line-height: 1.45;
   font-variant-numeric: tabular-nums;
-  letter-spacing: 0.004em;
+  letter-spacing: 0;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   background:
@@ -281,7 +343,7 @@ h1,
 h2,
 h3 {
   font-family: var(--font-display);
-  letter-spacing: -0.012em;
+  letter-spacing: -0.008em;
   text-wrap: balance;
 }
 
@@ -2812,7 +2874,7 @@ kbd {
   margin: 0;
   font-size: clamp(1.9rem, 3vw, 2.7rem);
   font-weight: 690;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.02em;
   line-height: 1.02;
   background: linear-gradient(180deg, #f7fafd 30%, #b9c6d9);
   -webkit-background-clip: text;

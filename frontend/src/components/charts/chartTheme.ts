@@ -77,7 +77,7 @@ const HELIOS_AXIS_LABEL = {
   fontSize: 10,
   fontWeight: 600,
   fontFamily:
-    'ui-monospace, "SF Mono", SFMono-Regular, "Cascadia Code", "Segoe UI Mono", "Roboto Mono", Menlo, Consolas, monospace',
+    '"IBM Plex Mono", ui-monospace, "SF Mono", SFMono-Regular, "Cascadia Code", "Segoe UI Mono", "Roboto Mono", Menlo, Consolas, monospace',
 } as const;
 
 /** Dashed crosshair with dark value chips; y chip honours the chart's own formatter. */
@@ -95,7 +95,7 @@ function chartAxisPointer(formatValue: ChartValueFormatter = HELIOS_CHART_FORMAT
       fontSize: 10,
       fontWeight: 600,
       fontFamily:
-        'ui-monospace, "SF Mono", SFMono-Regular, "Cascadia Code", "Segoe UI Mono", "Roboto Mono", Menlo, Consolas, monospace',
+        '"IBM Plex Mono", ui-monospace, "SF Mono", SFMono-Regular, "Cascadia Code", "Segoe UI Mono", "Roboto Mono", Menlo, Consolas, monospace',
       padding: [3, 7],
       formatter: (params: { axisDimension?: string; value?: unknown }) =>
         params.axisDimension === "y"
@@ -157,7 +157,7 @@ export const HELIOS_CHART_THEME: EChartsOption = {
   textStyle: {
     color: HELIOS_CHART_COLORS.text,
     fontFamily:
-      '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif',
+      '"IBM Plex Sans", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif',
     fontSize: 11,
   },
   tooltip: { ...HELIOS_CHART_TOOLTIP, axisPointer: chartAxisPointer() },
