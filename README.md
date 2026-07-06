@@ -86,15 +86,18 @@ to disable that.
 | `HELIOS_DB_PATH` | `.helios/helios.db` | Local SQLite store for parsed live/uploaded data (`off` disables persistence) |
 | `HELIOS_DB_ENCRYPTION` | `auto` | Encrypt sensitive local persistence payloads; use `required` to fail closed without a key |
 | `HELIOS_DB_ENCRYPTION_KEY` | empty | Optional Fernet key for persistence encryption; keep it local and never commit it |
-| `HELIOS_DB_ENCRYPTION_KEY_PATH` | `.helios/helios.key` | Optional local key-file path when `HELIOS_DB_ENCRYPTION=auto` |
+| `HELIOS_DB_ENCRYPTION_KEY_PATH` | `<HELIOS_DB_PATH dir>/helios.key` | Optional local key-file path when `HELIOS_DB_ENCRYPTION=auto` |
 | `HELIOS_LOAD_DOTENV` | `1` | Load a repo-local `.env` at startup (`0` disables; exported shell vars always win) |
-| `HELIOS_AUTO_LIVE_SYMBOLS` | `core` | Automatic live polling universe; use `off` to disable or provide tickers/presets |
+| `HELIOS_AUTO_LIVE_SYMBOLS` | `core` (auto-disabled when `HELIOS_DB_PATH` is off) | Automatic live polling universe; use `off` to disable or provide tickers/presets |
 | `HELIOS_AUTO_LIVE_PERIOD` | `2y` | Provider history window fetched by automatic live polling |
 | `HELIOS_DATA_QUALITY_STALE_DAYS` | `7` | Data Quality stale-symbol diagnostic threshold |
 | `HELIOS_DATA_QUALITY_MIN_RESEARCH_ROWS` | `60` | Minimum valid rows for research-readiness diagnostics |
 | `HELIOS_DATA_QUALITY_INSTITUTIONAL_ROWS` | `252` | Institutional history target for short-history diagnostics |
 | `HELIOS_GOVERNANCE_APPROVER_PIN` | empty | Local committee PIN; when set, governance approve/reject requires identity + PIN |
 | `HELIOS_GOVERNANCE_APPROVER_PIN_HASH` | empty | SHA-256 hex of the PIN — preferred over the plain PIN on shared machines |
+| `HELIOS_SEC_USER_AGENT` | empty | Identifying User-Agent for SEC EDGAR look-through requests |
+| `HELIOS_FMP_KEY` / `HELIOS_FMP_BASE_URL` | empty | Financial Modeling Prep key/base for forward fundamentals (yfinance fallback otherwise) |
+| `HELIOS_OPENFIGI_KEY` | empty | Optional OpenFIGI key — raises the CUSIP→ticker rate limit |
 
 Failed Basic-Auth attempts are throttled per remote IP: after 10 failures the
 address gets a 60-second lockout (HTTP 429). The thresholds are intentional
@@ -440,7 +443,9 @@ analyze one instrument's history directly.
 ### Live market data
 
 If `yfinance` is installed and you have a connection, enter a ticker in the
-**Live market data** box to pull ~2y of history plus recent news headlines. The
+**Live market data** box to pull ~2y of history plus recent news headlines.
+Live histories are dividend/split-adjusted total-return prices (`auto_adjust`);
+uploaded CSVs are used exactly as provided. The
 platform degrades gracefully to sample/uploaded data when offline.
 
 ---
@@ -448,7 +453,7 @@ platform degrades gracefully to sample/uploaded data when offline.
 ## Architecture
 
 ```
-serve.py              production entrypoint — waitress on the local network; TLS fails closed
+serve.py              production entrypoint — waitress on plain HTTP; HELIOS_TLS=1 serves self-signed HTTPS via werkzeug (fails closed)
 app.py                thin entry point: loads the local .env, then wires helios_web.init_app()
 helios_web/           Flask web layer — one blueprint per section
   core.py             shared app, Basic-Auth gate + lockout, CSRF heuristic, security headers
@@ -471,7 +476,7 @@ engine/
   data.py             data store, samples, CSV import, live fetch, holding resolution
   edgar.py            SEC EDGAR client: ticker→registrant, N-PORT holdings, former names
   holdings.py         fund look-through: see inside ETFs/funds, roll exposures up to a model
-  fundamentals.py     per-holding valuation/yield/growth (provider seam: yfinance now, FMP/Tiingo later)
+  fundamentals.py     per-holding valuation/yield/growth (FMP analyst consensus preferred when HELIOS_FMP_KEY is set; yfinance fallback)
   figi.py             OpenFIGI CUSIP→ticker bridge for N-PORT holdings without tickers
   macro.py            forward macro & sector valuation anchors (offline fallbacks for RF/ERP)
   cma.py              building-block forward expected return (yield + growth + valuation reversion)
@@ -572,8 +577,8 @@ Common local commands:
 | Frontend lint (ESLint) | `npm --prefix frontend run lint` |
 | Frontend production build | `npm --prefix frontend run build` |
 | Python tests | `./.venv/bin/python -m pytest` |
-| Python tests with coverage (CI flags) | `./.venv/bin/python -m pytest --cov=engine --cov=app --cov-report=term-missing` |
-| Python syntax compile | `./.venv/bin/python -m compileall app.py serve.py engine tests` |
+| Python tests with coverage (CI flags) | `./.venv/bin/python -m pytest --cov=engine --cov=app --cov=helios_web --cov-report=term-missing` |
+| Python syntax compile | `./.venv/bin/python -m compileall app.py serve.py engine helios_web tests` |
 | Design spec JSON validation | `./.venv/bin/python -m json.tool .design_spec.json >/dev/null` |
 
 ESLint is configured for the frontend (`frontend/eslint.config.js`); there is
@@ -585,9 +590,9 @@ local ladder is:
 npm --prefix frontend ci
 npm --prefix frontend run typecheck
 npm --prefix frontend run build
-./.venv/bin/python -m compileall app.py serve.py engine tests
+./.venv/bin/python -m compileall app.py serve.py engine helios_web tests
 ./.venv/bin/python -m json.tool .design_spec.json >/dev/null
-./.venv/bin/python -m pytest --cov=engine --cov=app --cov-report=term-missing
+./.venv/bin/python -m pytest --cov=engine --cov=app --cov=helios_web --cov-report=term-missing
 ```
 
 The test suite is offline-only: it exercises deterministic sample/upload data,
@@ -600,7 +605,8 @@ above on push and pull request using Python 3.13 and Node 22.
 
 No cloud deployment config is present in this repo. The verifiable production
 entrypoint is `serve.py` via `./run.sh`, which serves a local/LAN WSGI app with
-waitress unless `HELIOS_TLS=1` selects the self-signed HTTPS path.
+waitress unless `HELIOS_TLS=1` selects the self-signed HTTPS path (served
+by werkzeug's TLS-capable server).
 
 ---
 

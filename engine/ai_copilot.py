@@ -67,6 +67,14 @@ BLOCKED_KEYS = {
     "rolling_sharpe_curve",
 }
 NAME_KEYS = {"name", "display_name", "client_name", "model_name", "title"}
+# Keys whose ticker->number dict values carry portfolio composition (holdings-equivalent).
+COMPOSITION_WEIGHT_KEYS = {"weights", "allocations", "composition", "target_weights", "holdings"}
+_TICKER_KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9.\-]{0,9}$")
+_ACTION_UPGRADE_RE = re.compile(
+    r"\b(?:strong buy|buy|accumulate|overweight|load(?:ing)? up"
+    r"|add(?:ing)?\s+(?:\w+\s+){0,2}exposure"
+    r"|increas(?:e|ing)\s+(?:\w+\s+){0,2}(?:position|allocation|exposure|weight|stake|holding)s?)\b"
+)
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6"
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_LOCAL_MODEL = ""
@@ -534,12 +542,14 @@ def _find_quality(value) -> dict:
 
 def sanitize_payload(payload: dict[str, Any], config: AIConfig | None = None) -> dict[str, Any]:
     cfg = config or AIConfig.from_env()
-    sanitized = _sanitize_value(payload, cfg, path=())
+    name_patterns = _name_patterns(payload) if cfg.redact_client_names else ()
+    sanitized = _sanitize_value(payload, cfg, path=(), name_patterns=name_patterns)
     if not isinstance(sanitized, dict):
         sanitized = {"value": sanitized}
     sanitized["_sanitization"] = {
         "client_model_names_redacted": cfg.redact_client_names,
-        "holdings_sent": cfg.send_holdings,
+        # True only when ticker->weight composition data actually remains after sanitization.
+        "holdings_sent": bool(cfg.send_holdings and _contains_composition(sanitized)),
         "raw_files_sent": False,
         "full_price_history_sent": False,
     }
@@ -619,7 +629,7 @@ def validate_ai_output(
     task: str,
 ) -> dict[str, Any]:
     result = _normalize_result(result, provider, model)
-    allowed_numbers = _numbers_in(sanitized_payload)
+    allowed_numbers = _payload_number_keys(sanitized_payload)
     unsupported = sorted(_numbers_in(_number_claim_content(result)) - allowed_numbers - _allowed_common_numbers())
     if unsupported:
         result["needs_review"] = True
@@ -638,7 +648,7 @@ def validate_ai_output(
     if action:
         result["deterministic_action"] = action
         text = _result_text(result).lower()
-        if action in {"HOLD", "REVIEW"} and re.search(r"\b(buy|strong buy)\b", text):
+        if action in {"HOLD", "REVIEW"} and _ACTION_UPGRADE_RE.search(text):
             result["needs_review"] = True
             result["compliance_caveats"].append(
                 f"Helios action is {action}; AI may not upgrade the action to BUY."
@@ -652,6 +662,13 @@ def validate_ai_output(
                 f"{stmt} Demo or blocked data is not real market evidence.".strip()
             )
             result["compliance_caveats"].append("Data is demo/blocked and must not be presented as real research evidence.")
+        elif data_mode == "mixed" and "not verified real market data" not in stmt.lower():
+            result["data_quality_statement"] = (
+                f"{stmt} Parts of this evidence are not verified real market data; advisor review is required.".strip()
+            )
+            result["compliance_caveats"].append(
+                "Data mode is mixed; parts of this evidence are not verified real market data and require advisor review."
+            )
     if task == "report_narrative" and "analysis only" not in _result_text(result).lower():
         result["needs_review"] = True
         result["compliance_caveats"].append(
@@ -666,7 +683,12 @@ def validate_ai_output(
     return result
 
 
-def _sanitize_value(value: Any, cfg: AIConfig, path: tuple[str, ...]) -> Any:
+def _sanitize_value(
+    value: Any,
+    cfg: AIConfig,
+    path: tuple[str, ...],
+    name_patterns: tuple[re.Pattern, ...] = (),
+) -> Any:
     key = path[-1].lower() if path else ""
     if key in BLOCKED_KEYS:
         return _blocked_marker(key)
@@ -674,27 +696,100 @@ def _sanitize_value(value: Any, cfg: AIConfig, path: tuple[str, ...]) -> Any:
         if isinstance(value, list):
             return {"omitted": True, "count": len(value), "reason": "HELIOS_AI_SEND_HOLDINGS=0"}
         return {"omitted": True, "reason": "HELIOS_AI_SEND_HOLDINGS=0"}
+    if not cfg.send_holdings and _is_composition_value(key, value):
+        # Structural holdings gate: ticker->weight maps and ticker+weight/mrc rows
+        # (clinic weights, risk_contributions, suggestions) are holdings-equivalent.
+        return {"omitted": True, "count": len(value), "reason": "HELIOS_AI_SEND_HOLDINGS=0"}
     if cfg.redact_client_names and (key in NAME_KEYS or key.endswith("_name")):
         return "[redacted]"
     if isinstance(value, dict):
         out = {}
         for k, v in value.items():
             skey = str(k)[:80]
-            out[skey] = _sanitize_value(v, cfg, path + (skey,))
+            out[skey] = _sanitize_value(v, cfg, path + (skey,), name_patterns)
         return out
     if isinstance(value, list):
         if len(value) > MAX_LIST_ITEMS and all(isinstance(item, (int, float, str)) for item in value):
             return {"omitted": True, "count": len(value), "reason": "long array omitted"}
-        return [_sanitize_value(item, cfg, path) for item in value[:MAX_LIST_ITEMS]]
+        return [_sanitize_value(item, cfg, path, name_patterns) for item in value[:MAX_LIST_ITEMS]]
     if isinstance(value, str):
-        return _redact_secret_like(value)[:MAX_STRING_LEN]
+        return _redact_secret_like(_redact_names(value, name_patterns))[:MAX_STRING_LEN]
     if isinstance(value, (int, float, bool)) or value is None:
         return value
-    return _redact_secret_like(str(value))[:MAX_STRING_LEN]
+    return _redact_secret_like(_redact_names(str(value), name_patterns))[:MAX_STRING_LEN]
 
 
 def _blocked_marker(key: str) -> dict[str, Any]:
     return {"omitted": True, "reason": f"{key} is not sent to AI providers"}
+
+
+def _is_ticker_weight_map(value: Any) -> bool:
+    if not isinstance(value, dict) or not value:
+        return False
+    has_number = False
+    for k, v in value.items():
+        if not isinstance(k, str) or not _TICKER_KEY_RE.match(k):
+            return False
+        if isinstance(v, bool) or not (isinstance(v, (int, float)) or v is None):
+            return False
+        has_number = has_number or isinstance(v, (int, float))
+    return has_number
+
+
+def _is_composition_row(item: Any) -> bool:
+    if not isinstance(item, dict):
+        return False
+    keys = {str(k).lower() for k in item}
+    has_ticker = bool(keys & {"ticker", "symbol"})
+    has_weight = any("weight" in k or "mrc" in k for k in keys)
+    return has_ticker and has_weight
+
+
+def _is_composition_value(key: str, value: Any) -> bool:
+    if (key in COMPOSITION_WEIGHT_KEYS or key.endswith("_weights")) and _is_ticker_weight_map(value):
+        return True
+    return isinstance(value, list) and any(_is_composition_row(item) for item in value)
+
+
+def _contains_composition(value: Any, key: str = "") -> bool:
+    if isinstance(value, dict):
+        if _is_composition_value(key, value):
+            return True
+        return any(_contains_composition(v, str(k).lower()) for k, v in value.items())
+    if isinstance(value, list):
+        if _is_composition_value(key, value):
+            return True
+        return any(_contains_composition(item, key) for item in value)
+    return False
+
+
+def _collect_name_values(value: Any, path: tuple[str, ...] = ()) -> set[str]:
+    key = path[-1].lower() if path else ""
+    names: set[str] = set()
+    if isinstance(value, dict):
+        for k, v in value.items():
+            names |= _collect_name_values(v, path + (str(k),))
+    elif isinstance(value, list):
+        for item in value:
+            names |= _collect_name_values(item, path)
+    elif isinstance(value, str) and (key in NAME_KEYS or key.endswith("_name")):
+        stripped = value.strip()
+        # Very short names would over-redact unrelated text.
+        if len(stripped) >= 3:
+            names.add(stripped)
+    return names
+
+
+def _name_patterns(payload: Any) -> tuple[re.Pattern, ...]:
+    # Longest names first so partial overlaps do not leave fragments behind.
+    names = sorted(_collect_name_values(payload), key=len, reverse=True)
+    return tuple(re.compile(re.escape(name), re.IGNORECASE) for name in names)
+
+
+def _redact_names(value: str, name_patterns: tuple[re.Pattern, ...]) -> str:
+    for pattern in name_patterns:
+        value = pattern.sub("[redacted]", value)
+    return value
 
 
 def _normalize_result(result: dict[str, Any], provider: str, model: str) -> dict[str, Any]:
@@ -760,7 +855,7 @@ def _number_claim_content(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _numbers_in(value: Any) -> set[str]:
+def _number_values_in(value: Any) -> set[float]:
     text = json.dumps(value, sort_keys=True) if not isinstance(value, str) else value
     out = set()
     for raw in _NUMBER_RE.findall(text):
@@ -773,12 +868,29 @@ def _numbers_in(value: Any) -> set[str]:
             continue
         if 1900 <= abs(num) <= 2100 and num.is_integer():
             continue
-        out.add(_num_key(num))
+        out.add(num)
     return out
 
 
+def _numbers_in(value: Any) -> set[str]:
+    return {_num_key(num) for num in _number_values_in(value)}
+
+
+def _payload_number_keys(payload: Any) -> set[str]:
+    # A claim is supported if it restates a payload number exactly, rounded to
+    # 0-2 decimals, or as a magnitude (e.g. drawdown -12.3% quoted as 12.3%).
+    keys: set[str] = set()
+    for num in _number_values_in(payload):
+        for variant in (num, abs(num)):
+            keys.add(_num_key(variant))
+            for digits in (0, 1, 2):
+                keys.add(_num_key(round(variant, digits)))
+    return keys
+
+
 def _allowed_common_numbers() -> set[str]:
-    return {_num_key(n) for n in (0, 1, 2, 3, 5, 10, 100)}
+    # Bare small counts only; round numbers like 10 or 100 must come from the payload.
+    return {_num_key(n) for n in (0, 1, 2, 3)}
 
 
 def _num_key(value: float) -> str:
@@ -803,12 +915,13 @@ def _deterministic_action(payload: Any) -> str:
 
 
 def _data_mode(payload: Any) -> str:
+    # Only keys literally named data_mode carry provenance; generic "mode" keys
+    # (e.g. chart modes) must not be mistaken for a data mode.
     if isinstance(payload, dict):
-        for key in ("data_mode", "mode"):
-            value = payload.get(key)
-            if isinstance(value, str) and value:
-                normalized = value.lower()
-                return "blocked" if normalized == "invalid_for_research" else normalized
+        value = payload.get("data_mode")
+        if isinstance(value, str) and value:
+            normalized = value.lower()
+            return "blocked" if normalized == "invalid_for_research" else normalized
         for value in payload.values():
             found = _data_mode(value)
             if found:

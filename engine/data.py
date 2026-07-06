@@ -15,6 +15,7 @@ import io
 import hashlib
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
@@ -77,6 +78,22 @@ except Exception:  # pragma: no cover
     _yf = None
     HAS_YF = False
 
+# Bound concurrent outbound provider calls process-wide so live lookups can't
+# monopolize worker threads or hammer the upstream.
+_YF_SEMAPHORE = threading.BoundedSemaphore(4)
+
+
+def _bounded_provider_call(fn, timeout: float = 10.0):
+    """Run a provider call that exposes no timeout knob (t.news / t.info) with a
+    hard deadline. A hung upstream raises TimeoutError into the caller's
+    existing failure path instead of pinning the request thread."""
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="helios-yf-call")
+    try:
+        return pool.submit(fn).result(timeout=timeout)
+    finally:
+        # Never wait on a hung call; the stray thread ends when the call returns.
+        pool.shutdown(wait=False)
+
 
 # --------------------------------------------------------------------------- #
 # In-memory store
@@ -106,12 +123,16 @@ def all_instruments() -> list[Instrument]:
 
 
 def register(inst: Instrument) -> None:
+    sym = inst.symbol.upper()
     with _STORE_LOCK:
-        _STORE[inst.symbol.upper()] = inst
+        _STORE[sym] = inst
         # Evict oldest user-added instruments (samples are never evicted).
         user_keys = [k for k, v in _STORE.items() if v.source != "sample"]
         for stale in user_keys[:-MAX_USER_INSTRUMENTS] if len(user_keys) > MAX_USER_INSTRUMENTS else []:
             _STORE.pop(stale, None)
+    # The replaced frame supersedes any memoized holding-price resolution (and
+    # any failed-resolution back-off) for this symbol.
+    _invalidate_resolution_caches(sym)
     # Any store change (upload, live fetch, refresh) invalidates memoized analytics.
     analytics_cache.invalidate()
 
@@ -265,7 +286,12 @@ def parse_csv(
 
     out.index = pd.to_datetime(df[date_col], errors="coerce")
     out = out[~out.index.isna()]
-    out = out[~out["close"].isna()].sort_index()
+    out.index = out.index.normalize()
+    # Only finite, positive closes are analyzable; one row per calendar date
+    # (keep='last', mirroring portfolio._to_daily) so duplicated exports can't
+    # skew analytics.
+    out = out[np.isfinite(out["close"]) & (out["close"] > 0)]
+    out = out[~out.index.duplicated(keep="last")].sort_index()
     if len(out) < 30:
         raise ValueError("Need at least 30 valid rows of price history to analyze.")
 
@@ -291,16 +317,25 @@ def fetch_live(symbol: str, period: str = "2y", persist: bool = True) -> Instrum
         raise ValueError("Invalid ticker symbol.")
     t = _yf.Ticker(symbol)
     # Bounded outbound call so a slow/hung upstream can't pin a worker thread.
-    hist = t.history(period=period, auto_adjust=True, timeout=10)
+    with _YF_SEMAPHORE:
+        hist = t.history(period=period, auto_adjust=True, timeout=10)
     if hist is None or hist.empty:
         raise RuntimeError(f"No live data returned for '{symbol}'.")
     hist = hist.rename(columns=str.lower)
     df = hist[["open", "high", "low", "close", "volume"]].copy()
-    df.index = pd.to_datetime(df.index).tz_localize(None)
+    df.index = pd.to_datetime(df.index).tz_localize(None).normalize()
+    # Same hygiene as parse_csv: finite positive closes, one row per date.
+    df["close"] = pd.to_numeric(df["close"], errors="coerce")
+    df = df[np.isfinite(df["close"]) & (df["close"] > 0)]
+    df = df[~df.index.duplicated(keep="last")].sort_index()
+    if df.empty:
+        raise RuntimeError(f"No live data returned for '{symbol}'.")
 
     headlines = []
     try:
-        for item in (t.news or [])[:12]:
+        with _YF_SEMAPHORE:
+            news_items = _bounded_provider_call(lambda: t.news) or []
+        for item in news_items[:12]:
             title = (item.get("content", {}) or {}).get("title") or item.get("title")
             if title:
                 headlines.append(title)
@@ -309,7 +344,9 @@ def fetch_live(symbol: str, period: str = "2y", persist: bool = True) -> Instrum
 
     name = symbol.upper()
     try:
-        name = t.info.get("shortName") or name
+        with _YF_SEMAPHORE:
+            info = _bounded_provider_call(lambda: t.info) or {}
+        name = info.get("shortName") or name
     except Exception:
         pass
 
@@ -333,8 +370,12 @@ def load_persisted_instruments() -> None:
         return
 
 
-def refresh_live_symbol(symbol: str, fetcher=None) -> dict:
-    """Refresh an existing live instrument and record a local refresh log."""
+def refresh_live_symbol(symbol: str, fetcher=None, refresh_journal: bool = True) -> dict:
+    """Refresh an existing live instrument and record a local refresh log.
+
+    refresh_journal=False skips the signal-journal forward refresh so batch
+    callers can run it once after the whole batch instead of per symbol.
+    """
     sym = clean_symbol(symbol, fallback="")
     if not sym:
         return {"symbol": "", "status": "error", "rows_added": 0, "message": "Invalid ticker symbol."}
@@ -359,7 +400,8 @@ def refresh_live_symbol(symbol: str, fetcher=None) -> dict:
         after_dates = set(pd.to_datetime(inst.df.index).normalize())
         rows_added = max(0, len(after_dates - before_dates))
         _persist_instrument(inst, adjusted=True, metadata={"imported_via": "live_refresh"})
-        _refresh_signal_journal_forward_results()
+        if refresh_journal:
+            _refresh_signal_journal_forward_results()
         message = f"Refreshed {len(inst.df)} live rows."
         _record_refresh(sym, "ok", rows_added, message)
         return {"symbol": sym, "status": "ok", "rows_added": rows_added, "rows": len(inst.df), "message": message}
@@ -527,6 +569,37 @@ def _refresh_signal_journal_forward_results() -> None:
 # --------------------------------------------------------------------------- #
 _PRICE_CACHE: dict[str, "PriceSeries"] = {}
 _CACHE_LOCK = threading.RLock()
+# Failed live resolutions are negative-cached briefly so every analysis request
+# doesn't retry a dead/unknown ticker against the provider.
+NEGATIVE_RESOLVE_TTL_SECONDS = 300.0
+_NEGATIVE_RESOLVE: dict[str, float] = {}  # symbol -> monotonic retry deadline
+
+
+def _invalidate_resolution_caches(symbol: str) -> None:
+    """Drop cached resolutions (and failed-resolution back-off) for a symbol
+    whose instrument frame was just replaced, so analytics see the new data."""
+    with _CACHE_LOCK:
+        for key in [k for k, v in _PRICE_CACHE.items() if k == symbol or v.symbol == symbol]:
+            _PRICE_CACHE.pop(key, None)
+        _NEGATIVE_RESOLVE.pop(symbol, None)
+
+
+def _live_resolution_backed_off(sym: str) -> bool:
+    with _CACHE_LOCK:
+        deadline = _NEGATIVE_RESOLVE.get(sym)
+        if deadline is None:
+            return False
+        if time.monotonic() >= deadline:
+            _NEGATIVE_RESOLVE.pop(sym, None)
+            return False
+        return True
+
+
+def _record_failed_resolution(sym: str) -> None:
+    with _CACHE_LOCK:
+        if sym not in _NEGATIVE_RESOLVE and len(_NEGATIVE_RESOLVE) >= MAX_PRICE_CACHE:
+            _NEGATIVE_RESOLVE.pop(next(iter(_NEGATIVE_RESOLVE)), None)
+        _NEGATIVE_RESOLVE[sym] = time.monotonic() + NEGATIVE_RESOLVE_TTL_SECONDS
 
 
 @dataclass
@@ -591,16 +664,22 @@ def resolve_series(
         ps = PriceSeries(sym, inst.df["close"].dropna(), inst.source)
     else:
         ps = None
-        # 2) live prices (history only — skip the news/info round-trips)
-        if HAS_YF and allow_live:
+        # 2) live prices (history only — skip the news/info round-trips).
+        # Recently failed symbols are skipped for NEGATIVE_RESOLVE_TTL_SECONDS
+        # and fall straight through to the same simulated/error path.
+        if HAS_YF and allow_live and not _live_resolution_backed_off(sym):
             try:
-                hist = _yf.Ticker(sym).history(period="5y", auto_adjust=True, timeout=8)
+                with _YF_SEMAPHORE:
+                    hist = _yf.Ticker(sym).history(period="5y", auto_adjust=True, timeout=8)
                 if hist is not None and not hist.empty:
                     close = hist["Close"].copy()
                     close.index = pd.to_datetime(close.index).tz_localize(None)
                     ps = PriceSeries(sym, close.dropna(), "live")
+                else:
+                    _record_failed_resolution(sym)
             except Exception:
                 ps = None
+                _record_failed_resolution(sym)
         # 3) deterministic simulation
         if ps is None and allow_simulated:
             ps = PriceSeries(sym, _simulate_for_ticker(sym), "simulated")

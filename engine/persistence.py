@@ -176,6 +176,27 @@ class _EncryptedConnectionLease:
         return False
 
 
+class _PlaintextConnectionLease:
+    """Commit/rollback like `with sqlite3.Connection`, then close the handle so
+    plaintext-mode call sites don't leak connections (ResourceWarning)."""
+
+    def __init__(self, conn: sqlite3.Connection):
+        self._conn = conn
+
+    def __enter__(self) -> sqlite3.Connection:
+        return self._conn
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        try:
+            if exc_type is None:
+                self._conn.commit()
+            else:
+                self._conn.rollback()
+        finally:
+            self._conn.close()
+        return False
+
+
 def _normalise_encryption_mode() -> tuple[str, bool, bool]:
     raw = (os.environ.get("HELIOS_DB_ENCRYPTION") or "auto").strip().lower()
     if raw in DISABLED_VALUES or raw in {"plain", "plaintext", "disabled"}:
@@ -255,7 +276,7 @@ def get_store() -> "SQLiteStore":
 def reset_store_for_tests() -> None:
     global _STORE
     if _STORE is not None:
-        _STORE.flush()
+        _STORE.close()
     _STORE = None
 
 
@@ -304,6 +325,7 @@ class SQLiteStore:
                     raise RuntimeError("encrypted SQLite persistence requires encryption to be enabled with the configured key")
                 with self._connect() as conn:
                     _create_schema(conn)
+                    _check_schema_version(conn)
             self.available = True
             self.warning = ""
         except Exception as exc:
@@ -337,6 +359,9 @@ class SQLiteStore:
         self._memory_conn = conn
         with self._connect() as active:
             _create_schema(active)
+            # Fail closed on a newer-schema database before touching its rows
+            # or rewriting the on-disk snapshot.
+            _check_schema_version(active)
             self._normalise_existing_rows(active)
         # Always materialise the on-disk snapshot at startup so a fresh process
         # (and the startup backup on the next run) sees a valid encrypted file.
@@ -377,6 +402,15 @@ class SQLiteStore:
                 self._snapshot_dirty = False
             except Exception as exc:
                 self.warning = f"Could not persist encrypted snapshot: {exc}"
+
+    def close(self) -> None:
+        """Flush pending writes and release the in-memory connection so a
+        replaced store (tests, reconfiguration) doesn't leak the handle."""
+        self.flush()
+        with self._conn_lock:
+            conn, self._memory_conn = self._memory_conn, None
+            if conn is not None:
+                conn.close()
 
     def _backup_existing_snapshot(self) -> None:
         """Startup safety copy of the encrypted snapshot, keeping the newest few."""
@@ -469,7 +503,7 @@ class SQLiteStore:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA journal_mode = WAL")
-        return conn
+        return _PlaintextConnectionLease(conn)
 
     def _store_text(self, value: Any) -> Any:
         if self._cipher and isinstance(value, str) and value.startswith(ENCRYPTED_PREFIX):
@@ -756,19 +790,15 @@ class SQLiteStore:
                     """,
                     (symbol, self._store_text(name), source, first_date, last_date, len(clean), created_at, now, meta_json),
                 )
+                # Replace, not union: the persisted history must be exactly the
+                # frame the session analyzed (mirrors in-memory register()), so
+                # reloads can't stitch windows with different adjustment bases.
+                conn.execute("DELETE FROM price_history WHERE symbol = ?", (symbol,))
                 conn.executemany(
                     """
                     INSERT INTO price_history
                       (symbol, date, open, high, low, close, volume, source, adjusted)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(symbol, date) DO UPDATE SET
-                      open = excluded.open,
-                      high = excluded.high,
-                      low = excluded.low,
-                      close = excluded.close,
-                      volume = excluded.volume,
-                      source = excluded.source,
-                      adjusted = excluded.adjusted
                     """,
                     rows,
                 )
@@ -1567,6 +1597,29 @@ def _create_schema(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_data_quality_alerts_status ON data_quality_alerts(status, category, severity)")
 
 
+def _check_schema_version(conn: sqlite3.Connection) -> None:
+    """Fail closed on a database written by a newer Helios; stamp older ones.
+
+    No migrations exist yet, so an older stamp is simply updated to the current
+    version. A newer stamp means a newer build wrote this data — refusing to
+    open it protects persisted research evidence from silent misreads.
+    """
+    rows = conn.execute("SELECT version FROM schema_version ORDER BY version").fetchall()
+    versions = [int(row["version"]) for row in rows]
+    stored = max(versions) if versions else SCHEMA_VERSION
+    if stored > SCHEMA_VERSION:
+        raise RuntimeError(
+            f"database schema version {stored} is newer than this Helios build "
+            f"supports ({SCHEMA_VERSION}) — open it with a matching or newer Helios version"
+        )
+    if versions != [SCHEMA_VERSION]:
+        conn.execute("DELETE FROM schema_version")
+        conn.execute(
+            "INSERT INTO schema_version(version, applied_at) VALUES (?, ?)",
+            (SCHEMA_VERSION, utc_now()),
+        )
+
+
 def _normalise_price_frame(frame: pd.DataFrame) -> pd.DataFrame:
     if frame is None or frame.empty:
         return pd.DataFrame()
@@ -1585,7 +1638,9 @@ def _normalise_price_frame(frame: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
     keep = [col for col in ("open", "high", "low", "close", "volume") if col in out]
     out = out[keep]
-    return out[~out["close"].isna()]
+    # Non-finite closes (NaN/±inf) are not analyzable price facts.
+    finite = out["close"].notna() & ~out["close"].isin([float("inf"), float("-inf")])
+    return out[finite]
 
 
 _SF_DATALESS = getattr(stat, "SF_DATALESS", 0x40000000)

@@ -153,6 +153,40 @@ def test_react_analysis_view_reaches_legacy_parity():
     assert "SignalMarker" in type_source
 
 
+def test_analysis_view_prefers_engine_data_provenance_verdict():
+    analysis_source = (ROOT / "frontend" / "src" / "views" / "Analysis.tsx").read_text()
+    type_source = (ROOT / "frontend" / "src" / "api" / "types.ts").read_text()
+
+    # The engine's provenance verdict is consumed verbatim; the client-side
+    # gate derivation survives only as a fallback for older cached responses.
+    assert "const verdict = payload.data_provenance" in analysis_source
+    assert "verdict.eligible_for_real_research === true" in analysis_source
+    assert "data_provenance: verdict" in analysis_source
+    assert "data_provenance?: DataQuality" in type_source
+
+    # Mandate-fit pass/fail mirrors engine insight verdicts instead of
+    # re-implemented client-side methodology thresholds.
+    assert "targetVol * 1.15" not in analysis_source
+    assert '"vol_above_mandate"' in analysis_source
+    assert '"drawdown_breaches_tolerance"' in analysis_source
+    assert "illustrative fit indication" in analysis_source
+
+
+def test_opportunity_radar_renders_blocked_models_panel():
+    opportunity_source = (ROOT / "frontend" / "src" / "views" / "OpportunityRadar.tsx").read_text()
+    type_source = (ROOT / "frontend" / "src" / "api" / "types.ts").read_text()
+
+    assert "Blocked Models" in opportunity_source
+    assert "BlockedModelsTable" in opportunity_source
+    assert "payload?.blocked_items" in opportunity_source
+    assert "missing_tickers" in opportunity_source
+    assert "required_action" in opportunity_source
+    # Reuses the existing locked-state styling; no new design surface.
+    assert 'className="locked-table-row"' in opportunity_source
+    assert "BlockedOpportunityItem" in type_source
+    assert "blocked_items?: BlockedOpportunityItem[]" in type_source
+
+
 def test_react_terminal_uses_live_aware_data_honesty_copy():
     command_source = (ROOT / "frontend" / "src" / "views" / "CommandCenter.tsx").read_text()
     opportunity_source = (ROOT / "frontend" / "src" / "views" / "OpportunityRadar.tsx").read_text()

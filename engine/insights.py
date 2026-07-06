@@ -18,7 +18,8 @@ def generate(model, ps, metrics: dict, sig: dict,
     out: list[dict] = []
 
     weights = {h["ticker"]: h["weight"] for h in ps.holdings}
-    mrc = {h["ticker"]: h.get("mrc_pct", 0.0) for h in ps.holdings}
+    # Excluded holdings carry mrc_pct=None; drop them so formatting never crashes.
+    mrc = {h["ticker"]: h["mrc_pct"] for h in ps.holdings if h.get("mrc_pct") is not None}
     vol = metrics["annual_vol_pct"] / 100.0
     tgt_vol = m["target_vol_pct"] / 100.0
     maxdd = metrics["max_drawdown_pct"] / 100.0           # negative
@@ -65,11 +66,17 @@ def generate(model, ps, metrics: dict, sig: dict,
     #    equity book and is NOT used as a trigger — it would fire on almost everything.)
     breach_1y = (fc_long_1y or {}).get("prob_breach_maxdd", 0.0)
     if maxdd < -tol or breach_1y > 0.20:
-        prob_loss = 1 - (fc_long_1y or {}).get("prob_positive", 1.0)
+        # Only quote simulated-path numbers when a 1-year forecast actually ran;
+        # otherwise 0%-breach / 0%-loss claims would be fabricated.
+        if fc_long_1y:
+            prob_loss = 1 - fc_long_1y.get("prob_positive", 1.0)
+            sim_txt = (f"{breach_1y:.0%} of 1-year simulated paths breach it, and there is a "
+                       f"{prob_loss:.0%} chance of ending a 1-year horizon below today's value.")
+        else:
+            sim_txt = "no 1-year simulation is available to estimate forward breach odds."
         add("drawdown_breaches_tolerance", "risk", "high",
             f"Historical max drawdown {maxdd:.0%} vs the {label} tolerance of {-tol:.0%}; "
-            f"{breach_1y:.0%} of 1-year simulated paths breach it, and there is a {prob_loss:.0%} chance of "
-            f"ending a 1-year horizon below today's value.",
+            + sim_txt,
             f"De-risk (reduce high-beta, add a defensive sleeve) to bring projected drawdown within {-tol:.0%}, "
             f"or formally re-rate the mandate with the client."
             + (" For CD/preservation mandates this is a hard breach — not fit for purpose."

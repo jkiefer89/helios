@@ -330,6 +330,9 @@ def model_analyze():
         "holdings": holdings,
         "concentration": {"hhi": ps.hhi, "n_eff": ps.n_eff, "corr_mean": ps.corr_mean},
         "provenance": ps.provenance,
+        # Server-side provenance verdict (same shape as /api/live); the raw
+        # "provenance" block above is kept unchanged for backward compatibility.
+        "data_provenance": provenance.portfolio(ps.provenance),
         "horizon": {"kind": hkind, "value": hval, "label": long_label,
                     "available_long": avail},
         "forecast": forecast_panel,
@@ -352,26 +355,8 @@ def model_strategy_analyze():
         return err(arg_error, 400)
     try:
         ps = portfolio.build_series(mdl, allow_sample=False, allow_simulated=False)
-        p = provenance.portfolio(ps.provenance)
-        if not p["eligible_for_real_research"]:
-            return ok({
-                "series_kind": "model",
-                "id": mdl.id,
-                "name": mdl.name,
-                "data_mode": p["data_mode"],
-                "display_label": p["display_label"],
-                "eligible_for_real_research": False,
-                "reason": p["reason"],
-                "required_action": p["required_action"],
-                "missing_tickers": p["missing_tickers"],
-                "warnings": p["warnings"],
-                "data_provenance": p,
-                "methodology": {"analysis_only": True, "no_lookahead": True},
-                "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
-            })
-        result = strategy.analyze_strategy(
-            ps.close, cost_bps=cost_bps, slippage_bps=slippage_bps, **window)
     except ValueError as e:
+        # Genuine provenance block: no holding has real price history.
         return ok({
             "series_kind": "model",
             "id": mdl.id,
@@ -387,6 +372,30 @@ def model_strategy_analyze():
             "methodology": {"analysis_only": True, "no_lookahead": True},
             "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
         })
+    p = provenance.portfolio(ps.provenance)
+    if not p["eligible_for_real_research"]:
+        return ok({
+            "series_kind": "model",
+            "id": mdl.id,
+            "name": mdl.name,
+            "data_mode": p["data_mode"],
+            "display_label": p["display_label"],
+            "eligible_for_real_research": False,
+            "reason": p["reason"],
+            "required_action": p["required_action"],
+            "missing_tickers": p["missing_tickers"],
+            "warnings": p["warnings"],
+            "data_provenance": p,
+            "methodology": {"analysis_only": True, "no_lookahead": True},
+            "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+        })
+    try:
+        result = strategy.analyze_strategy(
+            ps.close, cost_bps=cost_bps, slippage_bps=slippage_bps, **window)
+    except ValueError as e:
+        # Window/short-history errors are not data-quality blocks: report the
+        # actual message (mirrors the instrument twin in analysis.py).
+        return err(str(e), 400)
     return ok({
         "series_kind": "model",
         "id": mdl.id,

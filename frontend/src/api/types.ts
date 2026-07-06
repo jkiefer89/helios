@@ -597,10 +597,31 @@ export interface OpportunityItem {
   model_id?: string;
 }
 
+// Blocked models omit the scoring/driver fields the engine only computes for
+// eligible candidates; everything beyond identity is optional to match reality.
+export interface BlockedOpportunityItem {
+  id: string;
+  kind: "model" | string;
+  symbol: string;
+  name: string;
+  model_id?: string | null;
+  action?: string;
+  opportunity_score?: number;
+  risk_score?: number;
+  evidence_score?: number;
+  eligible_for_real_research?: boolean;
+  data_mode?: DataMode;
+  display_label?: string;
+  reason?: string;
+  required_action?: string;
+  missing_tickers?: string[];
+  warnings?: string[];
+}
+
 export interface OpportunitiesResponse extends ProvenancePayload {
   regime: RegimePayload;
   items: OpportunityItem[];
-  blocked_items: OpportunityItem[];
+  blocked_items?: BlockedOpportunityItem[];
   count: number;
   total_candidates: number;
   methodology: Record<string, unknown>;
@@ -1347,6 +1368,10 @@ export interface AnalysisResponse {
   signal_journal_entry?: Record<string, unknown> | null;
   warnings?: string[];
   provenance?: Record<string, unknown>;
+  // Engine-issued provenance verdict (same shape as /api/live). Optional for
+  // backward compatibility with older cached responses; when present it is
+  // authoritative and the client must not re-derive the demo/real gate.
+  data_provenance?: DataQuality;
   mandate?: AnalysisMandate;
   horizon?: AnalysisHorizon;
 }

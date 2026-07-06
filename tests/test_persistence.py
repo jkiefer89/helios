@@ -1,6 +1,7 @@
 import sqlite3
 import threading
 import time
+from contextlib import closing
 from io import BytesIO
 
 import pandas as pd
@@ -30,7 +31,7 @@ def test_sqlite_schema_is_created_with_version(monkeypatch, tmp_path):
     monkeypatch.setenv("HELIOS_DB_ENCRYPTION", "off")
     store = _use_db(monkeypatch, tmp_path)
 
-    with sqlite3.connect(store.path) as conn:
+    with closing(sqlite3.connect(store.path)) as conn:
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
 
@@ -341,7 +342,7 @@ def test_local_persistence_encrypts_sensitive_payloads_when_key_configured(monke
     assert not raw_db.startswith(SQLITE_HEADER)
     assert b"schema_version" not in raw_db
     with pytest.raises(sqlite3.DatabaseError):
-        with sqlite3.connect(store.path) as conn:
+        with closing(sqlite3.connect(store.path)) as conn:
             conn.execute("SELECT name FROM sqlite_master").fetchall()
     assert b"Sensitive Alpha Sleeve" not in raw_db
     assert b"Private Growth Mandate" not in raw_db
@@ -363,7 +364,7 @@ def test_local_persistence_encrypts_sensitive_payloads_when_key_configured(monke
 
 def test_encrypted_snapshot_loader_falls_back_when_deserialize_cannot_open(monkeypatch, tmp_path):
     source = tmp_path / "source.sqlite"
-    with sqlite3.connect(source) as conn:
+    with closing(sqlite3.connect(source)) as conn, conn:
         conn.execute("CREATE TABLE marker(value TEXT NOT NULL)")
         conn.execute("INSERT INTO marker(value) VALUES ('ok')")
     payload = source.read_bytes()
@@ -386,7 +387,7 @@ def test_encrypted_snapshot_loader_falls_back_when_deserialize_cannot_open(monke
 
 def test_encrypted_snapshot_loader_validates_deserialize_before_accepting(monkeypatch, tmp_path):
     source = tmp_path / "source.sqlite"
-    with sqlite3.connect(source) as conn:
+    with closing(sqlite3.connect(source)) as conn, conn:
         conn.execute("CREATE TABLE marker(value TEXT NOT NULL)")
         conn.execute("INSERT INTO marker(value) VALUES ('ok')")
     payload = source.read_bytes()
@@ -465,11 +466,11 @@ def test_startup_warns_on_unencrypted_sqlite_files_in_db_directory(monkeypatch, 
     _use_db(monkeypatch, tmp_path)
 
     stray = tmp_path / "qa-rehearsal.sqlite"
-    with sqlite3.connect(stray) as conn:
+    with closing(sqlite3.connect(stray)) as conn:
         conn.execute("CREATE TABLE marker(value TEXT NOT NULL)")
     nested = tmp_path / "corrupt-backups" / "helios.db.corrupt-123"
     nested.parent.mkdir()
-    with sqlite3.connect(nested) as conn:
+    with closing(sqlite3.connect(nested)) as conn:
         conn.execute("CREATE TABLE marker(value TEXT NOT NULL)")
 
     capsys.readouterr()
@@ -487,10 +488,10 @@ def test_startup_warns_on_unencrypted_sqlite_files_in_db_directory(monkeypatch, 
 
 def test_plaintext_scan_skips_cloud_evicted_placeholder_files(monkeypatch, tmp_path):
     evicted = tmp_path / "evicted.sqlite"
-    with sqlite3.connect(evicted) as conn:
+    with closing(sqlite3.connect(evicted)) as conn:
         conn.execute("CREATE TABLE marker(value TEXT NOT NULL)")
     local = tmp_path / "local.sqlite"
-    with sqlite3.connect(local) as conn:
+    with closing(sqlite3.connect(local)) as conn:
         conn.execute("CREATE TABLE marker(value TEXT NOT NULL)")
 
     monkeypatch.setattr(persistence, "_is_dataless", lambda candidate: candidate == evicted)

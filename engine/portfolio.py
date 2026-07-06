@@ -268,6 +268,7 @@ class PortfolioSeries:
     corr_mean: float = 0.0  # mean off-diagonal pairwise correlation
     binding_ticker: str = ""  # shortest-history holding, used for guidance only
     provenance: dict = field(default_factory=dict)  # data-source honesty block
+    cov_matrix: dict = field(default_factory=dict)  # annualized pairwise covariance by ticker (patched)
 
 
 def build_series(
@@ -356,19 +357,26 @@ def build_series(
 
     # Risk decomposition from PAIRWISE covariance (tolerates mismatched histories;
     # pairs with no overlap get a default correlation rather than breaking).
-    cov = (Rk.cov() * 252.0).to_numpy()
+    # copy=True: pandas 3 returns a read-only view, and the patch loop below
+    # writes into the array in place.
+    cov = (Rk.cov() * 252.0).to_numpy(copy=True)
     d = np.sqrt(np.clip(np.diag(cov), 1e-12, None))
     for i in range(len(d)):
         for j in range(len(d)):
             if not np.isfinite(cov[i, j]):
                 cov[i, j] = (1.0 if i == j else 0.4) * d[i] * d[j]
+    cov_map = {ti: {tj: float(cov[i, j]) for j, tj in enumerate(usable)}
+               for i, ti in enumerate(usable)}
     wv = wser.to_numpy()
     port_var = float(wv @ cov @ wv)
     mrc = wv * (cov @ wv) / port_var if port_var > 1e-12 else np.full(len(wv), 1.0 / len(wv))
     mrc_map = dict(zip(usable, mrc))
     cc = Rk.corr().to_numpy()
     off = cc[~np.eye(len(cc), dtype=bool)] if len(cc) > 1 else np.array([1.0])
-    corr_mean = float(np.nanmean(off)) if off.size else 1.0
+    finite_off = off[np.isfinite(off)]
+    # Pairs with zero overlapping dates have no measured correlation; fall back
+    # to the 0.4 default used in the covariance patch so the payload stays finite.
+    corr_mean = float(finite_off.mean()) if finite_off.size else (0.4 if len(cc) > 1 else 1.0)
     hhi = float(np.sum(wv**2))
     n_eff = float(1.0 / hhi) if hhi > 0 else float(len(usable))
 
@@ -427,7 +435,8 @@ def build_series(
 
     return PortfolioSeries(close=nav, holdings=holdings_out, n_days=len(nav),
                            sources=sources, warnings=warnings, hhi=hhi, n_eff=n_eff,
-                           corr_mean=corr_mean, binding_ticker=binding, provenance=provenance)
+                           corr_mean=corr_mean, binding_ticker=binding, provenance=provenance,
+                           cov_matrix=cov_map)
 
 
 def _to_daily(s: pd.Series) -> pd.Series:

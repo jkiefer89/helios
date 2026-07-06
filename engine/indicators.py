@@ -4,6 +4,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from . import mandate
+
 TRADING_DAYS = 252
 
 
@@ -59,14 +61,16 @@ def annualized_vol(close: pd.Series) -> float:
     return float(daily_returns(close).std() * np.sqrt(TRADING_DAYS))
 
 
-def sharpe(close: pd.Series, rf: float = 0.02) -> float:
+def sharpe(close: pd.Series, rf: float | None = None) -> float:
+    rf = mandate.RF if rf is None else rf   # HELIOS_RF-driven, default 0.02
     r = daily_returns(close)
     excess = r.mean() * TRADING_DAYS - rf
     vol = r.std() * np.sqrt(TRADING_DAYS)
     return float(excess / vol) if vol > 1e-9 else 0.0
 
 
-def sortino(close: pd.Series, rf: float = 0.02) -> float:
+def sortino(close: pd.Series, rf: float | None = None) -> float:
+    rf = mandate.RF if rf is None else rf   # HELIOS_RF-driven, default 0.02
     r = daily_returns(close)
     downside = r[r < 0].std() * np.sqrt(TRADING_DAYS)
     excess = r.mean() * TRADING_DAYS - rf

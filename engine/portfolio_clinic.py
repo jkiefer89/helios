@@ -15,13 +15,15 @@ def analyze_clinic(model: portfolio.Model) -> dict:
     p = provenance.portfolio(ps.provenance)
     if not p["eligible_for_real_research"]:
         return _blocked_clinic(model, p["reason"], p["missing_tickers"], ps.provenance, p["warnings"])
+    mandate_key = mandate.key_or_default(model.mandate_key)
     m = mandate.get(model.mandate_key)
     metrics = indicators.metrics_summary(ps.close)
     cap = float(m["single_name_cap"])
     before_weights = {h["ticker"]: float(h["weight"]) for h in ps.holdings if not h.get("excluded")}
     after_weights, cap_warning = _cap_weights(before_weights, cap)
     suggestions = _suggestions(model, ps, metrics, m, before_weights, after_weights)
-    diagnostics = _diagnostics(ps, metrics, m)
+    diagnostics = _diagnostics(ps, metrics, m, mandate_key)
+    after_estimates, estimate_basis = _after_estimates(metrics, before_weights, after_weights, ps)
     warnings = list(ps.warnings)
     refusals = []
     sim_weight = ps.provenance.get("simulated_weight_pct", 0)
@@ -62,7 +64,8 @@ def analyze_clinic(model: portfolio.Model) -> dict:
         },
         "after": {
             "weights": after_weights,
-            "estimates": _after_estimates(metrics, before_weights, after_weights),
+            "estimates": after_estimates,
+            "estimate_basis": estimate_basis,
         },
         "provenance": ps.provenance,
         "warnings": _dedupe(warnings),
@@ -74,10 +77,10 @@ def analyze_clinic(model: portfolio.Model) -> dict:
     }
 
 
-def _diagnostics(ps: portfolio.PortfolioSeries, metrics: dict, m: dict) -> dict:
+def _diagnostics(ps: portfolio.PortfolioSeries, metrics: dict, m: dict, mandate_key: str) -> dict:
     vol_gap = float(metrics["annual_vol_pct"] - m["target_vol_pct"])
     dd_gap = float(abs(metrics["max_drawdown_pct"]) - m["max_drawdown_tolerance_pct"])
-    high_hhi = mandate.hhi_thresholds(m.get("key", ""))[1] if "key" in m else 0.25
+    high_hhi = mandate.hhi_thresholds(mandate_key)[1]
     return {
         "hhi": ps.hhi,
         "effective_holdings": ps.n_eff,
@@ -297,15 +300,47 @@ def _risk_contributions(ps: portfolio.PortfolioSeries) -> list[dict]:
     return out
 
 
-def _after_estimates(metrics: dict, before: dict[str, float], after: dict[str, float]) -> dict:
+def _portfolio_variance(weights: dict[str, float], cov: dict[str, dict[str, float]]) -> float:
+    """w' Σ w over the tickers present in the pairwise annualized covariance."""
+    total = 0.0
+    for ti, wi in weights.items():
+        row = cov.get(ti) or {}
+        for tj, wj in weights.items():
+            total += float(wi) * float(wj) * float(row.get(tj, 0.0))
+    return total
+
+
+def _after_estimates(metrics: dict, before: dict[str, float], after: dict[str, float],
+                     ps: portfolio.PortfolioSeries) -> tuple[dict, dict]:
     before_hhi = sum(v * v for v in before.values()) or 1.0
     after_hhi = sum(v * v for v in after.values()) or before_hhi
     concentration_ratio = float(np.sqrt(after_hhi / before_hhi)) if before_hhi > 0 else 1.0
-    est_vol = metrics["annual_vol_pct"] * min(1.0, concentration_ratio)
+    # Correlation-aware vol estimate: realized vol scaled by sqrt(w'Σw) of the
+    # after vs before weights, with Σ the pairwise annualized covariance from
+    # build_series. Highly correlated books therefore keep ~the same vol when
+    # weight is only shuffled between them.
+    var_before = _portfolio_variance(before, ps.cov_matrix)
+    var_after = _portfolio_variance(after, ps.cov_matrix)
+    if var_before > 1e-18 and var_after >= 0.0:
+        vol_ratio = float(np.sqrt(var_after / var_before))
+    else:
+        vol_ratio = min(1.0, concentration_ratio)  # degenerate covariance fallback
+    est_vol = metrics["annual_vol_pct"] * vol_ratio
     est_dd = metrics["max_drawdown_pct"] * min(1.0, concentration_ratio)
-    return {
+    estimates = {
         "annual_vol_pct": est_vol,
         "max_drawdown_pct": est_dd,
         "hhi": after_hhi,
         "n_eff": (1.0 / after_hhi) if after_hhi > 0 else 0.0,
     }
+    basis = {
+        "annual_vol_pct": (
+            "Estimated from the holdings covariance: realized volatility scaled by "
+            "sqrt(w'Sigma w) of the hypothetical vs current weights."
+        ),
+        "max_drawdown_pct": (
+            "Heuristic estimate: historical max drawdown scaled by the concentration "
+            "ratio; not a simulated or projected drawdown."
+        ),
+    }
+    return estimates, basis

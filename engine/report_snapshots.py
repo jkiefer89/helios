@@ -111,11 +111,42 @@ def ai_narrative(
     provided_narrative: str,
     include_ai_narrative: bool,
 ) -> tuple[str, dict]:
+    """Legacy narrative resolver for callers that collapse an absent
+    include-AI-narrative toggle to False (a provided narrative always wins).
+
+    New callers should use resolve_narrative with a tri-state toggle so an
+    explicit False excludes even a provided narrative.
+    """
+    if provided_narrative:
+        return provided_narrative, {
+            "status": "provided",
+            "provider": {"source": "current_session", "needs_review": True},
+        }
+    return resolve_narrative(
+        report,
+        provided_narrative="",
+        include_ai_narrative=bool(include_ai_narrative),
+    )
+
+
+def resolve_narrative(
+    report: dict,
+    *,
+    provided_narrative: str,
+    include_ai_narrative: bool | None,
+) -> tuple[str, dict]:
     """Resolve the snapshot narrative: provided text, generated text, or none.
+
+    ``include_ai_narrative`` is tri-state: ``False`` explicitly excludes any
+    narrative (even one provided/generated earlier in-session), ``True``
+    includes a provided narrative or generates one, and ``None`` means the
+    caller surfaced no toggle, so a provided narrative is kept.
 
     Never raises on provider failure — the snapshot saves without a narrative
     and records the provider status instead.
     """
+    if include_ai_narrative is False:
+        return "", {"status": "not_requested", "provider": {}}
     if provided_narrative:
         return provided_narrative, {
             "status": "provided",

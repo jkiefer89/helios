@@ -197,19 +197,28 @@ def save_edit(
         ],
     )
     portfolio.register(edited)
-    persisted = portfolio._persist_model(edited, source_filename="model-editor")
-    if not persisted.get("persisted"):
-        return {"saved": False, "warning": persisted.get("warning") or "Could not persist model edits."}
-    event_result = record_event(
-        edited,
-        actor=actor or DEFAULT_ACTOR,
-        action="model_edit",
-        note=note,
-        approval_status="pending_review",
-        previous_model=model,
-    )
-    if not event_result.get("recorded"):
-        return {"saved": False, "warning": event_result.get("warning") or "Could not record model edit governance event."}
+    # Any failure past this point must restore the prior in-memory model, or a
+    # failed (4xx) save would leave mutated holdings behind.
+    try:
+        persisted = portfolio._persist_model(edited, source_filename="model-editor")
+        if not persisted.get("persisted"):
+            portfolio.register(model)
+            return {"saved": False, "warning": persisted.get("warning") or "Could not persist model edits."}
+        event_result = record_event(
+            edited,
+            actor=actor or DEFAULT_ACTOR,
+            action="model_edit",
+            note=note,
+            approval_status="pending_review",
+            previous_model=model,
+        )
+        if not event_result.get("recorded"):
+            portfolio.register(model)
+            portfolio._persist_model(model, source_filename="model-editor")  # revert the persisted copy too
+            return {"saved": False, "warning": event_result.get("warning") or "Could not record model edit governance event."}
+    except Exception:
+        portfolio.register(model)
+        raise
     return {
         **_editor_payload(model, edited, rebalance_to_target=rebalance_to_target),
         "saved": True,

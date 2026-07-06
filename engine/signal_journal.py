@@ -12,7 +12,7 @@ from typing import Any
 
 import pandas as pd
 
-from . import data, persistence, portfolio
+from . import data, persistence, portfolio, provenance
 from ._common import (
     avg as _avg,
     clean_close as _clean_close,
@@ -28,6 +28,10 @@ MODEL_BENCHMARKS = {
     "capital_preservation": "BND",
     "cd_alternative": "SGOV",
 }
+
+# Signals recorded from demo/sample data are never measured against later
+# prices (real or synthetic); the status stays within persistence's 16-char cap.
+NOT_MEASURABLE_STATUS = "not_measurable"
 
 
 def benchmark_for_model(model: portfolio.Model) -> str:
@@ -57,6 +61,7 @@ def record_signal(
     input_end = str(clean_input.index.max().date())
     score = float(signal.get("score") or 0.0)
     action = str(signal.get("action") or "HOLD").upper()
+    real_eligible = bool(eligible_for_real_research)
     event = {
         "dedupe_key": _dedupe_key(target_kind, target_id, input_end, horizon_days, action, score),
         "target_kind": target_kind,
@@ -70,16 +75,20 @@ def record_signal(
         "score": round(score, 6),
         "action_label": action,
         "data_mode": data_mode,
-        "eligible_for_real_research": bool(eligible_for_real_research),
+        "eligible_for_real_research": real_eligible,
         "source_counts": source_counts,
-        "metadata": metadata or {},
-        **_forward_result(full_close, input_end, horizon_days),
+        "metadata": dict(metadata or {}),
+        **(_forward_result(full_close, input_end, horizon_days) if real_eligible
+           else _not_measurable_result()),
     }
-    benchmark_result = _benchmark_result(benchmark, input_end, horizon_days)
-    if benchmark_result.get("benchmark_result_pct") is not None:
-        event.update(benchmark_result)
-        if event.get("forward_result_pct") is not None:
-            event["alpha_pct"] = round(event["forward_result_pct"] - benchmark_result["benchmark_result_pct"], 4)
+    if real_eligible:
+        benchmark_result = _benchmark_result(benchmark, input_end, horizon_days)
+        if benchmark_result.get("benchmark_result_pct") is not None:
+            event.update(benchmark_result)
+            if event.get("forward_result_pct") is not None:
+                event["alpha_pct"] = round(event["forward_result_pct"] - benchmark_result["benchmark_result_pct"], 4)
+        elif benchmark_result.get("benchmark_note"):
+            event["metadata"]["benchmark_note"] = benchmark_result["benchmark_note"]
     result = persistence.get_store().record_signal_event(event)
     return result.get("entry") or result
 
@@ -100,8 +109,13 @@ def dashboard_payload(entries: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def summarize_entries(entries: list[dict[str, Any]]) -> dict[str, Any]:
-    measured = [entry for entry in entries if entry.get("forward_status") == "measured"]
-    pending = [entry for entry in entries if entry.get("forward_status") != "measured"]
+    # Headline evidence (hit rate, alpha) aggregates ONLY signals that were
+    # real-eligible at record time; demo/sample signals are counted separately.
+    real = [entry for entry in entries if _real_eligible(entry)]
+    demo = [entry for entry in entries if not _real_eligible(entry)]
+    measured = [entry for entry in real if entry.get("forward_status") == "measured"]
+    pending = [entry for entry in real if entry.get("forward_status") != "measured"]
+    demo_measured = [entry for entry in demo if entry.get("forward_status") == "measured"]
     hit_flags = [_paper_hit(entry) for entry in measured]
     hit_flags = [flag for flag in hit_flags if flag is not None]
     return {
@@ -116,16 +130,26 @@ def summarize_entries(entries: list[dict[str, Any]]) -> dict[str, Any]:
         "avg_alpha_pct": _avg(entry.get("alpha_pct") for entry in measured),
         "model_count": len({entry.get("target_id") for entry in entries if entry.get("target_kind") == "model"}),
         "instrument_count": len({entry.get("target_id") for entry in entries if entry.get("target_kind") == "instrument"}),
-        "research_ready_count": sum(1 for entry in entries if entry.get("eligible_for_real_research")),
+        "research_ready_count": len(real),
+        "demo_count": len(demo),
+        "demo_measured_count": len(demo_measured),
+        "demo_pending_count": len(demo) - len(demo_measured),
+        "measurement_basis": "Hit rate and alpha aggregate only signals recorded with real-eligible (live/uploaded) data.",
     }
 
 
 def benchmark_comparison(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     groups: dict[str, list[dict[str, Any]]] = {}
+    demo_measured: dict[str, int] = {}
     for entry in entries:
         benchmark = str(entry.get("benchmark") or "").strip()
-        if benchmark and entry.get("forward_status") == "measured":
+        if not benchmark or entry.get("forward_status") != "measured":
+            continue
+        if _real_eligible(entry):
             groups.setdefault(benchmark, []).append(entry)
+        else:
+            # Demo-time measurements (legacy rows) never feed benchmark stats.
+            demo_measured[benchmark] = demo_measured.get(benchmark, 0) + 1
     rows = []
     for benchmark, rows_for_benchmark in groups.items():
         hit_flags = [_paper_hit(entry) for entry in rows_for_benchmark]
@@ -137,6 +161,17 @@ def benchmark_comparison(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "avg_benchmark_result_pct": _avg(entry.get("benchmark_result_pct") for entry in rows_for_benchmark),
             "avg_alpha_pct": _avg(entry.get("alpha_pct") for entry in rows_for_benchmark),
             "hit_rate_pct": _pct(sum(1 for flag in hit_flags if flag), len(hit_flags)),
+            "demo_measured_count": demo_measured.pop(benchmark, 0),
+        })
+    for benchmark, count in demo_measured.items():
+        rows.append({
+            "benchmark": benchmark,
+            "measured_count": 0,
+            "avg_forward_result_pct": None,
+            "avg_benchmark_result_pct": None,
+            "avg_alpha_pct": None,
+            "hit_rate_pct": None,
+            "demo_measured_count": count,
         })
     return sorted(rows, key=lambda row: (row["measured_count"], row["benchmark"]), reverse=True)
 
@@ -149,7 +184,8 @@ def model_evidence(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows = []
     for target_id, model_entries in groups.items():
         ordered = sorted(model_entries, key=lambda entry: str(entry.get("created_at") or ""), reverse=True)
-        measured = [entry for entry in model_entries if entry.get("forward_status") == "measured"]
+        real_entries = [entry for entry in model_entries if _real_eligible(entry)]
+        measured = [entry for entry in real_entries if entry.get("forward_status") == "measured"]
         hit_flags = [_paper_hit(entry) for entry in measured]
         hit_flags = [flag for flag in hit_flags if flag is not None]
         latest = ordered[0] if ordered else {}
@@ -159,7 +195,7 @@ def model_evidence(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "target_name": latest.get("target_name") or target_id,
             "signal_count": len(model_entries),
             "measured_count": len(measured),
-            "pending_count": len(model_entries) - len(measured),
+            "pending_count": len(real_entries) - len(measured),
             "hit_rate_pct": _pct(sum(1 for flag in hit_flags if flag), len(hit_flags)),
             "avg_score": _avg(entry.get("score") for entry in model_entries),
             "avg_alpha_pct": _avg(entry.get("alpha_pct") for entry in measured),
@@ -169,7 +205,8 @@ def model_evidence(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "benchmark": latest.get("benchmark") or "",
             "data_modes": sorted({str(entry.get("data_mode") or "unknown") for entry in model_entries}),
             "source_counts": source_counts,
-            "research_ready_count": sum(1 for entry in model_entries if entry.get("eligible_for_real_research")),
+            "research_ready_count": len(real_entries),
+            "demo_count": len(model_entries) - len(real_entries),
         })
     return sorted(rows, key=lambda row: (row["pending_count"], row["signal_count"], row["target_name"]), reverse=True)
 
@@ -182,7 +219,8 @@ def drift_series(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     alpha_values: list[float] = []
     for index, entry in enumerate(ordered, start=1):
         hit = _paper_hit(entry)
-        if entry.get("forward_status") == "measured":
+        # Cumulative headline evidence only accrues from real-eligible signals.
+        if entry.get("forward_status") == "measured" and _real_eligible(entry):
             measured_count += 1
             if hit:
                 hit_count += 1
@@ -197,6 +235,8 @@ def drift_series(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "target_name": entry.get("target_name"),
             "action_label": entry.get("action_label"),
             "score": entry.get("score"),
+            "data_mode": entry.get("data_mode"),
+            "eligible_for_real_research": _real_eligible(entry),
             "forward_status": entry.get("forward_status"),
             "forward_result_pct": entry.get("forward_result_pct"),
             "benchmark_result_pct": entry.get("benchmark_result_pct"),
@@ -214,6 +254,11 @@ def refresh_forward_results(limit: int = 250) -> None:
     for entry in store.signal_journal(limit=limit):
         if entry["forward_status"] == "measured":
             continue
+        if not _real_eligible(entry):
+            # Demo-time signals must never be scored against later live prices.
+            if entry["forward_status"] != NOT_MEASURABLE_STATUS:
+                store.update_signal_forward_result(entry["dedupe_key"], _not_measurable_result())
+            continue
         close = _series_for_entry(entry)
         result = _forward_result(close, entry["input_end_date"], entry["horizon_days"])
         benchmark_result = _benchmark_result(entry["benchmark"], entry["input_end_date"], entry["horizon_days"])
@@ -225,6 +270,21 @@ def refresh_forward_results(limit: int = 250) -> None:
             store.update_signal_forward_result(entry["dedupe_key"], result)
 
 
+def _real_eligible(entry: dict[str, Any]) -> bool:
+    """Was this entry recorded from real-eligible (live/uploaded) data?"""
+    return bool(entry.get("eligible_for_real_research"))
+
+
+def _not_measurable_result() -> dict[str, Any]:
+    return {
+        "forward_status": NOT_MEASURABLE_STATUS,
+        "forward_start_date": None,
+        "forward_end_date": None,
+        "forward_result_pct": None,
+        "evaluated_at": None,
+    }
+
+
 def _series_for_entry(entry: dict[str, Any]) -> pd.Series:
     try:
         if entry["target_kind"] == "instrument":
@@ -232,7 +292,12 @@ def _series_for_entry(entry: dict[str, Any]) -> pd.Series:
             return inst.df["close"] if inst is not None else pd.Series(dtype=float)
         if entry["target_kind"] == "model":
             model = portfolio.get(entry["target_id"])
-            return portfolio.build_series(model).close if model is not None else pd.Series(dtype=float)
+            if model is None:
+                return pd.Series(dtype=float)
+            # Forward results must come from real prices only: a permissive
+            # rebuild would silently measure the signal on sample/simulated
+            # series, so failures leave the entry pending instead.
+            return portfolio.build_series(model, allow_sample=False, allow_simulated=False).close
     except Exception:
         return pd.Series(dtype=float)
     return pd.Series(dtype=float)
@@ -243,6 +308,13 @@ def _benchmark_result(benchmark: str, input_end_date: str, horizon_days: int) ->
         inst = data.get(benchmark)
         if inst is None:
             return {}
+        if not provenance.is_real_source(inst.source):
+            # Mirror evidence_lab._benchmark_close: a synthetic sample benchmark
+            # must not supply alpha for real signals.
+            return {"benchmark_note": (
+                f"Benchmark {benchmark} has no live/uploaded price history; "
+                "benchmark result and alpha are withheld."
+            )}
         result = _forward_result(inst.df["close"], input_end_date, horizon_days)
         if result.get("forward_result_pct") is None:
             return {}
