@@ -77,12 +77,12 @@ to disable that.
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `HELIOS_USER` | `advisor` | Basic-auth username |
-| `HELIOS_PASSWORD` | *auto-generated* | Basic-auth password — **set this** for a stable login |
+| `HELIOS_PASSWORD` | *auto-generated* | Basic-auth password — **set this** for a stable login (empty counts as unset and still auto-generates) |
 | `HELIOS_PORT` | `5000` | Listen port |
 | `HELIOS_HOST` | `0.0.0.0` | Bind address (`127.0.0.1` = localhost only) |
 | `HELIOS_TLS` | `0` | `1` serves self-signed **HTTPS** (encrypts the login) |
 | `HELIOS_AUTH` | `1` | `0` disables the password gate (localhost dev only) |
-| `HELIOS_RF` | `0.02` | Risk-free / CD benchmark rate used by mandates and projections |
+| `HELIOS_RF` | `0.02` | Risk-free / CD benchmark rate used by mandates, projections, and Sharpe/Sortino metrics |
 | `HELIOS_DB_PATH` | `.helios/helios.db` | Local SQLite store for parsed live/uploaded data (`off` disables persistence) |
 | `HELIOS_DB_ENCRYPTION` | `auto` | Encrypt sensitive local persistence payloads; use `required` to fail closed without a key |
 | `HELIOS_DB_ENCRYPTION_KEY` | empty | Optional Fernet key for persistence encryption; keep it local and never commit it |
@@ -189,6 +189,11 @@ The default `.helios/` workspace layout is:
   backups/       startup safety copies of the encrypted snapshot (newest 5 kept)
 ```
 
+Persisted price history always mirrors the most recent fetch or upload for
+each symbol (refreshing replaces the stored window rather than accumulating
+a union of windows), and the store checks its schema version at open,
+failing closed if the database was written by a newer Helios.
+
 At startup Helios copies the previous encrypted snapshot into
 `.helios/backups/` before reusing it, rotating out all but the newest five
 copies. While running, snapshot writes are debounced (about 3 seconds after the
@@ -268,7 +273,11 @@ history covers the original signal horizon.
 
 The React **Signal Journal** workspace shows logged signal history, pending
 versus measured outcomes, paper hit rate, benchmark-relative alpha,
-model-by-model evidence, and drift over time. It is paper tracking only and
+model-by-model evidence, and drift over time. Headline hit-rate and alpha
+metrics are computed only from entries that were real-research-eligible when
+recorded (demo entries are counted separately and never measured against
+later live data), and benchmark alpha requires a real-source benchmark
+history. It is paper tracking only and
 never represents live orders, brokerage execution, or a performance guarantee.
 
 Set `HELIOS_AUTO_LIVE_SYMBOLS=off` to disable automatic polling explicitly.
@@ -438,7 +447,10 @@ threshold traces to a stated rationale.
 
 Upload a CSV with a **date** column and a **close/price/NAV** column (flexible header
 names: `Date`, `Timestamp`, `Close`, `Adj Close`, `Price`, `NAV`, `Value`, …) to
-analyze one instrument's history directly.
+analyze one instrument's history directly. Uploads are cleaned before they
+count as research data: duplicate dates are deduplicated (last row wins) and
+non-positive or non-finite prices are dropped; at least 30 valid rows must
+remain (60+ for research eligibility).
 
 ### Live market data
 
@@ -447,6 +459,10 @@ If `yfinance` is installed and you have a connection, enter a ticker in the
 Live histories are dividend/split-adjusted total-return prices (`auto_adjust`);
 uploaded CSVs are used exactly as provided. The
 platform degrades gracefully to sample/uploaded data when offline.
+Refresh-all runs on a bounded worker pool, every provider call is
+time-bounded and concurrency-capped, and tickers that fail to resolve are
+not retried for five minutes (a successful upload or fetch clears the
+cooldown immediately).
 
 ---
 
@@ -545,9 +561,9 @@ engine/
 | `GET /api/model-library` | governed starter model templates with mandate, benchmark, rebalance, risk-limit and provenance metadata |
 | `POST /api/model-library/import` | import a governed starter template by slug; still requires real holding histories before real model research |
 | `POST /api/model/upload` | import an Excel/CSV model (multipart `file`, `name`, `mandate`, `context`) |
-| `GET /api/model/analyze?id=ID&horizon=H` | full model analysis (`H` = 5–90 or `6M`/`1Y`/`3Y`/`5Y`) |
+| `GET /api/model/analyze?id=ID&horizon=H` | full model analysis (`H` = 5–90 or `6M`/`1Y`/`3Y`/`5Y`), including the engine's `data_provenance` verdict |
 | `GET /api/tickers` | list single instruments + last price/change |
-| `GET /api/analyze?ticker=SYM&horizon=N` | single-instrument analysis payload |
+| `GET /api/analyze?ticker=SYM&horizon=N` | single-instrument analysis payload, including the engine's `data_provenance` verdict |
 | `POST /api/upload` | import a single-instrument price CSV (multipart `file`, optional `symbol`) |
 | `POST /api/live` | fetch live data `{ "symbol": "GOOG" }` |
 | `GET /api/ai/status` | AI Copilot provider availability without exposing secrets |
@@ -616,7 +632,9 @@ Going live on a network was reviewed adversarially; the following safeguards are
 built in:
 
 - **Authentication** — HTTP Basic Auth gates *every* route (pages, API, static
-  assets) with a constant-time credential check.
+  assets) with a constant-time credential check. Auth, CSRF, and lockout
+  errors return the standard JSON error envelope on `/api/*` paths (plain
+  text elsewhere so the browser login prompt still works).
 - **Brute-force throttle** — failed logins are counted per remote IP with a
   short per-attempt delay; ten failures trigger a 60-second lockout (HTTP 429).
 - **CSRF heuristic** — non-GET requests with cross-site browser fetch metadata
@@ -666,7 +684,10 @@ regenerate it (e.g. after your LAN IP changes). On an untrusted network, prefer
 - **Daily-return prediction is hard.** Directional accuracy near 50% is normal
   and is reported transparently. Treat the cone width, not the median line, as
   the main takeaway.
-- **The backtest is illustrative.** It uses next-day execution and 5 bps costs
+- **The backtest is illustrative.** Trade statistics (win rate, avg win/loss,
+  profit factor) are computed from net-of-cost strategy returns over exactly
+  the exposure days of each episode, and both per-side and round-trip costs
+  are disclosed in the assumptions. It uses next-day execution and 5 bps costs
   but is single-asset, long/flat, and ignores slippage and liquidity. It
   validates the signal logic; it is not a production performance claim.
 - **Sentiment is lexicon-based**, not a transformer. It captures headline
