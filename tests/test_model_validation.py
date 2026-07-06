@@ -3,7 +3,7 @@ from io import BytesIO
 import pandas as pd
 
 import app as helios
-from engine import persistence, portfolio
+from engine import data, persistence, portfolio
 from tests.conftest import price_series
 
 
@@ -97,6 +97,7 @@ def test_model_validation_dashboard_ranks_champion_challengers_and_alerts(monkey
 
 
 def test_model_validation_dashboard_blocks_missing_real_history(monkeypatch, tmp_path):
+    monkeypatch.setattr(data, "HAS_YF", False)
     _use_db(monkeypatch, tmp_path)
     model = portfolio.parse_model_file(
         b"Ticker,Weight\nNOHIST1,60\nNOHIST2,40\n",

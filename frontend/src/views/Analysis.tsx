@@ -440,32 +440,57 @@ function MandateFit({ payload }: { payload: AnalysisResponse }) {
   if (!mandate || typeof targetVol !== "number" || typeof tolerance !== "number") {
     return <EmptyState title="No mandate context" body="Mandate-fit bars appear for model analyses with a configured mandate." />;
   }
-  const rows = [
-    { label: "Volatility vs target", value: `${fmtNumber(vol, 1)}% / ${fmtNumber(targetVol, 0)}%`, pct: (vol / (targetVol * 2)) * 100, ok: vol <= targetVol * 1.15 },
-    { label: "Max drawdown vs tolerance", value: `−${fmtNumber(dd, 1)}% / −${fmtNumber(tolerance, 0)}%`, pct: (dd / (tolerance * 2)) * 100, ok: dd <= tolerance },
+  // Pass/fail comes from the engine's mandate-fit insight verdicts, not from
+  // re-implemented client-side thresholds. Rows without an engine verdict
+  // (including any payload lacking insights) render as illustrative only.
+  const insightIds = Array.isArray(payload.insights) ? payload.insights.map((insight) => insight.id) : null;
+  const rows: Array<{ label: string; value: string; pct: number; verdict: boolean | null }> = [
+    {
+      label: "Volatility vs target",
+      value: `${fmtNumber(vol, 1)}% / ${fmtNumber(targetVol, 0)}%`,
+      pct: (vol / (targetVol * 2)) * 100,
+      verdict: insightIds ? !insightIds.includes("vol_above_mandate") : null,
+    },
+    {
+      label: "Max drawdown vs tolerance",
+      value: `−${fmtNumber(dd, 1)}% / −${fmtNumber(tolerance, 0)}%`,
+      pct: (dd / (tolerance * 2)) * 100,
+      verdict: insightIds ? !insightIds.includes("drawdown_breaches_tolerance") : null,
+    },
     ...(typeof targetReturn === "number"
       ? [{
           label: "Return vs mandate target",
           value: `${fmtPct(annualReturn)} / ${fmtNumber(targetReturn, 1)}%`,
           pct: (Math.max(annualReturn, 0) / Math.max(targetReturn * 2, 1)) * 100,
-          ok: annualReturn >= targetReturn,
+          verdict: null,
         }]
       : []),
   ];
+  const hasIllustrativeRows = rows.some((row) => row.verdict === null);
   return (
     <div className="mandate-fit">
       {rows.map((row) => (
         <div className="fit-item" key={row.label}>
           <div className="fit-item__head">
             <span>{row.label}</span>
-            <b className={row.ok ? "tone-positive" : "tone-negative"}>{row.value}</b>
+            <b className={row.verdict === null ? "tone-neutral" : row.verdict ? "tone-positive" : "tone-negative"}>{row.value}</b>
           </div>
-          <div className="fit-bar"><i className={row.ok ? "is-positive" : "is-negative"} style={{ width: `${Math.min(row.pct, 100)}%` }} /></div>
+          <div className="fit-bar">
+            <i
+              className={row.verdict === null ? undefined : row.verdict ? "is-positive" : "is-negative"}
+              style={row.verdict === null ? { width: `${Math.min(row.pct, 100)}%`, background: "var(--gray)" } : { width: `${Math.min(row.pct, 100)}%` }}
+            />
+          </div>
         </div>
       ))}
       {typeof payload.signal.mandate_fit === "number" && (
         <p className="forecast-note">Signal conviction scaled ×{fmtNumber(payload.signal.mandate_fit, 2)} for mandate fit.</p>
       )}
+      <p className="forecast-note">
+        {hasIllustrativeRows
+          ? "Gray bars are an illustrative fit indication only — the engine supplied no pass/fail verdict for them."
+          : "Pass/fail flags mirror the engine's mandate-fit insights."}
+      </p>
     </div>
   );
 }
@@ -532,6 +557,23 @@ function safeAction(action?: string) {
 }
 
 function analysisQuality(payload: AnalysisResponse): ProvenancePayload {
+  // The engine's provenance verdict is authoritative: use data_mode,
+  // display_label, and eligibility verbatim instead of re-deriving the
+  // demo/real gate client-side. The derivations below remain only as a
+  // fallback for older cached responses that lack data_provenance.
+  const verdict = payload.data_provenance;
+  if (verdict && typeof verdict.data_mode === "string") {
+    return {
+      data_mode: verdict.data_mode,
+      display_label: verdict.display_label,
+      eligible_for_real_research: verdict.eligible_for_real_research === true,
+      reason: verdict.reason,
+      required_action: verdict.required_action,
+      warnings: verdict.warnings,
+      data_provenance: verdict,
+    };
+  }
+
   if (payload.source) {
     const real = ["live", "upload"].includes(payload.source);
     return {

@@ -18,7 +18,10 @@ def report_instrument():
     inst = data.get(symbol)
     if inst is None:
         return err(f"Unknown ticker '{symbol}'.", 404)
-    return ok(reporting.instrument_report(inst))
+    try:
+        return ok(reporting.instrument_report(inst))
+    except ValueError as e:
+        return err(str(e), 400)
 
 
 @bp.route("/api/report/model")
@@ -65,7 +68,10 @@ def save_report_snapshot():
     kind = str(body.get("kind") or "").strip().lower()
     target_id = str(body.get("id") or body.get("target_id") or "").strip()
     ai_narrative = str(body.get("ai_narrative") or "").strip()
-    include_ai_narrative = bool(body.get("include_ai_narrative"))
+    # Tri-state: absent means "no toggle surfaced" (keep a provided narrative),
+    # an explicit false excludes even a provided/generated one.
+    raw_include = body.get("include_ai_narrative")
+    include_ai_narrative = None if raw_include is None else bool(raw_include)
     prepared_for = str(body.get("prepared_for") or "").strip()
     prepared_by = str(body.get("prepared_by") or "").strip()
     reviewer = str(body.get("reviewer") or "").strip()
@@ -74,7 +80,7 @@ def save_report_snapshot():
         report = report_snapshots.report_for_snapshot(kind, target_id)
     except ValueError as exc:
         return err(str(exc), 400)
-    ai_narrative, ai_meta = report_snapshots.ai_narrative(
+    ai_narrative, ai_meta = report_snapshots.resolve_narrative(
         report,
         provided_narrative=ai_narrative,
         include_ai_narrative=include_ai_narrative,

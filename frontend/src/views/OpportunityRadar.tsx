@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import { api } from "../api/client";
-import type { OpportunitiesResponse, OpportunityItem } from "../api/types";
+import type { BlockedOpportunityItem, OpportunitiesResponse, OpportunityItem } from "../api/types";
 import { AICopilotPanel, opportunityCopilotActions } from "../components/ai/AICopilotPanel";
 import { DataQualityBanner, SourcePill } from "../components/badges/DataModeBadge";
 import { Panel } from "../components/cards/Panel";
@@ -59,6 +59,7 @@ export function OpportunityRadar({
   const opportunityScores = useMemo(() => items.map((item) => item.opportunity_score), [items]);
   const selected = items.find((item) => item.id === selectedId) || items[0];
   const lockedRows = buildLockedOpportunityRows(payload);
+  const blockedItems = payload?.blocked_items || [];
   const copilotPayload = useMemo<Record<string, unknown> | null>(() => {
     if (selected) {
       return {
@@ -185,6 +186,11 @@ export function OpportunityRadar({
           )}
         </Panel>
       </section>
+      {blockedItems.length > 0 && (
+        <Panel title="Blocked Models" meta={`${blockedItems.length} excluded from ranking`}>
+          <BlockedModelsTable items={blockedItems} />
+        </Panel>
+      )}
       <AICopilotPanel
         contextLabel={selected ? `${selected.symbol} opportunity review` : "Opportunity Radar gate review"}
         payload={copilotPayload}
@@ -227,6 +233,22 @@ function buildLockedOpportunityRows(payload: OpportunitiesResponse | null) {
       nextStep: "Re-run the radar after the gate opens.",
     },
   ];
+}
+
+function BlockedModelsTable({ items }: { items: BlockedOpportunityItem[] }) {
+  return (
+    <div className="radar-preview-table locked-radar-table gate-checklist-table" tabIndex={0} aria-label="Blocked models excluded from the ranked queue" onKeyDown={scrollTableByKey}>
+      <div><span>Model</span><span>Status</span><span>Missing tickers</span><span>Required action</span></div>
+      {items.map((item) => (
+        <div className="locked-table-row" key={item.id}>
+          <strong>{item.name || item.symbol}<small>{item.reason || "Model data quality is blocked."}</small></strong>
+          <span>{item.display_label || "Data Quality Blocked"}</span>
+          <span>{item.missing_tickers?.length ? item.missing_tickers.join(", ") : "—"}</span>
+          <em>{item.required_action || "Connect live data or upload real price/model files to generate real research."}</em>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function LockedCandidateDetail({ payload }: { payload: OpportunitiesResponse | null }) {

@@ -250,6 +250,8 @@ def render_pdf(snapshot: dict[str, Any]) -> bytes:
         ("SIGNAL JOURNAL EVIDENCE", _rl_signal_journal_page),
         ("EVIDENCE DETAIL", _rl_evidence_page),
     ]
+    if _evidence_layout(snapshot)["overflow_blocks"]:
+        pages.append(("EVIDENCE DETAIL", _rl_evidence_overflow_page))
     total = len(pages)
     for page_no, (section, renderer) in enumerate(pages, start=1):
         _rl_background(pdf, width, height, colors)
@@ -312,11 +314,15 @@ def _rl_summary_page(pdf, snapshot: dict[str, Any], width: float, height: float,
         max_lines=7,
     )
     y -= 18
+    missing_score = _missing_score_label(report)
+    risk_score = evidence.get("risk_score")
+    if risk_score is None:
+        risk_score = risk.get("risk_score")
     cards = [
         ("Action", action.get("action") or "Review"),
         ("Conviction", _fmt_pdf_value(action.get("conviction_pct"), suffix="%")),
-        ("Opportunity", _fmt_pdf_value(evidence.get("opportunity_score"))),
-        ("Risk", _fmt_pdf_value(evidence.get("risk_score") or risk.get("risk_score"))),
+        ("Opportunity", _fmt_pdf_value(evidence.get("opportunity_score"), none_label=missing_score)),
+        ("Risk", _fmt_pdf_value(risk_score, none_label=missing_score)),
         ("Expected Return", _fmt_pdf_value(forecast.get("expected_return_pct"), suffix="%")),
         ("Expected Vol", _fmt_pdf_value(forecast.get("expected_vol_pct"), suffix="%")),
     ]
@@ -473,7 +479,9 @@ def _rl_risk_pack_page(pdf, snapshot: dict[str, Any], width: float, height: floa
         ("Risk Posture", summary.get("risk_posture") or "review"),
         ("Benchmark", summary.get("benchmark_symbol") or drawdown.get("benchmark_symbol") or "benchmark"),
         ("Relative Drawdown", _fmt_optional_pdf_pct(drawdown.get("relative_drawdown_pct"))),
-        ("Beta", _fmt_pdf_value(drawdown.get("beta"))),
+        # This page only renders for eligible real models, so a missing beta
+        # means insufficient benchmark overlap, not locked research.
+        ("Beta", _fmt_pdf_value(drawdown.get("beta"), none_label="Pending")),
     ]
     _rl_card_grid(pdf, cards, 42, 566, 252, 58, colors)
 
@@ -500,11 +508,67 @@ def _rl_risk_pack_page(pdf, snapshot: dict[str, Any], width: float, height: floa
         y -= 7
 
 
+# Evidence-page disclosure layout: header drop, then per-panel cursor offsets.
+_EVIDENCE_TOP_Y = 640.0
+_DISCLOSURE_HEADER_DROP = 26.0
+_DISCLOSURE_PANEL_HEIGHT = 72.0
+_DISCLOSURE_PANEL_OFFSET = 78.0  # panel bottom edge sits this far below the cursor
+_DISCLOSURE_STEP = 86.0
+
+
+def _evidence_layout(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Deterministic evidence-page layout plan.
+
+    Mirrors the drawing arithmetic in _rl_evidence_page so render_pdf can
+    decide upfront how many disclosure blocks fit above the footer margin
+    (pdf_layout.CONTENT_BOTTOM) and paginate the rest instead of drawing
+    over the footer or off the page.
+    """
+    y = _EVIDENCE_TOP_Y
+    warnings = snapshot.get("warnings") if isinstance(snapshot.get("warnings"), list) else []
+    if warnings:
+        y -= 20
+        for warning in warnings[:5]:
+            y -= pdf_layout.wrapped_drop(f"- {warning}", 490, 8.8, max_lines=2) + 7
+    else:
+        y -= pdf_layout.wrapped_drop("No additional caveats beyond the required disclosure blocks.", 500, 9, max_lines=2) + 12
+    if snapshot.get("ai_narrative"):
+        y -= 20 + pdf_layout.wrapped_drop(str(snapshot.get("ai_narrative")), 490, 8.5, max_lines=8) + 12
+    blocks = [block for block in (snapshot.get("disclosure_blocks") or [])[:4] if isinstance(block, dict)]
+    fit = 0
+    for index in range(len(blocks)):
+        bottom = y - _DISCLOSURE_HEADER_DROP - _DISCLOSURE_STEP * index - _DISCLOSURE_PANEL_OFFSET
+        if bottom < pdf_layout.CONTENT_BOTTOM:
+            break
+        fit = index + 1
+    return {
+        "disclosure_header_y": y,
+        "first_page_blocks": blocks[:fit],
+        "overflow_blocks": blocks[fit:],
+    }
+
+
+def _rl_disclosure_panels(pdf, blocks: list[dict[str, Any]], y: float, width: float, colors) -> None:
+    for block in blocks:
+        _rl_panel(
+            pdf,
+            42,
+            y - _DISCLOSURE_PANEL_OFFSET,
+            width - 84,
+            _DISCLOSURE_PANEL_HEIGHT,
+            str(block.get("title") or "Disclosure"),
+            str(block.get("body") or ""),
+            colors,
+            accent="#ffd24a",
+        )
+        y -= _DISCLOSURE_STEP
+
+
 def _rl_evidence_page(pdf, snapshot: dict[str, Any], width: float, height: float, page_no: int, total: int, section: str, colors) -> None:
     _rl_header(pdf, width, height, section, colors)
     _rl_text(pdf, "EVIDENCE DETAIL", 42, 674, 18, colors.HexColor("#f8fafc"), bold=True)
     warnings = snapshot.get("warnings") if isinstance(snapshot.get("warnings"), list) else []
-    y = 640
+    y = _EVIDENCE_TOP_Y
     if warnings:
         _rl_text(pdf, "CAVEATS", 42, y, 12, colors.HexColor("#ffd24a"), bold=True)
         y -= 20
@@ -516,15 +580,36 @@ def _rl_evidence_page(pdf, snapshot: dict[str, Any], width: float, height: float
     if snapshot.get("ai_narrative"):
         _rl_text(pdf, "AI NARRATIVE", 42, y, 12, colors.HexColor("#ffd24a"), bold=True)
         y = _rl_wrapped(pdf, str(snapshot.get("ai_narrative")), 58, y - 20, 490, 8.5, colors.HexColor("#c8d3df"), max_lines=8) - 12
-    _rl_text(pdf, "DISCLOSURE BLOCKS", 42, max(y, 310), 14, colors.HexColor("#f8fafc"), bold=True)
-    y = max(y, 310) - 26
-    for block in (snapshot.get("disclosure_blocks") or [])[:4]:
-        _rl_panel(pdf, 42, y - 78, width - 84, 72, str(block.get("title") or "Disclosure"), str(block.get("body") or ""), colors, accent="#ffd24a")
-        y -= 86
+    layout = _evidence_layout(snapshot)
+    blocks = layout["first_page_blocks"]
+    if blocks or not layout["overflow_blocks"]:
+        _rl_text(pdf, "DISCLOSURE BLOCKS", 42, y, 14, colors.HexColor("#f8fafc"), bold=True)
+        _rl_disclosure_panels(pdf, blocks, y - _DISCLOSURE_HEADER_DROP, width, colors)
+
+
+def _rl_evidence_overflow_page(pdf, snapshot: dict[str, Any], width: float, height: float, page_no: int, total: int, section: str, colors) -> None:
+    _rl_header(pdf, width, height, section, colors)
+    layout = _evidence_layout(snapshot)
+    title = "DISCLOSURE BLOCKS (CONTINUED)" if layout["first_page_blocks"] else "DISCLOSURE BLOCKS"
+    _rl_text(pdf, title, 42, 674, 14, colors.HexColor("#f8fafc"), bold=True)
+    _rl_disclosure_panels(pdf, layout["overflow_blocks"], 674 - _DISCLOSURE_HEADER_DROP, width, colors)
 
 
 def _rl_footer(pdf, snapshot: dict[str, Any], width: float, page_no: int, total: int, section: str, colors) -> None:
     pdf_layout.footer(pdf, width, page_no, total, colors, version_label=str(snapshot.get("version_label") or "v1"))
+
+
+def _missing_score_label(report: dict[str, Any]) -> str:
+    """Honest placeholder for a score the report simply does not carry.
+
+    'Research locked' is reserved for genuinely blocked/ineligible data modes;
+    real eligible model reports are not scored on the instrument scale.
+    """
+    data_provenance = report.get("data_provenance") if isinstance(report.get("data_provenance"), dict) else {}
+    eligible = bool(report.get("eligible_for_real_research") or data_provenance.get("eligible_for_real_research"))
+    if not eligible:
+        return "Research locked"
+    return "Not scored for models" if _text(report.get("kind")) == "model" else "Not scored"
 
 
 def _fmt_html_pct(value: Any) -> str:
@@ -700,7 +785,9 @@ def _format_risk_cell(value: Any) -> str:
         return ", ".join(f"{_label(key)}: {_format_risk_cell(item)}" for key, item in list(value.items())[:4])
     if isinstance(value, str) and "_" in value:
         return _label(value)
-    return str(value or "")
+    if value is None or value is False or value == "":
+        return ""
+    return str(value)
 
 
 def _risk_pack(snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -855,7 +942,8 @@ def _label(value: Any) -> str:
 
 
 def _esc(value: Any) -> str:
-    return html.escape(str(value or ""), quote=True)
+    # Only None renders blank: numeric zeros must survive as '0'/'0.0'.
+    return html.escape("" if value is None else str(value), quote=True)
 
 
 def _text(value: Any) -> str:

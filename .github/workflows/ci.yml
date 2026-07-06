@@ -41,10 +41,10 @@ jobs:
         run: npm --prefix frontend run build
 
       - name: Compile Python sources
-        run: python -m compileall app.py serve.py engine tests
+        run: python -m compileall app.py serve.py engine helios_web tests
 
       - name: Validate design spec JSON
         run: python -m json.tool .design_spec.json >/dev/null
 
       - name: Run offline tests
-        run: python -m pytest --cov=engine --cov=app --cov-report=term-missing
+        run: python -m pytest --cov=engine --cov=helios_web --cov=app --cov-report=term-missing

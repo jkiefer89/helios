@@ -18,18 +18,30 @@ from ._common import dedupe as _dedupe
 def score_candidate(candidate: dict, regime: dict | None = None) -> dict:
     regime = regime or {"label": "neutral"}
     source = candidate.get("source", "sample")
-    signal_score = float(candidate.get("signal_score", 0.0))
-    expected_return = float(candidate.get("expected_return_pct", 0.0))
-    expected_vol = float(candidate.get("expected_vol_pct", 0.0))
-    max_drawdown = float(candidate.get("max_drawdown_pct", 0.0))
+    # Non-finite (NaN/inf/non-numeric) analytics inputs are coerced to
+    # conservative fallbacks so they can never inflate — or NaN-poison — the
+    # composite score. Fallback rationale per input:
+    #   signal_score     0.0   neutral signal, no conviction credited
+    #   expected_return  0.0   no upside credited
+    #   expected_vol     60.0  assume elevated volatility -> risk penalty applies
+    #   max_drawdown    -40.0  assume deep drawdown risk -> risk penalty applies
+    #   backtest returns 0.0   no historical alpha credited
+    #   sim weight     100.0   assume fully simulated -> data-quality floor
+    bad_inputs: list[str] = []
+    signal_score = _finite(candidate.get("signal_score", 0.0), 0.0, "signal_score", bad_inputs)
+    expected_return = _finite(candidate.get("expected_return_pct", 0.0), 0.0, "expected_return_pct", bad_inputs)
+    expected_vol = _finite(candidate.get("expected_vol_pct", 0.0), 60.0, "expected_vol_pct", bad_inputs)
+    max_drawdown = _finite(candidate.get("max_drawdown_pct", 0.0), -40.0, "max_drawdown_pct", bad_inputs)
     action = candidate.get("action") or _action_from_signal(signal_score)
 
     backtest = candidate.get("backtest") or {}
-    strategy_return = float(backtest.get("strategy_return_pct", 0.0))
-    benchmark_return = float(backtest.get("benchmark_return_pct", 0.0))
-    data_quality = _data_quality(source, candidate)
+    strategy_return = _finite(backtest.get("strategy_return_pct", 0.0), 0.0, "strategy_return_pct", bad_inputs)
+    benchmark_return = _finite(backtest.get("benchmark_return_pct", 0.0), 0.0, "benchmark_return_pct", bad_inputs)
+    sim_weight = _finite(candidate.get("simulated_weight_pct") or 0.0, 100.0, "simulated_weight_pct", bad_inputs)
+    data_quality = _data_quality(source, sim_weight)
     forecast_quality = _forecast_quality(candidate.get("forecast_quality") or {})
-    backtest_quality = _backtest_quality(backtest)
+    sharpe = _finite(backtest.get("sharpe", 0.0), 0.0, "sharpe", bad_inputs)
+    backtest_quality = _backtest_quality(strategy_return, benchmark_return, sharpe)
     risk_score = float(np.clip(expected_vol * 1.05 + abs(max_drawdown) * 0.85, 0, 100))
     signal_quality = float(np.clip(50 + signal_score * 45, 0, 100))
     upside_quality = float(np.clip(50 + expected_return * 3.0, 0, 100))
@@ -47,7 +59,12 @@ def score_candidate(candidate: dict, regime: dict | None = None) -> dict:
     )
 
     warnings = list(candidate.get("warnings") or [])
-    if source in {"sample", "simulated"} or candidate.get("simulated_weight_pct", 0):
+    if bad_inputs:
+        warnings.append(
+            "Data integrity: non-numeric analytics inputs ("
+            + ", ".join(bad_inputs)
+            + ") were replaced with conservative fallbacks; verify source data before relying on this score.")
+    if source in {"sample", "simulated"} or sim_weight:
         warnings.append("Sample or simulated data lowers confidence; verify with client/live price history.")
         score -= 12
     if forecast_quality < 50:
@@ -62,6 +79,13 @@ def score_candidate(candidate: dict, regime: dict | None = None) -> dict:
     if regime.get("label") == "risk-off" and evidence_score < 70:
         warnings.append("Risk-off regime requires stronger evidence before a constructive review.")
         score -= 8
+
+    # Final guard: a non-finite composite must never be ranked or serialized.
+    if not np.isfinite(score):
+        warnings.append(
+            "Data integrity: the composite score could not be computed from the inputs; "
+            "scored 0 and blocked from ranking above reviewed candidates.")
+        score = 0.0
 
     scored = {
         "id": candidate.get("id") or f"{candidate.get('kind', 'instrument')}:{candidate.get('symbol', '')}",
@@ -89,16 +113,23 @@ def score_candidate(candidate: dict, regime: dict | None = None) -> dict:
         "plain_english_summary": _summary(candidate, evidence_score, risk_score, action),
         "recommended_next_step": _next_step(action),
         "warnings": _dedupe(warnings)[:5],
-        "eligible_for_real_research": provenance.is_real_source(source) and not candidate.get("simulated_weight_pct", 0),
+        "eligible_for_real_research": provenance.is_real_source(source) and not sim_weight,
         "data_mode": "real" if provenance.is_real_source(source) else "demo",
     }
     return scored
 
 
 def rank_candidates(candidates: list[dict], regime: dict | None = None) -> list[dict]:
+    # Defensive sort key: a non-finite score must never float to the top of the
+    # review queue (NaN comparisons would leave it wherever it started).
+    def _key(item: dict) -> tuple[float, float]:
+        score, evidence = float(item["opportunity_score"]), float(item["evidence_score"])
+        return (score if np.isfinite(score) else -1.0,
+                evidence if np.isfinite(evidence) else -1.0)
+
     return sorted(
         [score_candidate(candidate, regime=regime) for candidate in candidates],
-        key=lambda item: (item["opportunity_score"], item["evidence_score"]),
+        key=_key,
         reverse=True,
     )
 
@@ -279,19 +310,33 @@ def _blocked_model(mdl: portfolio.Model, p: dict) -> dict:
     }
 
 
-def _data_quality(source: str, candidate: dict) -> float:
-    if candidate.get("simulated_weight_pct", 0):
-        return max(20.0, 75.0 - float(candidate["simulated_weight_pct"]) * 0.7)
+def _finite(value, fallback: float, name: str = "", bad_inputs: list[str] | None = None) -> float:
+    """Coerce a metric to a finite float, recording the field when it is not."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        v = float("nan")
+    if not np.isfinite(v):
+        if bad_inputs is not None and name:
+            bad_inputs.append(name)
+        return fallback
+    return v
+
+
+def _data_quality(source: str, sim_weight: float) -> float:
+    if sim_weight:
+        return max(20.0, 75.0 - sim_weight * 0.7)
     return {"live": 92.0, "upload": 82.0, "sample": 42.0, "simulated": 28.0}.get(source, 55.0)
 
 
 def _forecast_quality(quality: dict) -> float:
     da = quality.get("directional_accuracy")
-    n_test = int(quality.get("n_test") or 0)
+    n_test = int(_finite(quality.get("n_test"), 0.0))
     if da is None:
         base = 42.0
     else:
-        base = 50.0 + (float(da) - 0.50) * 180.0
+        # Unmeasurable accuracy scores the same as unmeasured: no demonstrated edge.
+        base = 50.0 + (_finite(da, 0.50) - 0.50) * 180.0
     if n_test < 30:
         base -= 12
     elif n_test < 60:
@@ -299,9 +344,8 @@ def _forecast_quality(quality: dict) -> float:
     return float(np.clip(base, 0, 100))
 
 
-def _backtest_quality(backtest: dict) -> float:
-    alpha = float(backtest.get("strategy_return_pct", 0.0)) - float(backtest.get("benchmark_return_pct", 0.0))
-    sharpe = float(backtest.get("sharpe", 0.0))
+def _backtest_quality(strategy_return: float, benchmark_return: float, sharpe: float) -> float:
+    alpha = strategy_return - benchmark_return
     return float(np.clip(50 + alpha * 1.1 + sharpe * 13, 0, 100))
 
 

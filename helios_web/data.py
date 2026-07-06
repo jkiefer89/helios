@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -198,7 +199,23 @@ def data_refresh():
     if not _LIVE_SEMAPHORE.acquire(blocking=False):
         return err("Too many live-data requests in flight — try again in a moment.", 429)
     try:
-        results = [data.refresh_live_symbol(symbol) for symbol in symbols]
+        if refresh_all:
+            # Batch refresh: bounded workers (same cap as ensure_live_symbols),
+            # one signal-journal forward refresh after the batch instead of 250.
+            worker_count = data._live_refresh_worker_count(None, len(symbols))
+
+            def refresh_one(symbol: str) -> dict:
+                return data.refresh_live_symbol(symbol, refresh_journal=False)
+
+            if worker_count > 1:
+                with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="helios-refresh") as executor:
+                    results = list(executor.map(refresh_one, symbols))
+            else:
+                results = [refresh_one(symbol) for symbol in symbols]
+            if any(item["status"] == "ok" for item in results):
+                data._refresh_signal_journal_forward_results()
+        else:
+            results = [data.refresh_live_symbol(symbol) for symbol in symbols]
     finally:
         _LIVE_SEMAPHORE.release()
     # Batch boundary: one encrypted snapshot write for the whole refresh.

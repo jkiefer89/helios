@@ -40,10 +40,18 @@ FRONTEND_DIST = APP_ROOT / "frontend" / "dist"
 # --------------------------------------------------------------------------- #
 AUTH_ENABLED = os.environ.get("HELIOS_AUTH", "1") != "0"
 AUTH_USER = os.environ.get("HELIOS_USER", "advisor")
-AUTH_PASSWORD = os.environ.get("HELIOS_PASSWORD")
-PASSWORD_GENERATED = AUTH_PASSWORD is None
-if PASSWORD_GENERATED:
-    AUTH_PASSWORD = secrets.token_urlsafe(9)
+
+
+def _resolve_auth_password(raw: str | None) -> tuple[str, bool]:
+    """Returns (password, generated). Empty/whitespace HELIOS_PASSWORD (e.g. an
+    untouched .env.example copy) counts as unset: auto-generate instead of
+    silently locking every login out with an unusable blank password."""
+    if raw is None or not raw.strip():
+        return secrets.token_urlsafe(9), True
+    return raw, False
+
+
+AUTH_PASSWORD, PASSWORD_GENERATED = _resolve_auth_password(os.environ.get("HELIOS_PASSWORD"))
 
 
 def _auth_ok(username: str, password: str) -> bool:
@@ -105,22 +113,35 @@ def _clear_auth_failures(remote: str) -> None:
         _AUTH_FAILURES.pop(remote, None)
 
 
+def _guard_response(message: str, code: int, headers: dict | None = None) -> Response:
+    """Auth/CSRF/lockout refusal: JSON error envelope for API paths, plain text
+    elsewhere so the browser Basic-auth prompt keeps working."""
+    if request.path.startswith("/api/"):
+        resp = jsonify({"error": message})
+        resp.status_code = code
+    else:
+        resp = Response(message, code)
+    for key, value in (headers or {}).items():
+        resp.headers[key] = value
+    return resp
+
+
 @app.before_request
 def _require_auth():
     if request.method not in _CSRF_SAFE_METHODS and _is_cross_site_request():
-        return Response("Forbidden.", 403)
+        return _guard_response("Forbidden.", 403)
     if not AUTH_ENABLED:
         return None
     remote = request.remote_addr or "unknown"
     if _auth_locked_out(remote):
-        return Response("Too many failed login attempts — try again shortly.", 429)
+        return _guard_response("Too many failed login attempts — try again shortly.", 429)
     auth = request.authorization
     if auth and auth.type == "basic" and _auth_ok(auth.username or "", auth.password or ""):
         _clear_auth_failures(remote)
         return None
     if auth is not None:
         _register_auth_failure(remote)
-    return Response(
+    return _guard_response(
         "Helios — authentication required.",
         401,
         {"WWW-Authenticate": 'Basic realm="Helios analytics", charset="UTF-8"'},
@@ -225,6 +246,8 @@ def clean(obj):
         return {k: clean(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
         return [clean(v) for v in obj]
+    if isinstance(obj, (bool, np.bool_)):
+        return bool(obj)
     if isinstance(obj, (np.integer,)):
         return int(obj)
     if isinstance(obj, (np.floating, float)):

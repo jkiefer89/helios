@@ -34,7 +34,8 @@ def test_strategy_costs_and_slippage_reduce_total_return():
     costly = analyze_strategy(close, cost_bps=25, slippage_bps=10)
 
     assert costly["strategy"]["total_return_pct"] < free["strategy"]["total_return_pct"]
-    assert costly["assumptions"]["round_trip_cost_bps"] == 35
+    assert costly["assumptions"]["per_side_cost_bps"] == 35
+    assert costly["assumptions"]["round_trip_cost_bps"] == 70
 
 
 def test_strategy_drawdown_curve_uses_negative_percentage_convention():

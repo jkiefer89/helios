@@ -21,7 +21,14 @@ def instrument_report(inst) -> dict:
     fc = forecast.forecast(close, horizon=21, n_paths=700)
     sent = sentiment.score_headlines(inst.headlines)
     sig = signals.evaluate(close, fc, sent, history_days=len(close))
-    st = strategy.analyze_strategy(close)
+    try:
+        st = strategy.analyze_strategy(close)
+        strategy_note = ""
+    except ValueError as exc:
+        # Short history (< 60 rows): degrade to an honest strategy-unavailable
+        # section instead of failing the whole report.
+        st = None
+        strategy_note = str(exc)
     metrics = indicators.metrics_summary(close)
     scored = opportunity.score_candidate({
         "id": f"instrument:{inst.symbol}",
@@ -39,10 +46,12 @@ def instrument_report(inst) -> dict:
             "strategy_return_pct": st["strategy"]["total_return_pct"],
             "benchmark_return_pct": st["benchmark"]["total_return_pct"],
             "sharpe": st["strategy"]["sharpe"],
-        },
+        } if st else {},
         "warnings": sig.get("caveats", []),
     })
     warnings = list(scored["warnings"])
+    if strategy_note:
+        warnings.append(strategy_note)
     if inst.source == "sample":
         warnings.append("This report uses bundled sample data; verify with current client/live data before use.")
     return _base_report(
@@ -77,7 +86,7 @@ def instrument_report(inst) -> dict:
                 "prob_up": fc["prob_up"],
                 "quality": fc.get("quality", {}),
             },
-            "strategy": _strategy_summary(st),
+            "strategy": _strategy_summary(st) if st else _strategy_unavailable(strategy_note),
             "provenance": _instrument_provenance(inst, close, p),
             "data_quality": p,
             "assumptions": _assumptions(),
@@ -280,8 +289,18 @@ def _title(kind: str, identity: dict, data_quality: dict) -> str:
     return f"Advisor Report: {name}"
 
 
+def _strategy_unavailable(reason: str) -> dict:
+    return {
+        "available": False,
+        "reason": reason or "Need at least 60 rows of history for Strategy Lab analysis.",
+        "required_rows": 60,
+        "required_action": "Provide at least 60 sessions of price history to unlock strategy evidence.",
+    }
+
+
 def _strategy_summary(st: dict) -> dict:
     return {
+        "available": True,
         "beat_benchmark": st["beat_benchmark"],
         "strategy_return_pct": st["strategy"]["total_return_pct"],
         "benchmark_return_pct": st["benchmark"]["total_return_pct"],

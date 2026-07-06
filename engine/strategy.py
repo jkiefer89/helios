@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from . import signals
+from . import mandate, signals
 
 TRADING_DAYS = 252
 
@@ -41,10 +41,12 @@ def analyze_strategy(
     benchmark_curve = (1.0 + benchmark_rets).cumprod()
     dd = _drawdown(strategy_curve)
     rolling = _rolling_sharpe(strategy_rets)
-    episodes = _trade_episodes(position, rets)
+    # Episodes compound NET strategy returns so per-trade stats reconcile with
+    # the (net) equity curve rather than overstating raw asset moves.
+    episodes, open_episode = _trade_episodes(position, strategy_rets)
     idx = _downsample_index(len(px), 420)
     dates = [px.index[i].strftime("%Y-%m-%d") for i in idx]
-    trade_stats = _trade_stats(episodes, position, turnover)
+    trade_stats = _trade_stats(episodes, open_episode, position, turnover)
 
     return {
         "dates": dates,
@@ -63,7 +65,9 @@ def analyze_strategy(
             "exit_threshold": exit,
             "cost_bps": float(cost_bps),
             "slippage_bps": float(slippage_bps),
-            "round_trip_cost_bps": float(all_in_cost),
+            "per_side_cost_bps": float(all_in_cost),
+            "round_trip_cost_bps": float(2.0 * all_in_cost),
+            "risk_free_rate_pct": float(mandate.RF * 100),
             "cash_return_assumption_pct": 0.0,
         },
         "methodology": {
@@ -104,8 +108,8 @@ def _metrics(rets: pd.Series, curve: pd.Series) -> dict:
     vol = float(rets.std() * np.sqrt(TRADING_DAYS))
     downside = float(rets[rets < 0].std() * np.sqrt(TRADING_DAYS)) if (rets < 0).any() else 0.0
     ann_ret = float((1.0 + rets.mean()) ** TRADING_DAYS - 1.0)
-    sharpe = (rets.mean() * TRADING_DAYS - 0.02) / vol if vol > 1e-9 else 0.0
-    sortino = (rets.mean() * TRADING_DAYS - 0.02) / downside if downside > 1e-9 else 0.0
+    sharpe = (rets.mean() * TRADING_DAYS - mandate.RF) / vol if vol > 1e-9 else 0.0
+    sortino = (rets.mean() * TRADING_DAYS - mandate.RF) / downside if downside > 1e-9 else 0.0
     max_dd = float(_drawdown(curve).min())
     calmar = cagr / abs(max_dd) if max_dd < -1e-9 else 0.0
     return {
@@ -132,35 +136,41 @@ def _rolling_sharpe(rets: pd.Series, window: int = 63) -> pd.Series:
     # is undefined there, so emit NaN. 1e-4 annualized sits orders of magnitude
     # between that noise and the smallest genuine trading-window vol.
     vol = vol.where(vol > 1e-4)
-    return ((mean - 0.02) / vol).replace([np.inf, -np.inf], np.nan)
+    return ((mean - mandate.RF) / vol).replace([np.inf, -np.inf], np.nan)
 
 
-def _trade_episodes(position: pd.Series, rets: pd.Series) -> list[float]:
+def _trade_episodes(position: pd.Series, rets: pd.Series) -> tuple[list[float], float | None]:
+    """Compound per-episode returns over exactly the exposure days.
+
+    Returns (completed episodes, still-open episode or None). The flat day the
+    exit lands on carries no exposure, so its return is never compounded in.
+    """
     episodes: list[float] = []
     in_pos = False
     cumulative = 1.0
     for p, r in zip(position.values, rets.values):
-        if p > 0 and not in_pos:
-            in_pos = True
-            cumulative = 1.0
-        if in_pos:
+        if p > 0:
+            if not in_pos:
+                in_pos = True
+                cumulative = 1.0
             cumulative *= 1.0 + float(r)
-        if p == 0 and in_pos:
+        elif in_pos:
             in_pos = False
             episodes.append(cumulative - 1.0)
-    if in_pos:
-        episodes.append(cumulative - 1.0)
-    return episodes
+    return episodes, (cumulative - 1.0 if in_pos else None)
 
 
-def _trade_stats(episodes: list[float], position: pd.Series, turnover: pd.Series) -> dict:
+def _trade_stats(episodes: list[float], open_episode: float | None,
+                 position: pd.Series, turnover: pd.Series) -> dict:
     wins = [r for r in episodes if r > 0]
     losses = [r for r in episodes if r <= 0]
     gross_win = sum(wins)
     gross_loss = abs(sum(losses))
     return {
-        "n_trades": int((turnover > 0).sum()),
+        "n_trades": int((position.diff() > 0).sum()),
+        "n_position_changes": int((turnover > 0).sum()),
         "completed_trades": len(episodes),
+        "open_position_episode_return_pct": (open_episode * 100) if open_episode is not None else None,
         "win_rate_pct": (len(wins) / len(episodes) * 100) if episodes else 0.0,
         "avg_win_pct": (np.mean(wins) * 100) if wins else 0.0,
         "avg_loss_pct": (np.mean(losses) * 100) if losses else 0.0,

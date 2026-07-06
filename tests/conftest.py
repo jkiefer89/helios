@@ -19,6 +19,23 @@ if str(ROOT) not in sys.path:
 
 
 @pytest.fixture(autouse=True)
+def isolate_provider_env():
+    """Restore HELIOS_/ANTHROPIC_/OPENAI_ env keys after each test.
+
+    Some code under test (e.g. the .env loader) writes os.environ directly,
+    which monkeypatch cannot undo; this keeps such writes from leaking into
+    later tests. Defined before reset_process_local_stores so it tears down
+    last, after monkeypatch and store resets have already run.
+    """
+    prefixes = ("HELIOS_", "ANTHROPIC_", "OPENAI_")
+    before = {k: v for k, v in os.environ.items() if k.startswith(prefixes)}
+    yield
+    for key in [k for k in os.environ if k.startswith(prefixes) and k not in before]:
+        del os.environ[key]
+    os.environ.update(before)
+
+
+@pytest.fixture(autouse=True)
 def reset_process_local_stores():
     """Keep tests independent while preserving bundled sample instruments."""
     data.load_samples()
@@ -26,6 +43,7 @@ def reset_process_local_stores():
     data._STORE.clear()
     data._STORE.update(samples)
     data._PRICE_CACHE.clear()
+    data._NEGATIVE_RESOLVE.clear()
     portfolio._MODELS.clear()
     analytics_cache.invalidate()
     persistence.reset_store_for_tests()
@@ -33,6 +51,7 @@ def reset_process_local_stores():
     data._STORE.clear()
     data._STORE.update(samples)
     data._PRICE_CACHE.clear()
+    data._NEGATIVE_RESOLVE.clear()
     portfolio._MODELS.clear()
     analytics_cache.invalidate()
     persistence.reset_store_for_tests()

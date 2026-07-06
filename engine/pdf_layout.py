@@ -13,17 +13,20 @@ from typing import Any
 
 DEFAULT_FOOTER_NOTE = "Analysis only - not investment advice, order execution, or a return guarantee."
 
+# Lowest y coordinate page content may reach; footer() draws its rule at y=66.
+CONTENT_BOTTOM = 78
+
 
 def clean_text(value: Any) -> str:
     """Coerce to str and replace dash variants Helvetica cannot render."""
     return str(value or "").replace("—", "-").replace("–", "-").replace("‑", "-")
 
 
-def fmt_value(value: Any, *, suffix: str = "") -> str:
+def fmt_value(value: Any, *, suffix: str = "", none_label: str = "Research locked") -> str:
     try:
         number = float(value)
     except (TypeError, ValueError):
-        return "Research locked" if value is None else str(value)
+        return none_label if value is None else str(value)
     return f"{number:.1f}{suffix}"
 
 
@@ -41,13 +44,20 @@ def draw_text(pdf, text: Any, x: float, y: float, size: float, color, *, bold: b
     pdf.drawString(x, y, clean_text(text))
 
 
-def draw_wrapped(pdf, text: Any, x: float, y: float, width: float, size: float, color, *, bold: bool = False, max_lines: int) -> float:
+def wrap_lines(text: Any, width: float, size: float, *, max_lines: int) -> list[str]:
     chars = max(24, int(width / max(size * 0.50, 1)))
     lines = textwrap.wrap(clean_text(text), width=chars)[:max_lines]
-    if not lines:
-        lines = [""]
+    return lines or [""]
+
+
+def wrapped_drop(text: Any, width: float, size: float, *, max_lines: int) -> float:
+    """Vertical space draw_wrapped consumes, so layouts can be planned without a canvas."""
+    return len(wrap_lines(text, width, size, max_lines=max_lines)) * size * 1.38
+
+
+def draw_wrapped(pdf, text: Any, x: float, y: float, width: float, size: float, color, *, bold: bool = False, max_lines: int) -> float:
     leading = size * 1.38
-    for line in lines:
+    for line in wrap_lines(text, width, size, max_lines=max_lines):
         draw_text(pdf, line, x, y, size, color, bold=bold)
         y -= leading
     return y

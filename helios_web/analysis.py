@@ -287,6 +287,8 @@ def analyze():
         "symbol": inst.symbol,
         "name": inst.name,
         "source": inst.source,
+        # Same server-side provenance verdict shape /api/live returns.
+        "data_provenance": provenance.instrument(inst.source, len(close)),
         "metrics": metrics,
         "series": _series_payload(close, markers=True),
         "forecast": fc,
@@ -451,6 +453,7 @@ def signal_journal_endpoint():
             "raw_price_history_stored": False,
             "hit_rate_basis": "Measured paper signals are scored against their action intent: BUY/ADD/OVERWEIGHT must beat the benchmark when alpha is available; SELL/REDUCE/UNDERWEIGHT must underperform; HOLD/REVIEW must avoid material benchmark lag.",
             "forward_results": "Pending results resolve only after later live or persisted price history covers the original signal horizon.",
+            "measurement_scope": "Signals recorded from demo/sample data are marked not_measurable and never scored; headline hit rate and alpha aggregate only real-eligible signals.",
         },
         "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
     })
