@@ -79,6 +79,54 @@ def holding_expected_return(ticker, weight_pct, asset_class, fundamentals,
                          {"reason": "no usable fundamentals"})
 
 
+def instrument_forward(ticker: str, fnd, mandate_key: str = "balanced") -> dict:
+    """Single-instrument forward view for the strategic rating track.
+
+    Wraps :func:`holding_expected_return` for one name (treated as an equity
+    leaf; funds without sector data score off the market anchor, which is the
+    honest coarse answer) and adds the analyst-consensus context when the
+    provider supplied it. Returns ``usable=False`` — never a fabricated number —
+    when there are no usable fundamentals.
+    """
+    anchor = _mnd.anchor_return(mandate_key)
+    hr = holding_expected_return(ticker, 100.0, "equity", fnd, mandate_key)
+    out: dict = {
+        "usable": bool(hr.usable and hr.expected_return is not None),
+        "basis": hr.basis,
+        "anchor_pct": round(anchor * 100.0, 2),
+        "mandate": _mnd.key_or_default(mandate_key),
+        "blocks_pct": {k: round(v * 100.0, 2) for k, v in hr.blocks.items()
+                       if isinstance(v, (int, float))},
+        "source": getattr(fnd, "source", "none"),
+        "sector": getattr(fnd, "sector", "") or "",
+        "method": "building_block_cma",
+        "horizon_basis": "annualized — independent of the chart horizon",
+    }
+    if out["usable"]:
+        out["expected_return_pct"] = round(hr.expected_return * 100.0, 2)
+        out["gap_vs_anchor_pct"] = round((hr.expected_return - anchor) * 100.0, 2)
+    # Quality context (shown, and mildly scored, only when present).
+    quality = {}
+    for field in ("roe", "profit_margin", "debt_to_equity", "revenue_growth"):
+        val = getattr(fnd, field, None)
+        if val is not None:
+            quality[field] = round(float(val), 4)
+    if quality:
+        out["quality"] = quality
+    # Analyst consensus context (free via yfinance) — evidence, not a component.
+    price = getattr(fnd, "current_price", None)
+    target = getattr(fnd, "target_mean_price", None)
+    if price and target and price > 0:
+        out["analyst"] = {
+            "target_mean_price": round(float(target), 2),
+            "implied_upside_pct": round((float(target) / float(price) - 1.0) * 100.0, 2),
+            "rating_mean": getattr(fnd, "analyst_rating", None),
+            "n_analysts": getattr(fnd, "n_analysts", None),
+            "note": "Consensus 12m target — context only, not a scored component.",
+        }
+    return out
+
+
 def aggregate(underlyings, fundamentals_map, mandate_key="balanced") -> dict:
     """Roll per-holding expected returns up to a model forward expected return.
 

@@ -141,6 +141,7 @@ function AnalysisPayload({ payload }: { payload: AnalysisResponse }) {
           <p>{payload.signal.headline_rationale || payload.signal.rationale}</p>
           <span>{eligible ? `${fmtNumber(payload.signal.conviction_pct, 0)}% conviction${payload.signal.conviction_band ? ` (${payload.signal.conviction_band})` : ""}` : "Research locked"}</span>
         </div>
+        {eligible && <SignalTracks signal={payload.signal} />}
         {!eligible && <div className="warning-list"><span>{quality.required_action || "Replace demo or mixed inputs before treating this as research evidence."}</span></div>}
         {payload.signal.caveats?.length ? <div className="warning-list">{payload.signal.caveats.map((caveat) => <span key={caveat}>{caveat}</span>)}</div> : null}
       </Panel>
@@ -548,6 +549,42 @@ function InsightsList({ insights }: { insights?: ModelInsight[] }) {
 function toneFor(value: unknown): string {
   if (typeof value !== "number" || !Number.isFinite(value)) return "neutral";
   return value >= 0 ? "positive" : "negative";
+}
+
+function SignalTracks({ signal }: { signal: AnalysisSignal }) {
+  const tactical = signal.tactical;
+  const strategic = signal.strategic;
+  if (!tactical && !strategic) return null;
+  return (
+    <div className="signal-tracks">
+      {tactical && (
+        <div className="signal-track">
+          <span className="signal-track__label">Tactical · horizon-sensitive</span>
+          <strong className={`signal-action action-${safeAction(tactical.action)}`}>{tactical.action}</strong>
+          <span className="signal-track__detail">
+            {fmtNumber(tactical.conviction_pct, 0)}% conviction — trend, momentum, model forecast, news
+          </span>
+        </div>
+      )}
+      {strategic?.usable ? (
+        <div className="signal-track">
+          <span className="signal-track__label">Strategic · fundamentals, horizon-free</span>
+          <strong className={`signal-action action-${safeAction(strategic.action)}`}>{strategic.action}</strong>
+          <span className="signal-track__detail">
+            Forward E[r] {fmtNumber(strategic.expected_return_pct, 1)}%/yr vs {fmtNumber(strategic.anchor_pct, 1)}% anchor
+            {strategic.analyst?.implied_upside_pct != null
+              ? ` · analyst target ${strategic.analyst.implied_upside_pct >= 0 ? "+" : ""}${fmtNumber(strategic.analyst.implied_upside_pct, 1)}%`
+              : ""}
+          </span>
+        </div>
+      ) : strategic ? (
+        <div className="signal-track signal-track--empty">
+          <span className="signal-track__label">Strategic · fundamentals</span>
+          <span className="signal-track__detail">No usable fundamentals — technical rating only.</span>
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 function safeAction(action?: string) {

@@ -4722,6 +4722,50 @@ button.locked-table-row:hover {
   opacity: 0.85;
 }
 
+/* Dual-track rating: tactical (horizon-sensitive) vs strategic (horizon-free) */
+.signal-tracks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-top: 0.7rem;
+}
+
+.signal-track {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  flex: 1 1 320px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(6, 9, 15, 0.55);
+  padding: 0.5rem 0.75rem;
+}
+
+.signal-track__label {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.signal-track .signal-action {
+  font-size: 0.8rem;
+}
+
+.signal-track__detail {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--soft);
+  font-size: 0.72rem;
+}
+
+.signal-track--empty .signal-track__detail {
+  color: var(--muted);
+}
+
 .holdings-table {
   display: grid;
   max-height: 340px;

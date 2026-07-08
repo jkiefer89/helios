@@ -39,6 +39,7 @@ def set_fmp_http(fn) -> None:
     """Test seam for the FMP HTTP getter (``callable(url) -> parsed JSON``)."""
     global _FMP_HTTP
     _FMP_HTTP = fn
+    invalidate_cache()  # a new upstream invalidates previously fetched answers
 
 
 def set_default_provider(provider) -> None:
@@ -47,6 +48,7 @@ def set_default_provider(provider) -> None:
     global _DEFAULT_PROVIDER
     with _PROVIDER_LOCK:
         _DEFAULT_PROVIDER = provider
+    invalidate_cache()  # cached results came from the old provider
 
 
 @dataclass
@@ -58,6 +60,15 @@ class Fundamentals:
     earnings_growth: float | None = None  # fraction, e.g. 0.11
     sector: str = ""
     source: str = "none"                  # "yfinance" | "<provider>" | "none"
+    # Quality / analyst extras (all optional; None = provider had no value).
+    roe: float | None = None              # return on equity, fraction
+    profit_margin: float | None = None    # net margin, fraction
+    debt_to_equity: float | None = None   # ratio (1.5 = 150% of equity)
+    revenue_growth: float | None = None   # fraction
+    current_price: float | None = None
+    target_mean_price: float | None = None  # analyst consensus 12m target
+    analyst_rating: float | None = None     # 1 strong buy .. 5 sell (Yahoo scale)
+    n_analysts: int | None = None
 
     @property
     def usable(self) -> bool:
@@ -118,6 +129,10 @@ def _yfinance_provider(ticker: str) -> dict:
     # as a 38% one. earningsGrowth is already a fraction and passes through.
     dy = info.get("dividendYield")
     dy = dy / 100.0 if isinstance(dy, (int, float)) and dy == dy else None
+    # debtToEquity is reported as a percent (145.6 == 1.456x); normalize to a ratio.
+    dte = _num(info.get("debtToEquity"))
+    if dte is not None and dte > 20:
+        dte = dte / 100.0
     return {
         "dividend_yield": dy,
         "forward_pe": info.get("forwardPE"),
@@ -125,6 +140,14 @@ def _yfinance_provider(ticker: str) -> dict:
         "earnings_growth": info.get("earningsGrowth"),
         "sector": info.get("sector") or "",
         "source": "yfinance",
+        "roe": info.get("returnOnEquity"),                 # fraction
+        "profit_margin": info.get("profitMargins"),        # fraction
+        "debt_to_equity": dte,
+        "revenue_growth": info.get("revenueGrowth"),       # fraction
+        "current_price": info.get("currentPrice") or info.get("regularMarketPrice"),
+        "target_mean_price": info.get("targetMeanPrice"),
+        "analyst_rating": info.get("recommendationMean"),  # 1 buy .. 5 sell
+        "n_analysts": info.get("numberOfAnalystOpinions"),
     }
 
 
@@ -200,6 +223,10 @@ def _fmp_provider(ticker: str) -> dict:
         "earnings_growth": growth,
         "sector": profile.get("sector") or "",
         "source": "fmp",
+        "roe": _num(ratios.get("returnOnEquityTTM")),
+        "profit_margin": _num(ratios.get("netProfitMarginTTM")),
+        "debt_to_equity": _num(ratios.get("debtEquityRatioTTM")),
+        "current_price": price,
     }
 
 
@@ -212,6 +239,24 @@ def _auto_provider(ticker: str) -> dict:
     return _yfinance_provider(ticker)
 
 
+# Default-provider results are cached for a few hours: fundamentals move on
+# earnings cadence, not tick cadence, and /api/analyze must not re-hit the
+# provider on every request. Explicit-provider calls (tests) bypass the cache.
+_FETCH_CACHE: dict[str, tuple[float, "Fundamentals"]] = {}
+_FETCH_CACHE_TTL_S = 6 * 3600.0
+_FETCH_CACHE_MAX = 512
+
+
+def _cache_now() -> float:
+    import time
+    return time.monotonic()
+
+
+def invalidate_cache() -> None:
+    with _PROVIDER_LOCK:
+        _FETCH_CACHE.clear()
+
+
 def fetch(ticker: str, provider=None) -> Fundamentals:
     """Fetch + normalize fundamentals for one ticker.
 
@@ -222,20 +267,42 @@ def fetch(ticker: str, provider=None) -> Fundamentals:
     if not sym:
         return Fundamentals(ticker="", source="none")
     use_default = provider is None
-    if provider is None:
+    if use_default:
+        with _PROVIDER_LOCK:
+            hit = _FETCH_CACHE.get(sym)
+            if hit and _cache_now() - hit[0] < _FETCH_CACHE_TTL_S:
+                return hit[1]
         provider = _DEFAULT_PROVIDER or _auto_provider
     try:
         raw = provider(sym) or {}
     except Exception:
         raw = {}
     if not raw:
-        return Fundamentals(ticker=sym, source="none")
-    return Fundamentals(
-        ticker=sym,
-        dividend_yield=_coerce_fraction(raw.get("dividend_yield")),
-        forward_pe=_coerce_pe(raw.get("forward_pe")),
-        trailing_pe=_coerce_pe(raw.get("trailing_pe")),
-        earnings_growth=_coerce_fraction(raw.get("earnings_growth")),
-        sector=str(raw.get("sector") or ""),
-        source=str(raw.get("source") or ("yfinance" if use_default else "provider")),
-    )
+        result = Fundamentals(ticker=sym, source="none")
+    else:
+        result = Fundamentals(
+            ticker=sym,
+            dividend_yield=_coerce_fraction(raw.get("dividend_yield")),
+            forward_pe=_coerce_pe(raw.get("forward_pe")),
+            trailing_pe=_coerce_pe(raw.get("trailing_pe")),
+            earnings_growth=_coerce_fraction(raw.get("earnings_growth")),
+            sector=str(raw.get("sector") or ""),
+            source=str(raw.get("source") or ("yfinance" if use_default else "provider")),
+            # roe/margins/revenue growth are true fractions from both providers and
+            # can legitimately exceed 1.5 (buyback-inflated ROE), so no percent
+            # heuristic — pass through numerically and clamp at the scoring layer.
+            roe=_num(raw.get("roe")),
+            profit_margin=_num(raw.get("profit_margin")),
+            debt_to_equity=_num(raw.get("debt_to_equity")),
+            revenue_growth=_num(raw.get("revenue_growth")),
+            current_price=_num(raw.get("current_price")),
+            target_mean_price=_num(raw.get("target_mean_price")),
+            analyst_rating=_num(raw.get("analyst_rating")),
+            n_analysts=int(raw["n_analysts"]) if isinstance(raw.get("n_analysts"), (int, float)) else None,
+        )
+    if use_default and result.usable:  # cache real answers only; retry empties next call
+        with _PROVIDER_LOCK:
+            if len(_FETCH_CACHE) >= _FETCH_CACHE_MAX:
+                _FETCH_CACHE.pop(next(iter(_FETCH_CACHE)), None)
+            _FETCH_CACHE[sym] = (_cache_now(), result)
+    return result

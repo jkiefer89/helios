@@ -1,15 +1,20 @@
 """Composite trade-signal generation.
 
-Blends four transparent components into one score in [-1, 1]:
-    trend      - price vs SMA50/200, MACD histogram sign
-    momentum   - RSI position (mean-reverting at extremes)
-    forecast   - expected return over the horizon (Ridge model, capped)
-    sentiment  - aggregate news-headline sentiment
+Blends up to five transparent components into one score in [-1, 1]:
+    trend        - price vs SMA50/200, MACD histogram sign
+    momentum     - RSI position (mean-reverting at extremes)
+    forecast     - expected return over the horizon (Ridge model, capped)
+    sentiment    - aggregate news-headline sentiment
+    fundamentals - building-block CMA expected return vs the mandate anchor
+                   (annualized, so it does NOT move with the chart horizon) —
+                   included only when usable fundamentals exist, never fabricated
 
-A volatility penalty shrinks conviction when realized vol is high. The score
-maps to BUY / HOLD / SELL with a conviction percentage and a full per-component
-breakdown so the recommendation is fully explainable -- analysis only, never
-order execution.
+The output is DUAL-TRACK: a ``tactical`` score (the four price/news components,
+horizon-sensitive by design) and a ``strategic`` score (fundamentals-only,
+horizon-free), plus the blended headline action. A volatility penalty shrinks
+conviction when realized vol is high. The score maps to BUY / HOLD / SELL with
+a conviction percentage and a full per-component breakdown so the
+recommendation is fully explainable -- analysis only, never order execution.
 """
 from __future__ import annotations
 
@@ -54,6 +59,23 @@ def _sentiment_score(agg: float) -> float:
     return float(np.clip(agg, -1, 1))
 
 
+# A gap of +/-6 percentage points (annualized) between the building-block CMA
+# return and the mandate anchor saturates the fundamentals component. The gap is
+# an annualized figure, so this score is the same at a 5-day and a 90-day chart
+# horizon — it is the horizon-independent leg of the rating.
+_FUNDAMENTALS_GAP_SATURATION_PP = 6.0
+
+
+def _fundamentals_score(fundamental_result: dict | None) -> float | None:
+    """Score in [-1, 1] from the CMA gap vs anchor, or None when unusable."""
+    if not fundamental_result or not fundamental_result.get("usable"):
+        return None
+    gap = fundamental_result.get("gap_vs_anchor_pct")
+    if gap is None:
+        return None
+    return float(np.clip(gap / _FUNDAMENTALS_GAP_SATURATION_PP, -1, 1))
+
+
 def _to_action(score: float) -> str:
     if score > 0.25:
         return "BUY"
@@ -74,17 +96,23 @@ def _conviction_band(conviction_pct: float) -> str:
 
 def evaluate(close: pd.Series, forecast_result: dict, sentiment_result: dict,
              mandate_key: str | None = None, portfolio_meta: dict | None = None,
-             history_days: int | None = None, data_honesty: dict | None = None) -> dict:
+             history_days: int | None = None, data_honesty: dict | None = None,
+             fundamental_result: dict | None = None) -> dict:
     """Composite signal with mandate-aware weights and a numbers-backed rationale.
 
     Every threshold quoted in the rationale is the value actually used in the
     math, so the explanation can never drift from the computation.
+
+    ``fundamental_result`` (from ``cma.instrument_forward``) adds the fifth,
+    horizon-independent component and the ``strategic`` track. Without it (or
+    when it reports ``usable=False``) the output is the legacy four-component
+    technical blend, and says so in a caveat.
     """
     from . import mandate as mnd
 
     f = ind.indicator_frame(close)
     i = len(f) - 1
-    eff_w = mnd.weights(mandate_key) if mandate_key else dict(WEIGHTS)
+    tech_w = mnd.weights(mandate_key) if mandate_key else dict(WEIGHTS)
     mlabel = mnd.get(mandate_key)["label"] if mandate_key else None
 
     raw = {
@@ -93,6 +121,21 @@ def evaluate(close: pd.Series, forecast_result: dict, sentiment_result: dict,
         "forecast": _forecast_score(forecast_result.get("expected_return_pct", 0.0)),
         "sentiment": _sentiment_score(sentiment_result.get("aggregate_score", 0.0)),
     }
+    fund_raw = _fundamentals_score(fundamental_result)
+    has_fundamentals = fund_raw is not None
+
+    # Effective weights: with usable fundamentals the four technical weights
+    # scale down by (1 - share) and fundamentals takes the mandate's share;
+    # without them the legacy technical weights apply unchanged (and a caveat
+    # says the rating is technicals-only). Weight is never spent on missing data.
+    if has_fundamentals:
+        fshare = mnd.fundamentals_share(mandate_key or mnd.DEFAULT)
+        eff_w = {k: v * (1.0 - fshare) for k, v in tech_w.items()}
+        eff_w["fundamentals"] = fshare
+        raw["fundamentals"] = fund_raw
+    else:
+        eff_w = dict(tech_w)
+
     contributions = {k: eff_w[k] * raw[k] for k in raw}
     base_composite = sum(contributions.values())
 
@@ -111,19 +154,62 @@ def evaluate(close: pd.Series, forecast_result: dict, sentiment_result: dict,
     conviction_pct = round(abs(score) * 100, 1)
     band = _conviction_band(conviction_pct)
 
+    # -- Dual tracks ------------------------------------------------------- #
+    # Tactical: the four price/news components under the mandate's technical
+    # weights — this is the horizon-sensitive leg (the Ridge forecast is over
+    # the user's chart horizon by construction).
+    tactical_composite = sum(tech_w[k] * raw[k] for k in ("trend", "momentum", "forecast", "sentiment"))
+    tactical_score = float(np.clip(tactical_composite * vol_penalty * mandate_fit, -1, 1))
+    tactical = {
+        "action": _to_action(tactical_score),
+        "score": round(tactical_score, 3),
+        "conviction_pct": round(abs(tactical_score) * 100, 1),
+        "basis": "trend/momentum/model-forecast/sentiment — sensitive to the selected horizon",
+    }
+    # Strategic: fundamentals only, annualized — does not move with the slider.
+    if has_fundamentals:
+        strategic = {
+            "usable": True,
+            "action": _to_action(fund_raw),
+            "score": round(fund_raw, 3),
+            "conviction_pct": round(abs(fund_raw) * 100, 1),
+            "expected_return_pct": fundamental_result.get("expected_return_pct"),
+            "anchor_pct": fundamental_result.get("anchor_pct"),
+            "gap_vs_anchor_pct": fundamental_result.get("gap_vs_anchor_pct"),
+            "blocks_pct": fundamental_result.get("blocks_pct", {}),
+            "source": fundamental_result.get("source"),
+            "analyst": fundamental_result.get("analyst"),
+            "quality": fundamental_result.get("quality"),
+            "basis": "building-block CMA (yield + growth + valuation reversion), annualized — "
+                     "independent of the selected horizon",
+        }
+    else:
+        strategic = {
+            "usable": False,
+            "reason": (fundamental_result or {}).get("basis", "no usable fundamentals"),
+        }
+
     clauses = _component_clauses(f, i, raw, eff_w, contributions, forecast_result, sentiment_result)
+    names = ("trend", "momentum", "forecast", "sentiment") + (("fundamentals",) if has_fundamentals else ())
+    if has_fundamentals:
+        clauses["fundamentals"] = _fundamentals_clause(raw, eff_w, contributions, fundamental_result)
     components = [
-        {"name": k, "raw": round(raw[k], 3), "base_weight": WEIGHTS[k],
+        {"name": k, "raw": round(raw[k], 3),
+         "base_weight": WEIGHTS.get(k, round(eff_w[k], 3)),
          "effective_weight": round(eff_w[k], 3), "contribution": round(contributions[k], 3),
          "clause": clauses[k]}
-        for k in ("trend", "momentum", "forecast", "sentiment")
+        for k in names
     ]
     # Lead with the dominant drivers.
     ordered = sorted(components, key=lambda c: abs(c["contribution"]), reverse=True)
 
     caveats = _caveats(forecast_result, history_days, data_honesty)
+    if not has_fundamentals:
+        caveats.append("No usable fundamentals for this instrument — rating is the "
+                       "technical blend only (no strategic track).")
     headline = _headline(action, conviction_pct, band, ordered, vol, vol_penalty,
-                         mandate_fit, mandate_key, mlabel, portfolio_meta, caveats)
+                         mandate_fit, mandate_key, mlabel, portfolio_meta, caveats,
+                         tactical=tactical, strategic=strategic)
 
     return {
         "action": action,
@@ -134,9 +220,29 @@ def evaluate(close: pd.Series, forecast_result: dict, sentiment_result: dict,
         "mandate_fit": round(mandate_fit, 3),
         "mandate": mandate_key,
         "components": components,
+        "tactical": tactical,
+        "strategic": strategic,
         "headline_rationale": headline,
         "caveats": caveats,
     }
+
+
+def _fundamentals_clause(raw, eff_w, contrib, fr: dict) -> str:
+    er = fr.get("expected_return_pct")
+    anchor = fr.get("anchor_pct")
+    gap = fr.get("gap_vs_anchor_pct") or 0.0
+    stance = "above" if gap > 0 else "below" if gap < 0 else "at"
+    blocks = fr.get("blocks_pct") or {}
+    detail = ", ".join(f"{k.replace('_', ' ')} {v:+.1f}%" for k, v in blocks.items())
+    analyst = fr.get("analyst") or {}
+    extra = ""
+    if analyst.get("implied_upside_pct") is not None:
+        extra = (f" Analyst consensus target implies {analyst['implied_upside_pct']:+.1f}% "
+                 f"({analyst.get('n_analysts') or '?'} analysts; context only, not scored).")
+    return (f"Fundamentals: forward E[r] {er:+.1f}%/yr is {abs(gap):.1f}pp {stance} the {anchor:.1f}% "
+            f"mandate anchor ({detail}; raw {raw['fundamentals']:+.2f}, eff. wt "
+            f"{eff_w['fundamentals']:.0%}, contrib {contrib['fundamentals']:+.2f}; annualized — "
+            f"does not change with the chart horizon).{extra}")
 
 
 def _component_clauses(f, i, raw, eff_w, contrib, fc, sent) -> dict:
@@ -194,13 +300,18 @@ def _caveats(fc, history_days, data_honesty) -> list:
 
 
 def _headline(action, conviction_pct, band, ordered, vol, vol_penalty, mandate_fit,
-              mandate_key, mlabel, pmeta, caveats) -> str:
+              mandate_key, mlabel, pmeta, caveats, tactical=None, strategic=None) -> str:
     verb = {"BUY": "Constructive", "SELL": "Cautious", "HOLD": "Neutral evidence"}[action]
     parts = []
     if pmeta:
         parts.append(f"This model ({pmeta.get('n_holdings', 0)} holdings, top weight "
                      f"{pmeta.get('top_weight', 0):.0%} in {pmeta.get('top_ticker', '?')}).")
     parts.append(f"{verb} — {conviction_pct:.0f}% conviction ({band}).")
+    if (tactical and strategic and strategic.get("usable")
+            and tactical["action"] != strategic["action"]):
+        parts.append(f"Tracks diverge: tactical (price action, horizon-sensitive) reads "
+                     f"{tactical['action']}, strategic (fundamentals, horizon-free) reads "
+                     f"{strategic['action']} — the blend weighs both.")
     parts.append(ordered[0]["clause"])
     if len(ordered) > 1 and abs(ordered[1]["contribution"]) > 0.02:
         parts.append(ordered[1]["clause"])

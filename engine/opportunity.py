@@ -9,8 +9,8 @@ from __future__ import annotations
 import numpy as np
 
 from . import (
-    analytics_cache, data, forecast, indicators, mandate, portfolio, provenance,
-    regime as regime_mod, sentiment, signals, strategy,
+    analytics_cache, cma, data, forecast, fundamentals, indicators, mandate, portfolio,
+    provenance, regime as regime_mod, sentiment, signals, strategy,
 )
 from ._common import dedupe as _dedupe
 
@@ -105,6 +105,8 @@ def score_candidate(candidate: dict, regime: dict | None = None) -> dict:
         "benchmark_return_pct": round(benchmark_return, 2),
         "beat_benchmark": strategy_return > benchmark_return,
         "reason": candidate.get("reason", ""),
+        "tactical": candidate.get("tactical"),
+        "strategic": candidate.get("strategic"),
         "forecast_quality": round(forecast_quality, 1),
         "backtest_quality": round(backtest_quality, 1),
         "data_quality": round(data_quality, 1),
@@ -195,7 +197,11 @@ def instrument_candidate(inst: data.Instrument) -> dict | None:
         return cached
     fc = forecast.forecast(close, horizon=21, n_paths=700)
     sent = sentiment.score_headlines(inst.headlines)
-    sig = signals.evaluate(close, fc, sent, history_days=len(close))
+    # Fundamentals give the radar its horizon-independent strategic leg; the
+    # fetch is TTL-cached in engine.fundamentals and empty/offline results are
+    # honestly reported as a technicals-only rating.
+    fwd = cma.instrument_forward(inst.symbol, fundamentals.fetch(inst.symbol))
+    sig = signals.evaluate(close, fc, sent, history_days=len(close), fundamental_result=fwd)
     st = strategy.analyze_strategy(close)
     metrics = indicators.metrics_summary(close)
     candidate = {
@@ -206,6 +212,8 @@ def instrument_candidate(inst: data.Instrument) -> dict | None:
         "source": inst.source,
         "action": sig["action"],
         "signal_score": sig["score"],
+        "tactical": sig.get("tactical"),
+        "strategic": sig.get("strategic"),
         "expected_return_pct": fc["expected_return_pct"],
         "expected_vol_pct": fc["expected_vol_pct"],
         "max_drawdown_pct": metrics["max_drawdown_pct"],

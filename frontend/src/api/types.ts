@@ -1263,6 +1263,35 @@ export interface SignalComponent {
   clause: string;
 }
 
+export interface TacticalTrack {
+  action: string;
+  score: number;
+  conviction_pct: number;
+  basis?: string;
+}
+
+export interface StrategicTrack {
+  usable: boolean;
+  reason?: string;
+  action?: string;
+  score?: number;
+  conviction_pct?: number;
+  expected_return_pct?: number;
+  anchor_pct?: number;
+  gap_vs_anchor_pct?: number;
+  blocks_pct?: Record<string, number>;
+  source?: string;
+  quality?: Record<string, number>;
+  analyst?: {
+    target_mean_price?: number;
+    implied_upside_pct?: number;
+    rating_mean?: number | null;
+    n_analysts?: number | null;
+    note?: string;
+  };
+  basis?: string;
+}
+
 export interface AnalysisSignal {
   action: string;
   score?: number;
@@ -1272,6 +1301,8 @@ export interface AnalysisSignal {
   mandate_fit?: number;
   mandate?: string | null;
   components?: SignalComponent[];
+  tactical?: TacticalTrack;
+  strategic?: StrategicTrack;
   headline_rationale?: string;
   rationale?: string;
   caveats?: string[];

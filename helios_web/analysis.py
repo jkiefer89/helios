@@ -8,8 +8,9 @@ import pandas as pd
 from flask import Blueprint, request
 
 from engine import (
-    backtest, data, evidence_lab, forecast, holdings, indicators, opportunity, portfolio,
-    provenance, regime, sentiment, signal_journal, signals, strategy,
+    backtest, cma, data, evidence_lab, forecast, fundamentals, holdings, indicators, macro,
+    news, opportunity, portfolio, provenance, regime, sentiment, signal_journal, signals,
+    strategy,
 )
 
 from .core import (
@@ -277,8 +278,20 @@ def analyze():
         return err("Need at least 60 rows of history to analyze.", 400)
 
     fc = forecast.forecast(close, horizon=horizon)
-    sent = sentiment.score_headlines(inst.headlines)
-    sig = signals.evaluate(close, fc, sent)
+    # Headlines: yfinance per-ticker plus the free GDELT news wire (deduped;
+    # GDELT is TTL-cached and returns [] offline, so this never blocks honesty).
+    merged_headlines = list(inst.headlines or [])
+    seen_titles = {h.lower() for h in merged_headlines}
+    for title in news.headlines_for(inst.symbol, inst.name):
+        if title.lower() not in seen_titles:
+            seen_titles.add(title.lower())
+            merged_headlines.append(title)
+    sent = sentiment.score_headlines(merged_headlines)
+    # Fundamentals (6h-cached) drive the strategic track; offline -> usable=False
+    # and the signal honestly reports a technicals-only rating.
+    fnd = fundamentals.fetch(inst.symbol)
+    fwd = cma.instrument_forward(inst.symbol, fnd)
+    sig = signals.evaluate(close, fc, sent, history_days=len(close), fundamental_result=fwd)
     bt = backtest.run(close)
     metrics = indicators.metrics_summary(close)
     journal_entry = _record_instrument_signal(inst, close, sig, horizon)
@@ -293,6 +306,8 @@ def analyze():
         "series": _series_payload(close, markers=True),
         "forecast": fc,
         "sentiment": sent,
+        "fundamentals": fwd,
+        "rates": macro.rate_context(),
         "signal": sig,
         "signal_journal_entry": journal_entry,
         "backtest": bt,

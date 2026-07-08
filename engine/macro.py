@@ -46,6 +46,47 @@ def risk_free() -> float:
     return _mnd.RF
 
 
+# Live 10Y Treasury (^TNX) — a DIAGNOSTIC, not a silent input. Scoring stays on
+# the configured HELIOS_RF so every anchor in the app moves together and only
+# when the operator changes it; this function lets the UI/payloads show how far
+# the configured rate has drifted from the market so the operator can decide.
+_TNX_CACHE: list = [0.0, None]  # [monotonic_ts, value]
+_TNX_TTL_S = 3600.0
+
+
+def ten_year_yield() -> float | None:
+    """Live 10Y Treasury yield as a fraction (e.g. 0.044), or None offline."""
+    import time
+
+    from . import data as _data
+    now = time.monotonic()
+    if _TNX_CACHE[1] is not None and now - _TNX_CACHE[0] < _TNX_TTL_S:
+        return _TNX_CACHE[1]
+    if not _data.HAS_YF:
+        return None
+    try:
+        quote = _data._yf.Ticker("^TNX").fast_info
+        raw = float(quote["last_price"])
+    except Exception:
+        return None
+    if not (0.0 < raw < 25.0):  # ^TNX quotes the yield in percent (4.4 == 4.4%)
+        return None
+    value = raw / 100.0
+    _TNX_CACHE[0], _TNX_CACHE[1] = now, value
+    return value
+
+
+def rate_context() -> dict:
+    """Configured-vs-market rate snapshot for payload provenance."""
+    live = ten_year_yield()
+    return {
+        "configured_rf_pct": round(_mnd.RF * 100.0, 2),
+        "live_10y_pct": round(live * 100.0, 2) if live is not None else None,
+        "note": ("Scoring uses the configured risk-free rate (HELIOS_RF); the live 10Y "
+                 "is shown so drift is visible, never silently substituted."),
+    }
+
+
 def equity_risk_premium() -> float:
     """Long-run equity risk premium. Offline fallback = 4.5%."""
     return _mnd.ERP

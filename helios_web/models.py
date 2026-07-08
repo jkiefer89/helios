@@ -310,11 +310,19 @@ def model_analyze():
     bt = backtest.run(close)
     journal_entry = _record_model_signal(mdl, ps, close, sig, signal_horizon)
 
+    # Long-horizon drift reverts toward the holdings-derived CMA anchor when the
+    # forward endpoint has already computed one (get-only: a cold cache falls
+    # back to the generic mandate anchor rather than paying look-through latency).
+    cached_anchor = analytics_cache.get("model_forward_anchor", (mdl.id,)) or {}
+    anchor_kwargs = ({"anchor_return": cached_anchor["anchor"], "anchor_basis": cached_anchor["basis"]}
+                     if cached_anchor.get("anchor") is not None else {})
+
     # 1Y projection always computed for the drawdown-breach insight; reuse if displayed.
-    fc_long_1y = forecast.forecast_long(close, 252, mdl.mandate_key) if ps.n_days >= 126 else None
+    fc_long_1y = (forecast.forecast_long(close, 252, mdl.mandate_key, **anchor_kwargs)
+                  if ps.n_days >= 126 else None)
     if hkind == "long":
         forecast_panel = (fc_long_1y if hval == 252 and fc_long_1y
-                          else forecast.forecast_long(close, hval, mdl.mandate_key))
+                          else forecast.forecast_long(close, hval, mdl.mandate_key, **anchor_kwargs))
     else:
         forecast_panel = fc_short
 
@@ -500,6 +508,14 @@ def model_forward():
         cma_return=forward_return["expected_return_covered_pct"] / 100.0,
         coverage=forward_return["coverage_pct"] / 100.0,
     )
+    # Publish the holdings-derived anchor so the model-analyze route can revert
+    # its long-horizon cone toward it (get-only there — the cone never pays this
+    # endpoint's look-through latency; invalidated with the analytics cache).
+    analytics_cache.put("model_forward_anchor", (mdl.id,), {
+        "anchor": blended,
+        "coverage_pct": forward_return["coverage_pct"],
+        "basis": "lookthrough_cma_blend",
+    })
     return ok({
         "id": mdl.id,
         "name": mdl.name,

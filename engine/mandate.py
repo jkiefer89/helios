@@ -106,6 +106,26 @@ def weights(key: str) -> dict:
     return {k: v / s for k, v in w.items()}
 
 
+# Share of the composite the FUNDAMENTALS component takes when usable
+# fundamentals exist (the four technical weights scale down by 1-share, so
+# every preset stays normalized). Rationale: income/preservation mandates are
+# valuation-and-yield judgements first; pure growth still leans on price
+# confirmation. When fundamentals are unavailable the composite falls back to
+# the pure-technical weights and says so — the share is never spent on a
+# fabricated number.
+_FUNDAMENTALS_SHARE = {
+    "pure_growth": 0.25,
+    "balanced": 0.30,
+    "income": 0.35,
+    "capital_preservation": 0.30,
+    "cd_alternative": 0.25,
+}
+
+
+def fundamentals_share(key: str) -> float:
+    return _FUNDAMENTALS_SHARE.get(key_or_default(key), 0.30)
+
+
 def anchor_return(key: str) -> float:
     """Long-run CAPM anchor: rf + ERP * growth_orientation."""
     return RF + ERP * get(key)["growth_orientation"]

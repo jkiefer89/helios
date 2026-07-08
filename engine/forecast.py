@@ -193,7 +193,13 @@ def _named_weights(w):
 # labelled a strategic projection rather than a trading forecast.
 # --------------------------------------------------------------------------- #
 def forecast_long(close: pd.Series, horizon_days: int, mandate_key: str = "balanced",
-                  base: float = LONG_BASE_VALUE) -> dict:
+                  base: float = LONG_BASE_VALUE, anchor_return: float | None = None,
+                  anchor_basis: str = "mandate_capm") -> dict:
+    """``anchor_return`` (annual fraction) lets callers substitute a
+    fundamentals-derived CMA anchor for the generic CAPM one, so the multi-year
+    drift reverts toward what the instrument's own yield/growth/valuation imply
+    rather than a one-size anchor. ``anchor_basis`` is echoed into the payload
+    so the provenance of the anchor is always visible."""
     close = close.dropna()
     r = close.pct_change().dropna()
 
@@ -205,9 +211,12 @@ def forecast_long(close: pd.Series, horizon_days: int, mandate_key: str = "balan
         sigma_60 = sigma_252  # fall back so the regime multiplier stays 1.0
     mu_hist = float(r.tail(252).mean() * 252)
 
-    # Drift: shrink trailing-mean (Sharpe<=1.5 capped) toward the CAPM anchor.
+    # Drift: shrink trailing-mean (Sharpe<=1.5 capped) toward the anchor.
     mu_hist_capped = float(np.clip(mu_hist, -1.5 * sigma_252, 1.5 * sigma_252))
-    mu_anchor = mnd.anchor_return(mandate_key)
+    if anchor_return is None:
+        mu_anchor, anchor_basis = mnd.anchor_return(mandate_key), "mandate_capm"
+    else:
+        mu_anchor = float(anchor_return)
     lam = float(np.clip(horizon_days / 1260.0, 0.0, 0.8))
     mu_lt = (1 - lam) * mu_hist_capped + lam * mu_anchor
     # Final long-horizon Sharpe cap (no long-only book sustains >0.6 over years).
@@ -273,6 +282,7 @@ def forecast_long(close: pd.Series, horizon_days: int, mandate_key: str = "balan
             "mu_long_pct": round(mu_lt * 100, 2),
             "mu_hist_pct": round(mu_hist * 100, 2),
             "mu_anchor_pct": round(mu_anchor * 100, 2),
+            "anchor_basis": anchor_basis,
             "anchor_weight_lambda": round(lam, 2),
             "sigma_ann_pct": round(sigma_252 * 100, 1),
             "sigma_eff_pct": round(sigma_eff * 100, 1),

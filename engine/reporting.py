@@ -4,8 +4,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from . import (
-    forecast, indicators, opportunity, persistence, portfolio, portfolio_clinic,
-    provenance, risk_exposure, sentiment, signals, strategy,
+    cma, forecast, fundamentals, indicators, opportunity, persistence, portfolio,
+    portfolio_clinic, provenance, risk_exposure, sentiment, signals, strategy,
 )
 from ._common import dedupe as _dedupe
 
@@ -20,7 +20,8 @@ def instrument_report(inst) -> dict:
     p = provenance.instrument(inst.source, len(close))
     fc = forecast.forecast(close, horizon=21, n_paths=700)
     sent = sentiment.score_headlines(inst.headlines)
-    sig = signals.evaluate(close, fc, sent, history_days=len(close))
+    fwd = cma.instrument_forward(inst.symbol, fundamentals.fetch(inst.symbol))
+    sig = signals.evaluate(close, fc, sent, history_days=len(close), fundamental_result=fwd)
     try:
         st = strategy.analyze_strategy(close)
         strategy_note = ""
