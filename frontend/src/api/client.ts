@@ -1,4 +1,5 @@
 import type {
+  AIChatResponse,
   AIResponse,
   AIStatusResponse,
   AnalysisResponse,
@@ -196,6 +197,12 @@ export const api = {
     aiPost("/api/ai/report", payload, undefined, regenerate),
   aiQuestion: (payload: Record<string, unknown>, question: string, regenerate = false) =>
     aiPost("/api/ai/question", payload, question, regenerate),
+  aiChat: (messages: Array<{ role: "user" | "assistant"; content: string }>, payload: Record<string, unknown>) =>
+    request<AIChatResponse>("/api/ai/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messages, payload }),
+    }),
 };
 
 function aiPost(url: string, payload: Record<string, unknown>, question?: string, regenerate = false) {

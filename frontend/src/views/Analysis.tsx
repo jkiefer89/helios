@@ -16,6 +16,7 @@ import type {
   TickerSummary,
 } from "../api/types";
 import { DataQualityBanner, SourcePill } from "../components/badges/DataModeBadge";
+import { CopilotChat } from "../components/ai/CopilotChat";
 import { Panel, StatTile } from "../components/cards/Panel";
 import type { ForecastConePoint } from "../components/charts/adapters/forecastCone";
 import { DrawdownChart, EquityCurveChart, ForecastConeChart, HistogramChart, MacdChart, PriceTrendChart, RsiChart } from "../components/charts/Charts";
@@ -224,8 +225,19 @@ function AnalysisPayload({ payload }: { payload: AnalysisResponse }) {
           </div>
         </Panel>
       )}
+      <Panel title="AI Copilot — Research Dialogue" className="span-2">
+        <CopilotChat contextLabel={payload.symbol || payload.name} payload={chatContext(payload)} />
+      </Panel>
     </>
   );
+}
+
+/** Compact dialogue context: the engine's conclusions without the bulky series
+    arrays (the server sanitizer strips price history anyway — this just keeps
+    each turn's token cost down). */
+function chatContext(payload: AnalysisResponse): Record<string, unknown> {
+  const { series: _series, ...rest } = payload as unknown as Record<string, unknown>;
+  return rest;
 }
 
 function horizonTag(payload: AnalysisResponse) {

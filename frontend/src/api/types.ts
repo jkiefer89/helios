@@ -1451,3 +1451,14 @@ export interface AIResponse {
   data_quality: DataQuality;
   disclaimer: string;
 }
+
+export interface AIChatResponse {
+  reply: string;
+  provider: string;
+  model: string;
+  n_history_messages?: number;
+  generated_at?: string;
+  status?: AIStatusResponse;
+  data_quality?: DataQuality;
+  disclaimer?: string;
+}

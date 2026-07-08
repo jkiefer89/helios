@@ -25,6 +25,7 @@ SCHEMA_KEYS = (
     "key_points",
     "risks",
     "what_would_invalidate",
+    "stance",
     "advisor_language",
     "compliance_caveats",
     "used_numbers",
@@ -75,7 +76,7 @@ _ACTION_UPGRADE_RE = re.compile(
     r"|add(?:ing)?\s+(?:\w+\s+){0,2}exposure"
     r"|increas(?:e|ing)\s+(?:\w+\s+){0,2}(?:position|allocation|exposure|weight|stake|holding)s?)\b"
 )
-DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6"
+DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-8"
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_LOCAL_MODEL = ""
 MAX_LIST_ITEMS = 16
@@ -179,6 +180,19 @@ class AIProvider:
     def answer_question(self, payload: dict[str, Any], question: str, regenerate: bool = False) -> dict[str, Any]:
         return self._run("question", payload, question=question, regenerate=regenerate)
 
+    def chat(self, messages: list, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Multi-turn research dialogue over a sanitized Helios context.
+
+        Free-form prose (not the JSON task schema) so the operator can argue
+        back and forth with the copilot. Providers without dialogue support
+        raise honestly rather than degrading to one-shot answers.
+        """
+        st = self.status()
+        if not st.get("available"):
+            raise AIUnavailableError(st.get("reason") or "AI provider unavailable.", st)
+        raise AIProviderError(
+            "Dialogue mode requires the Anthropic (Claude) provider.", st)
+
     def _run(
         self,
         task: str,
@@ -257,10 +271,10 @@ class AnthropicProvider(AIProvider):
         api_key = os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
             raise AIUnavailableError("ANTHROPIC_API_KEY is missing.", self.status())
+        # No sampling params: Opus 4.7+ rejects temperature/top_p/top_k with a 400.
         body = {
             "model": self.model,
             "max_tokens": 1800,
-            "temperature": 0.1,
             "system": prompt["system"],
             "messages": [{"role": "user", "content": prompt["user"]}],
         }
@@ -289,6 +303,62 @@ class AnthropicProvider(AIProvider):
             raise AIProviderError("Claude provider returned an unexpected response.", self.status())
         text = "\n".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
         return text.strip()
+
+    def chat(self, messages: list, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        st = self.status()
+        if not st.get("available"):
+            raise AIUnavailableError(st.get("reason") or "AI provider unavailable.", st)
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise AIUnavailableError("ANTHROPIC_API_KEY is missing.", st)
+        history = _clean_dialogue_messages(messages)
+        sanitized = sanitize_payload(payload or {}, self.config)
+        convo: list[dict[str, str]] = [{
+            "role": "user",
+            "content": ("HELIOS CONTEXT (sanitized engine output — authoritative numbers, do not "
+                        "recompute them):\n" + json.dumps(sanitized, sort_keys=True, separators=(",", ":"))),
+        }]
+        convo.extend(history)
+        # No sampling params: Opus 4.7+ rejects temperature/top_p/top_k with a 400.
+        body = {
+            "model": self.model,
+            "max_tokens": 2500,
+            "system": DIALOGUE_SYSTEM,
+            "messages": convo,
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+        }
+        try:
+            response = _post_json(
+                "https://api.anthropic.com/v1/messages",
+                body,
+                headers,
+                timeout=max(self.config.timeout_s, 60),
+            )
+        except TimeoutError as exc:
+            raise AITimeoutError("Claude request timed out.", st) from exc
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429:
+                raise AIProviderError("Claude rate limit reached; try again later.", st) from exc
+            raise AIProviderError(f"Claude provider returned HTTP {exc.code}.", st) from exc
+        except urllib.error.URLError as exc:
+            raise AIProviderError("Claude provider is unreachable.", st) from exc
+        content = response.get("content") if isinstance(response, dict) else None
+        if not isinstance(content, list):
+            raise AIProviderError("Claude provider returned an unexpected response.", st)
+        reply = "\n".join(str(part.get("text", "")) for part in content if isinstance(part, dict)).strip()
+        if not reply:
+            raise AIProviderError("Claude returned an empty reply.", st)
+        return {
+            "reply": reply,
+            "provider": self.provider,
+            "model": self.model,
+            "n_history_messages": len(history),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
 
 
 class OllamaProvider(AIProvider):
@@ -557,6 +627,47 @@ def sanitize_payload(payload: dict[str, Any], config: AIConfig | None = None) ->
     return sanitized
 
 
+# Dialogue persona: same integrity rules as the task prompts, free-prose form.
+DIALOGUE_SYSTEM = (
+    "You are the research copilot for the sole operator of Helios, a private portfolio "
+    "decision-support terminal. You are in an ongoing dialogue with a professional portfolio "
+    "manager who makes the final call and explicitly reserves the right to disagree with you and "
+    "with the engine. Behave like a sharp senior analyst he can argue with: direct, pointed, "
+    "specific. Take positions and defend them with the numbers in the context; when he pushes "
+    "back, engage with his argument on the merits — concede when he is right, hold your ground "
+    "with evidence when he is not. If the engine's rating looks wrong, say so and say why. "
+    "No compliance boilerplate, no hedging filler, no 'consult a professional' — he is the "
+    "professional. Hard integrity rules that protect real trades (absolute): every market number "
+    "you cite must come from the provided context or the conversation; never invent prices, "
+    "returns, yields, ratings, news, or fundamentals; never promise outcomes; call thin, stale, "
+    "capped, demo, or suspect data what it is, bluntly; the engine's deterministic numbers and "
+    "actions are facts to argue about, not things you can rewrite. If you need data that is not "
+    "in the context, name exactly what is missing instead of guessing. Answer in plain prose "
+    "(short paragraphs or tight bullets), not JSON."
+)
+
+DIALOGUE_MAX_MESSAGES = 24
+DIALOGUE_MAX_CHARS = 6000
+
+
+def _clean_dialogue_messages(messages: list) -> list[dict[str, str]]:
+    """Validate/bound the client-supplied history: user/assistant roles only,
+    strings truncated, capped to the most recent turns, must end on user."""
+    cleaned: list[dict[str, str]] = []
+    for m in messages or []:
+        if not isinstance(m, dict):
+            continue
+        role = str(m.get("role") or "").strip().lower()
+        content = str(m.get("content") or "").strip()
+        if role not in {"user", "assistant"} or not content:
+            continue
+        cleaned.append({"role": role, "content": content[:DIALOGUE_MAX_CHARS]})
+    cleaned = cleaned[-DIALOGUE_MAX_MESSAGES:]
+    if not cleaned or cleaned[-1]["role"] != "user":
+        raise ValueError("Dialogue must end with a user message.")
+    return cleaned
+
+
 def build_prompt(task: str, sanitized_payload: dict[str, Any], question: str = "") -> dict[str, str]:
     list_schema_keys = {
         "key_points",
@@ -567,12 +678,19 @@ def build_prompt(task: str, sanitized_payload: dict[str, Any], question: str = "
         "missing_information",
     }
     system = (
-        "You are an advisor analytics explainer, not a trader. Helios computes; AI explains. "
-        "Use only facts provided in the payload. Do not invent prices, returns, yields, ratings, news, "
-        "fundamentals, analyst opinions, or calculations. Do not make guarantees. Do not provide "
-        "personalized investment advice. Preserve all data-quality caveats. If data is demo or synthetic, "
-        "say it is demo only and not real market evidence. If evidence is weak or blocked, say so. "
-        "Never override the deterministic Helios action. Return only valid JSON matching the requested schema."
+        "You are the research copilot for the sole operator of Helios, a private decision-support "
+        "terminal. Your reader is a professional portfolio manager who makes the final call and gets "
+        "enough compliance-hedged prose from fund companies — he wants a sharp senior analyst, not a "
+        "disclaimer machine. Be direct and pointed: state what the data says, take a position, and say "
+        "what you would do and why. If the engine's rating looks wrong given the evidence, say so "
+        "plainly in the `stance` field (start it with AGREE or DISAGREE, then your one-paragraph case). "
+        "The deterministic Helios numbers and action are never edited by you — you argue with them, you "
+        "do not rewrite them. Hard integrity rules (these protect real trades, keep them absolute): use "
+        "only facts in the payload; never invent prices, returns, yields, ratings, news, fundamentals, "
+        "or analyst opinions; never promise outcomes; call out weak, thin, stale, demo, or blocked data "
+        "bluntly rather than smoothing over it; if a number in the payload looks suspect (e.g. a growth "
+        "estimate at a cap, a valuation block pinned at a clamp), flag it as suspect. "
+        "Return only valid JSON matching the requested schema."
     )
     request = {
         "task": task,
@@ -583,12 +701,12 @@ def build_prompt(task: str, sanitized_payload: dict[str, Any], question: str = "
         },
         "payload": sanitized_payload,
         "rules": {
-            "analysis_only": True,
-            "allowed_use": "explain, critique, summarize, draft advisor language from provided facts",
+            "voice": "direct senior analyst; pointed, specific, no hedging boilerplate",
+            "stance": "always populate: AGREE or DISAGREE with the engine's action, with your case",
+            "allowed_use": "explain, critique, argue a position, red-team, interpret forecasts, draft research notes",
             "forbidden": [
                 "invent market facts",
-                "calculate scores",
-                "override Helios action",
+                "recalculate or alter Helios scores and actions",
                 "promise profit",
                 "hide weak evidence",
                 "present demo data as real",
@@ -647,12 +765,15 @@ def validate_ai_output(
     action = _deterministic_action(sanitized_payload)
     if action:
         result["deterministic_action"] = action
-        text = _result_text(result).lower()
-        if action in {"HOLD", "REVIEW"} and _ACTION_UPGRADE_RE.search(text):
-            result["needs_review"] = True
-            result["compliance_caveats"].append(
-                f"Helios action is {action}; AI may not upgrade the action to BUY."
-            )
+        # Disagreement is a feature, not a violation: the engine's action is
+        # immutable, and the AI's dissent is surfaced explicitly so the operator
+        # can weigh both. Detected from the stance field, or (fallback) from
+        # upgrade language against a HOLD/REVIEW action.
+        stance = str(result.get("stance") or "").strip()
+        disagrees = stance.lower().startswith("disagree")
+        if not stance and action in {"HOLD", "REVIEW"} and _ACTION_UPGRADE_RE.search(_result_text(result).lower()):
+            disagrees = True
+        result["ai_disagrees_with_action"] = disagrees
     data_mode = _data_mode(sanitized_payload)
     if data_mode:
         result["data_mode"] = data_mode
@@ -669,11 +790,6 @@ def validate_ai_output(
             result["compliance_caveats"].append(
                 "Data mode is mixed; parts of this evidence are not verified real market data and require advisor review."
             )
-    if task == "report_narrative" and "analysis only" not in _result_text(result).lower():
-        result["needs_review"] = True
-        result["compliance_caveats"].append(
-            "Analysis only; Helios does not provide investment advice, order execution, or return guarantees."
-        )
     result["provider"] = provider
     result["model"] = model
     result["task"] = task

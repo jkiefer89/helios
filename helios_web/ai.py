@@ -47,6 +47,46 @@ def ai_question():
     return _ai_call("answer_question", require_question=True)
 
 
+@bp.route("/api/ai/chat", methods=["POST"])
+def ai_chat():
+    """Multi-turn research dialogue: {messages: [{role, content}...], payload: {...}}."""
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return err("Request body must be a JSON object.", 400)
+    messages = body.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return err("messages must be a non-empty array of {role, content}.", 400)
+    payload = body.get("payload") or {}
+    if not isinstance(payload, dict):
+        return err("payload must be a JSON object.", 400)
+    provider = ai_copilot.get_provider()
+    status = provider.status()
+    data_quality = ai_copilot.payload_data_quality(payload)
+    if not status.get("available"):
+        return jsonify(clean({
+            "error": status.get("reason") or "AI provider unavailable.",
+            "status": status,
+            "data_quality": data_quality,
+        })), 503
+    try:
+        result = provider.chat(messages, payload)
+    except ValueError as exc:
+        return err(str(exc), 400)
+    except ai_copilot.AIError as exc:
+        safe_status = exc.status or provider.status()
+        return jsonify(clean({
+            "error": str(exc),
+            "status": safe_status,
+            "data_quality": data_quality,
+        })), getattr(exc, "status_code", 503)
+    return ok({
+        **result,
+        "status": provider.status(),
+        "data_quality": data_quality,
+        "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+    })
+
+
 def _ai_call(method_name: str, require_question: bool = False):
     parsed, parse_error = _ai_request_payload(require_question=require_question)
     if parse_error:

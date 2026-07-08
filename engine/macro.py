@@ -46,45 +46,103 @@ def risk_free() -> float:
     return _mnd.RF
 
 
-# Live 10Y Treasury (^TNX) — a DIAGNOSTIC, not a silent input. Scoring stays on
-# the configured HELIOS_RF so every anchor in the app moves together and only
-# when the operator changes it; this function lets the UI/payloads show how far
-# the configured rate has drifted from the market so the operator can decide.
-_TNX_CACHE: list = [0.0, None]  # [monotonic_ts, value]
-_TNX_TTL_S = 3600.0
+# Live Treasury yields — DIAGNOSTICS, not silent inputs. Scoring stays on the
+# configured HELIOS_RF so every anchor in the app moves together and only when
+# the operator changes it; these functions make the drift VISIBLE (payloads +
+# a data-quality alert) so the operator can decide when to update HELIOS_RF.
+#
+# Primary source: yfinance CBOE yield indices (^IRX 13-week, ^FVX 5Y, ^TNX 10Y,
+# ^TYX 30Y — quoted in percent). All cached ~1h; offline returns None, never a
+# fabricated rate.
+_YIELD_TICKERS = {"3m": "^IRX", "5y": "^FVX", "10y": "^TNX", "30y": "^TYX"}
+_YIELD_CACHE: dict[str, tuple[float, float]] = {}  # tenor -> (monotonic_ts, value)
+_YIELD_TTL_S = 3600.0
+# Configured-vs-market drift beyond this (in percentage points, vs the 3M bill)
+# is worth an operator look: CD-alternative and income mandates benchmark off RF.
+RF_DRIFT_ALERT_PP = 1.5
+
+
+def treasury_yield(tenor: str) -> float | None:
+    """Live Treasury yield for one tenor ('3m'|'5y'|'10y'|'30y') as a fraction,
+    or None offline/unavailable."""
+    import time
+
+    from . import data as _data
+    ticker = _YIELD_TICKERS.get((tenor or "").lower())
+    if ticker is None:
+        return None
+    now = time.monotonic()
+    hit = _YIELD_CACHE.get(tenor)
+    if hit and now - hit[0] < _YIELD_TTL_S:
+        return hit[1]
+    if not _data.HAS_YF:
+        return None
+    try:
+        raw = float(_data._yf.Ticker(ticker).fast_info["last_price"])
+    except Exception:
+        return None
+    if not (0.0 < raw < 25.0):  # quoted in percent (4.4 == 4.4%)
+        return None
+    value = raw / 100.0
+    _YIELD_CACHE[tenor] = (now, value)
+    return value
 
 
 def ten_year_yield() -> float | None:
     """Live 10Y Treasury yield as a fraction (e.g. 0.044), or None offline."""
-    import time
+    return treasury_yield("10y")
 
-    from . import data as _data
-    now = time.monotonic()
-    if _TNX_CACHE[1] is not None and now - _TNX_CACHE[0] < _TNX_TTL_S:
-        return _TNX_CACHE[1]
-    if not _data.HAS_YF:
+
+def cached_treasury_yield(tenor: str) -> float | None:
+    """Get-only cache read: the yield if some live-path call already fetched it
+    this hour, else None. Lets offline/deterministic surfaces (data-quality)
+    report on live rates without ever making a network call themselves."""
+    hit = _YIELD_CACHE.get((tenor or "").lower())
+    if not hit:
         return None
-    try:
-        quote = _data._yf.Ticker("^TNX").fast_info
-        raw = float(quote["last_price"])
-    except Exception:
-        return None
-    if not (0.0 < raw < 25.0):  # ^TNX quotes the yield in percent (4.4 == 4.4%)
-        return None
-    value = raw / 100.0
-    _TNX_CACHE[0], _TNX_CACHE[1] = now, value
-    return value
+    import time
+    return hit[1] if time.monotonic() - hit[0] < _YIELD_TTL_S else None
+
+
+def rf_drift() -> dict:
+    """Configured HELIOS_RF vs the live 3M bill — the honesty check for every
+    mandate benchmarked off the risk-free rate (CD-alt targets especially).
+
+    Reads the cached yield only (no network): the cache is warmed by the analyze
+    routes' rate_context calls, so this stays deterministic for offline runs."""
+    live_3m = cached_treasury_yield("3m")
+    out: dict = {
+        "configured_rf_pct": round(_mnd.RF * 100.0, 2),
+        "live_3m_pct": round(live_3m * 100.0, 2) if live_3m is not None else None,
+        "drift_pp": None,
+        "stale": False,
+    }
+    if live_3m is not None:
+        drift = abs(live_3m - _mnd.RF) * 100.0
+        out["drift_pp"] = round(drift, 2)
+        out["stale"] = drift >= RF_DRIFT_ALERT_PP
+    return out
 
 
 def rate_context() -> dict:
     """Configured-vs-market rate snapshot for payload provenance."""
-    live = ten_year_yield()
-    return {
+    curve = {}
+    for tenor in ("3m", "5y", "10y", "30y"):
+        val = treasury_yield(tenor)
+        if val is not None:
+            curve[tenor + "_pct"] = round(val * 100.0, 2)
+    live_10y = curve.get("10y_pct")
+    ctx = {
         "configured_rf_pct": round(_mnd.RF * 100.0, 2),
-        "live_10y_pct": round(live * 100.0, 2) if live is not None else None,
-        "note": ("Scoring uses the configured risk-free rate (HELIOS_RF); the live 10Y "
-                 "is shown so drift is visible, never silently substituted."),
+        "live_10y_pct": live_10y,
+        "treasury_curve_pct": curve or None,
+        "rf_drift": rf_drift(),
+        "note": ("Scoring uses the configured risk-free rate (HELIOS_RF); live Treasury "
+                 "yields are shown so drift is visible, never silently substituted."),
     }
+    if curve.get("3m_pct") is not None and live_10y is not None:
+        ctx["curve_slope_3m10y_pp"] = round(live_10y - curve["3m_pct"], 2)
+    return ctx
 
 
 def equity_risk_premium() -> float:

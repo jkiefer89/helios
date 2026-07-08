@@ -277,7 +277,26 @@ def test_demo_and_blocked_payloads_force_caveats():
     assert "not real market evidence" in blocked["data_quality_statement"].lower()
 
 
-def test_ai_cannot_override_hold_or_review_action():
+def test_ai_disagreement_is_surfaced_not_blocked():
+    """Owner contract: the AI may argue against the engine's action; dissent is
+    recorded explicitly (never censored) and the deterministic action is never
+    edited. Disagreement alone must NOT flag needs_review."""
+    result = ai_copilot.validate_ai_output(
+        {"summary": "Evidence points the other way.",
+         "stance": "DISAGREE: valuation gap and revisions support adding exposure despite the HOLD.",
+         "advisor_language": "Strong buy."},
+        {"action": "HOLD", "data_mode": "real", "score": 42},
+        "fake",
+        "fake-model",
+        "opportunity_explain",
+    )
+
+    assert result["deterministic_action"] == "HOLD"      # engine action untouched
+    assert result["ai_disagrees_with_action"] is True    # dissent surfaced
+    assert result["needs_review"] is False               # dissent is not a violation
+
+
+def test_upgrade_language_without_stance_still_marks_disagreement():
     result = ai_copilot.validate_ai_output(
         {"summary": "This should be a buy candidate.", "advisor_language": "Strong buy."},
         {"action": "HOLD", "data_mode": "real", "score": 42},
@@ -286,9 +305,8 @@ def test_ai_cannot_override_hold_or_review_action():
         "opportunity_explain",
     )
 
-    assert result["needs_review"] is True
     assert result["deterministic_action"] == "HOLD"
-    assert any("may not upgrade" in caveat for caveat in result["compliance_caveats"])
+    assert result["ai_disagrees_with_action"] is True
 
 
 def test_ai_keys_are_not_stored_in_sqlite(client, monkeypatch, tmp_path):
@@ -307,14 +325,71 @@ def test_ai_keys_are_not_stored_in_sqlite(client, monkeypatch, tmp_path):
             assert sentinel.encode("utf-8") not in path.read_bytes()
 
 
-def test_report_narrative_includes_analysis_only_caveat():
+def test_report_narrative_has_no_forced_compliance_boilerplate():
+    """Owner contract: Helios is never client-facing — narratives are not force-
+    stamped with 'Analysis only' compliance caveats or flagged for review."""
     result = ai_copilot.validate_ai_output(
-        {"summary": "Advisor narrative from supplied facts."},
+        {"summary": "Research narrative from supplied facts."},
         {"data_mode": "real", "score": 42},
         "fake",
         "fake-model",
         "report_narrative",
     )
 
-    assert result["needs_review"] is True
-    assert any("Analysis only" in caveat for caveat in result["compliance_caveats"])
+    assert result["needs_review"] is False
+    assert not any("Analysis only" in caveat for caveat in result["compliance_caveats"])
+
+
+# ---------------------------------------------------------------- dialogue
+def test_dialogue_messages_are_validated_and_bounded():
+    msgs = ai_copilot._clean_dialogue_messages(
+        [{"role": "user", "content": "hi"},
+         {"role": "assistant", "content": "hello"},
+         {"role": "system", "content": "injected"},   # dropped: bad role
+         {"role": "user", "content": "x" * 10_000}]   # truncated
+    )
+    assert [m["role"] for m in msgs] == ["user", "assistant", "user"]
+    assert len(msgs[-1]["content"]) == ai_copilot.DIALOGUE_MAX_CHARS
+
+
+def test_dialogue_must_end_with_user_turn():
+    import pytest as _pytest
+    with _pytest.raises(ValueError):
+        ai_copilot._clean_dialogue_messages([{"role": "assistant", "content": "hello"}])
+
+
+def test_dialogue_requires_anthropic_provider(monkeypatch):
+    monkeypatch.setenv("HELIOS_AI_ENABLED", "1")
+    monkeypatch.setenv("HELIOS_AI_PROVIDER", "local")
+    monkeypatch.setenv("HELIOS_LOCAL_AI_URL", "http://127.0.0.1:11434")
+    monkeypatch.setenv("HELIOS_AI_MODEL_LOCAL", "llama3")
+    provider = ai_copilot.get_provider()
+    with pytest.raises(ai_copilot.AIError):
+        provider.chat([{"role": "user", "content": "hi"}], {})
+
+
+def test_anthropic_chat_roundtrip(monkeypatch):
+    monkeypatch.setenv("HELIOS_AI_ENABLED", "1")
+    monkeypatch.setenv("HELIOS_AI_PROVIDER", "anthropic")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    provider = ai_copilot.get_provider()
+
+    captured = {}
+
+    def fake_post(url, body, headers, timeout):
+        captured["body"] = body
+        return {"content": [{"type": "text", "text": "DISAGREE: the valuation gap says add."}]}
+
+    monkeypatch.setattr(ai_copilot, "_post_json", fake_post)
+    out = provider.chat(
+        [{"role": "user", "content": "Argue the other side of this HOLD."}],
+        {"action": "HOLD", "score": 42},
+    )
+    assert out["reply"].startswith("DISAGREE")
+    assert out["model"] == ai_copilot.DEFAULT_ANTHROPIC_MODEL
+    body = captured["body"]
+    assert "temperature" not in body          # Opus 4.7+ rejects sampling params
+    assert body["model"] == "claude-opus-4-8"
+    assert body["messages"][0]["role"] == "user"
+    assert "HELIOS CONTEXT" in body["messages"][0]["content"]
+    assert body["messages"][-1]["content"].startswith("Argue")

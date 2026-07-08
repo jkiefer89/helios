@@ -188,7 +188,9 @@ def test_real_data_mode_gets_no_mixed_caveat():
         "Load up before the next review.",
     ],
 )
-def test_upgrade_phrasings_are_flagged_when_action_is_hold(phrase):
+def test_upgrade_phrasings_surface_dissent_when_action_is_hold(phrase):
+    """Owner contract (2026-07-07): upgrade language against a HOLD is recorded
+    as explicit AI dissent — surfaced, never censored, and not a review flag."""
     result = ai_copilot.validate_ai_output(
         {"summary": phrase},
         {"action": "HOLD", "data_mode": "real", "score": 42},
@@ -197,11 +199,12 @@ def test_upgrade_phrasings_are_flagged_when_action_is_hold(phrase):
         "opportunity_explain",
     )
 
-    assert result["needs_review"] is True
-    assert any("may not upgrade" in caveat for caveat in result["compliance_caveats"])
+    assert result["ai_disagrees_with_action"] is True
+    assert result["needs_review"] is False
+    assert result["deterministic_action"] == "HOLD"
 
 
-def test_upgrade_phrasings_are_flagged_for_review_action():
+def test_upgrade_phrasings_surface_dissent_for_review_action():
     result = ai_copilot.validate_ai_output(
         {"summary": "Accumulate while the review completes."},
         {"action": "REVIEW", "data_mode": "real", "score": 42},
@@ -210,7 +213,7 @@ def test_upgrade_phrasings_are_flagged_for_review_action():
         "opportunity_explain",
     )
 
-    assert result["needs_review"] is True
+    assert result["ai_disagrees_with_action"] is True
     assert result["deterministic_action"] == "REVIEW"
 
 
@@ -223,8 +226,8 @@ def test_neutral_language_is_not_flagged_as_upgrade():
         "opportunity_explain",
     )
 
+    assert result["ai_disagrees_with_action"] is False
     assert result["needs_review"] is False
-    assert not any("may not upgrade" in caveat for caveat in result["compliance_caveats"])
 
 
 # ---------------------------------------------------------------- FIX 4b

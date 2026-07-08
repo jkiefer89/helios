@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-from . import data, persistence, portfolio, provenance
+from . import data, macro, persistence, portfolio, provenance
 from ._common import env_int as _env_int
 from .reporting import DISCLAIMER
 
@@ -135,6 +135,20 @@ def dashboard_payload() -> dict:
                 f"{row['symbol']} refresh failed: {row.get('message') or 'provider error'}",
                 "Retry refresh and keep the prior stored history until the provider succeeds.",
             ))
+    # Rate-assumption honesty: mandate anchors and CD-alternative benchmarks are
+    # keyed to HELIOS_RF; alert when it drifts materially from the live 3M bill
+    # (offline -> no live yield -> no alert, never a fabricated comparison).
+    rf = macro.rf_drift()
+    if rf.get("stale"):
+        issues.append(quality_issue(
+            "rate_assumptions",
+            "warning",
+            "HELIOS_RF",
+            (f"Configured risk-free rate {rf['configured_rf_pct']:.2f}% is {rf['drift_pp']:.1f}pp away "
+             f"from the live 3M T-bill ({rf['live_3m_pct']:.2f}%) — mandate anchors and CD-alternative "
+             "benchmarks are being judged against a stale rate."),
+            "Update HELIOS_RF in .env to the current 3M bill yield so every anchor moves together.",
+        ))
     missing_rows = []
     coverage_gaps = []
     source_conflicts = []

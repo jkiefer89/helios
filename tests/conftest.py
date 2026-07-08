@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from engine import analytics_cache, data, persistence, portfolio
+from engine import analytics_cache, data, fundamentals, macro, news, persistence, portfolio
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -46,6 +46,9 @@ def reset_process_local_stores():
     data._NEGATIVE_RESOLVE.clear()
     portfolio._MODELS.clear()
     analytics_cache.invalidate()
+    fundamentals.invalidate_cache()
+    news.invalidate_cache()
+    macro._YIELD_CACHE.clear()
     persistence.reset_store_for_tests()
     yield
     data._STORE.clear()
@@ -54,6 +57,9 @@ def reset_process_local_stores():
     data._NEGATIVE_RESOLVE.clear()
     portfolio._MODELS.clear()
     analytics_cache.invalidate()
+    fundamentals.invalidate_cache()
+    news.invalidate_cache()
+    macro._YIELD_CACHE.clear()
     persistence.reset_store_for_tests()
 
 

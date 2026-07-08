@@ -4766,6 +4766,106 @@ button.locked-table-row:hover {
   color: var(--muted);
 }
 
+/* AI copilot research dialogue */
+.copilot-chat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.copilot-chat__meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.8rem;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.64rem;
+  letter-spacing: 0.04em;
+}
+
+.copilot-chat__scroll {
+  max-height: 420px;
+  min-height: 120px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(6, 9, 15, 0.55);
+  padding: 0.75rem;
+}
+
+.copilot-chat__empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+  line-height: 1.55;
+}
+
+.copilot-msg {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  max-width: 88%;
+}
+
+.copilot-msg--user {
+  align-self: flex-end;
+  align-items: flex-end;
+}
+
+.copilot-msg__who {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.copilot-msg__body {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.55rem 0.75rem;
+  color: var(--soft);
+  font-size: 0.78rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  background: rgba(12, 17, 26, 0.85);
+}
+
+.copilot-msg--user .copilot-msg__body {
+  background: rgba(28, 39, 58, 0.85);
+}
+
+.copilot-msg__body--pending {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.copilot-chat__input {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-end;
+}
+
+.copilot-chat__input textarea {
+  flex: 1 1 auto;
+  resize: vertical;
+  min-height: 2.6rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(6, 9, 15, 0.7);
+  color: var(--soft);
+  font: inherit;
+  font-size: 0.78rem;
+  padding: 0.5rem 0.7rem;
+}
+
+.copilot-chat__input button {
+  flex: 0 0 auto;
+}
+
 .holdings-table {
   display: grid;
   max-height: 340px;
