@@ -230,13 +230,135 @@ def _fmp_provider(ticker: str) -> dict:
     }
 
 
+# --------------------------------------------------------------------------- #
+# Intrinio (institutional-grade standardized fundamentals)
+# --------------------------------------------------------------------------- #
+_INTRINIO_HTTP = None
+_INTRINIO_BASE = "https://api-v2.intrinio.com"
+# Standardized data-point tags this integration reads -> our field names.
+_INTRINIO_TAGS = {
+    "pricetoearnings": "trailing_pe",
+    "dividendyield": "dividend_yield",     # already a fraction
+    "roe": "roe",
+    "debttoequity": "debt_to_equity",      # already a ratio
+    "profitmargin": "profit_margin",
+    "epsgrowth": "earnings_growth",        # trailing annual EPS growth (fraction)
+    "revenuegrowth": "revenue_growth",
+    "close_price": "current_price",
+}
+# Intrinio reports SIC-style sectors/industries ("Finance, Insurance, And Real
+# Estate"), which would fuzzy-match the WRONG macro anchor (that string contains
+# "real estate"). Map keywords in industry_category first, then sector, to the
+# anchor vocabulary macro.sector_anchor understands; unknown -> "" (market anchor).
+_INTRINIO_SECTOR_KEYWORDS = (
+    ("real estate", "real estate"),
+    ("bank", "financials"), ("insur", "financials"), ("financ", "financials"),
+    ("invest", "financials"), ("securit", "financials"),
+    ("software", "technology"), ("computer", "technology"), ("semicond", "technology"),
+    ("internet", "technology"), ("technology", "technology"),
+    ("telecom", "communication services"), ("communicat", "communication services"),
+    ("media", "communication services"), ("broadcast", "communication services"),
+    ("drug", "healthcare"), ("pharma", "healthcare"), ("biotech", "healthcare"),
+    ("medical", "healthcare"), ("health", "healthcare"),
+    ("oil", "energy"), ("gas", "energy"), ("energy", "energy"), ("petrol", "energy"),
+    ("utilit", "utilities"), ("electric services", "utilities"),
+    ("food", "consumer staples"), ("beverage", "consumer staples"),
+    ("tobacco", "consumer staples"), ("household", "consumer staples"),
+    ("retail", "consumer discretionary"), ("apparel", "consumer discretionary"),
+    ("restaurant", "consumer discretionary"), ("hotel", "consumer discretionary"),
+    ("auto", "consumer discretionary"), ("leisure", "consumer discretionary"),
+    ("chemical", "materials"), ("metal", "materials"), ("mining", "materials"),
+    ("paper", "materials"), ("material", "materials"),
+    ("aerospace", "industrials"), ("machinery", "industrials"),
+    ("transport", "industrials"), ("construction", "industrials"),
+    ("industrial", "industrials"), ("defense", "industrials"),
+)
+
+
+def set_intrinio_http(fn) -> None:
+    """Test seam for the Intrinio HTTP getter (``callable(url) -> parsed JSON``)."""
+    global _INTRINIO_HTTP
+    _INTRINIO_HTTP = fn
+    invalidate_cache()
+
+
+def _intrinio_http_json(url: str):
+    fn = _INTRINIO_HTTP or _urllib_json
+    try:
+        return fn(url)
+    except Exception:
+        return None
+
+
+def _intrinio_sector(company: dict) -> str:
+    for field in ("industry_category", "sector"):
+        text = str(company.get(field) or "").lower()
+        if not text:
+            continue
+        for keyword, anchor in _INTRINIO_SECTOR_KEYWORDS:
+            if keyword in text:
+                return anchor
+    return ""
+
+
+def _intrinio_provider(ticker: str) -> dict:
+    key = os.environ.get("HELIOS_INTRINIO_KEY", "").strip()
+    if not key:
+        return {}
+
+    def url(path: str) -> str:
+        sep = "&" if "?" in path else "?"
+        return f"{_INTRINIO_BASE}{path}{sep}api_key={key}"
+
+    company = _intrinio_http_json(url(f"/companies/{ticker}"))
+    company = company if isinstance(company, dict) and not company.get("error") else {}
+    out: dict = {}
+    for tag, field in _INTRINIO_TAGS.items():
+        value = _intrinio_http_json(url(f"/companies/{ticker}/data_point/{tag}/number"))
+        # The /number endpoint returns a bare JSON number; error payloads are dicts.
+        num = _num(value) if not isinstance(value, (dict, list)) else None
+        if num is not None:
+            out[field] = num
+    if not out and not company:
+        return {}
+    out["sector"] = _intrinio_sector(company)
+    out["source"] = "intrinio"
+    return out
+
+
+def _merge_raw(primary: dict, filler: dict) -> dict:
+    """Field-level merge: keep every primary value, fill gaps from the filler.
+
+    The merged source names both providers so provenance stays honest about
+    where the numbers came from."""
+    if not primary:
+        return dict(filler)
+    if not filler:
+        return dict(primary)
+    merged = dict(primary)
+    for k, v in filler.items():
+        if k in ("source",):
+            continue
+        if merged.get(k) in (None, ""):
+            merged[k] = v
+    p_src, f_src = primary.get("source", ""), filler.get("source", "")
+    if f_src and any(filler.get(k) not in (None, "") and primary.get(k) in (None, "")
+                     for k in filler if k != "source"):
+        merged["source"] = f"{p_src}+{f_src}" if p_src else f_src
+    return merged
+
+
 def _auto_provider(ticker: str) -> dict:
-    """Prefer FMP consensus when a key is configured; fall back to yfinance."""
+    """Provider chain, best-first with field-level gap filling:
+    FMP consensus (if keyed) > Intrinio standardized (if keyed) > yfinance.
+    Later providers only fill fields the earlier ones did not supply."""
+    merged: dict = {}
     if os.environ.get("HELIOS_FMP_KEY", "").strip():
-        raw = _fmp_provider(ticker)
-        if raw:
-            return raw
-    return _yfinance_provider(ticker)
+        merged = _merge_raw(merged, _fmp_provider(ticker))
+    if os.environ.get("HELIOS_INTRINIO_KEY", "").strip():
+        merged = _merge_raw(merged, _intrinio_provider(ticker))
+    merged = _merge_raw(merged, _yfinance_provider(ticker))
+    return merged
 
 
 # Default-provider results are cached for a few hours: fundamentals move on

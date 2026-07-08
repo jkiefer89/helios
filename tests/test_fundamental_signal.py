@@ -181,3 +181,92 @@ def test_fundamentals_quality_fields_pass_through():
     assert fnd.debt_to_equity == pytest.approx(1.4)
     assert fnd.target_mean_price == pytest.approx(230.0)
     assert fnd.n_analysts == 30
+
+
+# --------------------------------------------------------------------------- #
+# Intrinio provider + merge chain
+# --------------------------------------------------------------------------- #
+def _intrinio_fake(responses):
+    def fake(url):
+        for fragment, value in responses.items():
+            if fragment in url:
+                return value
+        return {"error": "Cannot look up this item/identifier combination"}
+    return fake
+
+
+def test_intrinio_provider_parses_data_points_and_maps_sic_sector(monkeypatch):
+    monkeypatch.setenv("HELIOS_INTRINIO_KEY", "test-key")
+    fundamentals.set_intrinio_http(_intrinio_fake({
+        "/companies/JPM/data_point/pricetoearnings": 15.2,
+        "/companies/JPM/data_point/dividendyield": 0.021,
+        "/companies/JPM/data_point/roe": 0.17,
+        "/companies/JPM/data_point/debttoequity": 1.4,
+        "/companies/JPM/data_point/profitmargin": 0.32,
+        "/companies/JPM/data_point/epsgrowth": 0.08,
+        "/companies/JPM/data_point/revenuegrowth": 0.06,
+        "/companies/JPM/data_point/close_price": 300.0,
+        # SIC division name would fuzzy-match "real estate" without the mapping.
+        "/companies/JPM?": {"ticker": "JPM", "sector": "Finance, Insurance, And Real Estate",
+                            "industry_category": "Banking"},
+    }))
+    try:
+        raw = fundamentals._intrinio_provider("JPM")
+        assert raw["source"] == "intrinio"
+        assert raw["sector"] == "financials"          # Banking -> financials, NOT real estate
+        assert raw["trailing_pe"] == pytest.approx(15.2)
+        assert raw["dividend_yield"] == pytest.approx(0.021)
+        assert raw["earnings_growth"] == pytest.approx(0.08)
+        assert raw["debt_to_equity"] == pytest.approx(1.4)
+    finally:
+        fundamentals.set_intrinio_http(None)
+
+
+def test_intrinio_missing_tags_are_skipped_not_fabricated(monkeypatch):
+    monkeypatch.setenv("HELIOS_INTRINIO_KEY", "test-key")
+    fundamentals.set_intrinio_http(_intrinio_fake({
+        "/companies/XYZ/data_point/pricetoearnings": 20.0,
+        "/companies/XYZ?": {"ticker": "XYZ", "industry_category": "Oil & Gas Extraction"},
+    }))
+    try:
+        raw = fundamentals._intrinio_provider("XYZ")
+        assert raw["trailing_pe"] == pytest.approx(20.0)
+        assert raw["sector"] == "energy"
+        assert "dividend_yield" not in raw            # unavailable tag stays absent
+    finally:
+        fundamentals.set_intrinio_http(None)
+
+
+def test_auto_provider_merges_intrinio_with_yfinance_gap_fill(monkeypatch):
+    monkeypatch.delenv("HELIOS_FMP_KEY", raising=False)
+    monkeypatch.setenv("HELIOS_INTRINIO_KEY", "test-key")
+    fundamentals.set_intrinio_http(_intrinio_fake({
+        "/companies/AAPL/data_point/pricetoearnings": 30.0,
+        "/companies/AAPL/data_point/dividendyield": 0.005,
+        "/companies/AAPL?": {"ticker": "AAPL", "industry_category": "Computer Hardware"},
+    }))
+    monkeypatch.setattr(fundamentals, "_yfinance_provider", lambda t: {
+        "trailing_pe": 31.0,          # must NOT override Intrinio's value
+        "forward_pe": 27.0,           # fills the gap Intrinio can't serve
+        "target_mean_price": 250.0,   # analyst context only from yfinance
+        "sector": "Technology",
+        "source": "yfinance",
+    })
+    try:
+        fnd = fundamentals.fetch("AAPL")
+        assert fnd.trailing_pe == pytest.approx(30.0)   # Intrinio wins on overlap
+        assert fnd.forward_pe == pytest.approx(27.0)    # yfinance fills the gap
+        assert fnd.target_mean_price == pytest.approx(250.0)
+        assert fnd.sector == "technology"
+        assert fnd.source == "intrinio+yfinance"        # provenance names both
+    finally:
+        fundamentals.set_intrinio_http(None)
+
+
+def test_merge_keeps_single_source_when_filler_adds_nothing():
+    merged = fundamentals._merge_raw(
+        {"trailing_pe": 12.0, "source": "intrinio"},
+        {"trailing_pe": 13.0, "source": "yfinance"},
+    )
+    assert merged["trailing_pe"] == 12.0
+    assert merged["source"] == "intrinio"

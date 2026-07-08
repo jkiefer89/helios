@@ -62,6 +62,9 @@ def test_fmp_provider_derives_consensus_growth_and_forward_pe(monkeypatch):
         return None
 
     fundamentals.set_fmp_http(fake_fmp)
+    # Keep the gap-fill chain offline/deterministic: no Intrinio key, empty yfinance.
+    monkeypatch.delenv("HELIOS_INTRINIO_KEY", raising=False)
+    monkeypatch.setattr(fundamentals, "_yfinance_provider", lambda t: {})
     f = fundamentals.fetch("AAPL")
     assert f.source == "fmp" and f.usable
     assert f.dividend_yield == pytest.approx(0.02)
