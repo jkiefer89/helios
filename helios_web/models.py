@@ -6,9 +6,9 @@ from flask import Blueprint, Response, request
 
 from engine import (
     analytics_cache, backtest, cma, data, data_quality, figi, forecast, fundamentals,
-    holdings, indicators, insights, mandate, model_governance, model_library,
-    model_validation, portfolio, portfolio_clinic, provenance, risk_exposure,
-    sentiment, signals, strategy,
+    holdings, indicators, insights, macro_events, mandate, model_governance,
+    model_library, model_validation, portfolio, portfolio_clinic, provenance,
+    risk_exposure, sentiment, signals, strategy,
 )
 
 from .analysis import _record_model_signal, _series_payload, _strategy_request_args
@@ -305,8 +305,12 @@ def model_analyze():
     pmeta = {"n_holdings": len(mdl.holdings),
              "top_weight": mdl.holdings[0].weight if mdl.holdings else 0,
              "top_ticker": mdl.holdings[0].ticker if mdl.holdings else "?"}
+    # Event risk (FOMC proximity, geopolitical stress) applies to models too;
+    # sector policy pressure is per-name and stays on the instrument path.
+    macro_ctx = macro_events.build_macro_context()
     sig = signals.evaluate(close, fc_short, sent, mandate_key=mdl.mandate_key,
-                           portfolio_meta=pmeta, history_days=ps.n_days, data_honesty=ps.provenance)
+                           portfolio_meta=pmeta, history_days=ps.n_days,
+                           data_honesty=ps.provenance, macro_context=macro_ctx)
     bt = backtest.run(close)
     journal_entry = _record_model_signal(mdl, ps, close, sig, signal_horizon)
 

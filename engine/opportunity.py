@@ -9,8 +9,8 @@ from __future__ import annotations
 import numpy as np
 
 from . import (
-    analytics_cache, cma, data, forecast, fundamentals, indicators, mandate, portfolio,
-    provenance, regime as regime_mod, sec_events, sentiment, signals, strategy,
+    analytics_cache, cma, data, forecast, fundamentals, indicators, macro_events, mandate,
+    portfolio, provenance, regime as regime_mod, sec_events, sentiment, signals, strategy,
 )
 from ._common import dedupe as _dedupe
 
@@ -164,6 +164,7 @@ def opportunities(
     ranked = [item for item in ranked if item["opportunity_score"] >= min_score]
     return {
         "regime": market,
+        "macro": macro_events.compact_summary(macro_events.snapshot_cached()),
         "items": ranked[:limit],
         "blocked_items": blocked,
         "count": len(ranked[:limit]),
@@ -202,7 +203,11 @@ def instrument_candidate(inst: data.Instrument) -> dict | None:
     # fetch is TTL-cached in engine.fundamentals and empty/offline results are
     # honestly reported as a technicals-only rating.
     fwd = cma.instrument_forward(inst.symbol, fundamentals.fetch(inst.symbol))
-    sig = signals.evaluate(close, fc, sent, history_days=len(close), fundamental_result=fwd)
+    # Macro context: cached-only (the radar never fetches feeds in-request; the
+    # background loop keeps the snapshot warm). No snapshot -> no damper.
+    macro_ctx = macro_events.build_macro_context(fwd.get("sector") or "")
+    sig = signals.evaluate(close, fc, sent, history_days=len(close),
+                           fundamental_result=fwd, macro_context=macro_ctx)
     st = strategy.analyze_strategy(close)
     metrics = indicators.metrics_summary(close)
     candidate = {

@@ -4766,6 +4766,117 @@ button.locked-table-row:hover {
   color: var(--muted);
 }
 
+/* Macro intelligence panel */
+.macro-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 0.9rem;
+}
+
+.macro-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(6, 9, 15, 0.55);
+  padding: 0.65rem 0.8rem;
+  min-width: 0;
+}
+
+.macro-cell__label {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.macro-cell small {
+  color: var(--muted);
+  font-size: 0.68rem;
+  line-height: 1.45;
+}
+
+.macro-meter {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.macro-meter__dove, .macro-meter__hawk {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.06em;
+}
+
+.macro-meter__track {
+  position: relative;
+  flex: 1 1 auto;
+  height: 6px;
+  border-radius: 3px;
+  background: linear-gradient(90deg, rgba(84, 160, 120, 0.55), rgba(158, 176, 202, 0.25), rgba(196, 92, 92, 0.55));
+}
+
+.macro-meter__pin {
+  position: absolute;
+  top: -3px;
+  width: 3px;
+  height: 12px;
+  border-radius: 2px;
+  background: var(--soft);
+  transform: translateX(-50%);
+}
+
+.macro-gpr {
+  font-family: var(--font-mono);
+  font-size: 1.15rem;
+}
+
+.macro-gpr--calm { color: var(--green); }
+.macro-gpr--moderate { color: var(--amber, #d9a441); }
+.macro-gpr--elevated { color: var(--red); }
+
+.macro-themes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.macro-theme {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.14rem 0.55rem;
+  color: var(--soft);
+  font-size: 0.66rem;
+  background: rgba(12, 17, 26, 0.85);
+}
+
+.macro-brief {
+  margin-top: 0.7rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.macro-brief__err { color: var(--red); font-size: 0.68rem; }
+
+.macro-brief__body {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(12, 17, 26, 0.85);
+  padding: 0.65rem 0.85rem;
+  color: var(--soft);
+  font-size: 0.76rem;
+  line-height: 1.55;
+}
+
+.macro-brief__body ul {
+  margin: 0.4rem 0 0;
+  padding-left: 1.1rem;
+}
+
 /* Decision journal — quick-log strip, table, form */
 .decision-quicklog {
   display: flex;

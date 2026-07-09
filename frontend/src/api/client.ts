@@ -205,6 +205,9 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ messages, payload }),
     }),
+  macro: () => request<Record<string, unknown>>("/api/macro"),
+  aiMacroBrief: (payload: Record<string, unknown>, regenerate = false) =>
+    aiPost("/api/ai/macro/brief", payload, undefined, regenerate),
   listDecisions: (limit = 200) => request<DecisionsResponse>(`/api/decisions?limit=${limit}`),
   recordDecision: (body: {
     target_kind: string;

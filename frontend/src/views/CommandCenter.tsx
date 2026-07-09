@@ -1,5 +1,6 @@
 import { useMemo, useState, type KeyboardEvent } from "react";
-import type { CommandCenterResponse, DataStatusResponse } from "../api/types";
+import { api } from "../api/client";
+import type { CommandCenterResponse, DataStatusResponse, MacroSummary } from "../api/types";
 import { SourcePill } from "../components/badges/DataModeBadge";
 import { Panel } from "../components/cards/Panel";
 import { MiniBars, ScoreBar } from "../components/charts/Charts";
@@ -84,6 +85,8 @@ export function CommandCenter({
       {!payload.eligible_for_real_research && (
         <ResearchUnlockCTA payload={payload} dataStatus={dataStatus} onOpenView={onOpenView} />
       )}
+
+      {payload.macro && <MacroIntelligencePanel macro={payload.macro} />}
 
       <section className="command-card-grid">
         <Panel title="Top Opportunities" meta={<PanelAction label="View All" onClick={() => onOpenView("opportunities")} />}>
@@ -610,4 +613,110 @@ function buildStatusItems(payload: CommandCenterResponse, sourceStatus: string, 
 function formatTimestamp(value: string) {
   const formatted = fmtTimestamp(value);
   return formatted === "—" ? "Data timestamp pending" : `Data as of ${formatted}`;
+}
+
+/** Macro Intelligence: Fed stance (hawk/dove over official press + speeches),
+    geopolitical risk index (GDELT lexicon), White House policy themes, and
+    FOMC proximity — the non-numeric forecast inputs, honestly labeled. */
+function MacroIntelligencePanel({ macro }: { macro: MacroSummary }) {
+  const [brief, setBrief] = useState<{ summary: string; stance: string; risks: string[] } | null>(null);
+  const [briefState, setBriefState] = useState<"idle" | "loading" | "error">("idle");
+
+  const fetchBrief = async () => {
+    if (briefState === "loading") return;
+    setBriefState("loading");
+    try {
+      const snap = (await api.macro()) as Record<string, any>;
+      const slim = {
+        fed: { ...(snap.fed || {}), documents: undefined },
+        fed_latest: ((snap.fed?.documents as Array<{ title: string }>) || []).slice(0, 5).map((d) => d.title),
+        policy: { ...(snap.policy || {}), actions: undefined },
+        policy_latest: ((snap.policy?.actions as Array<{ title: string }>) || []).slice(0, 5).map((d) => d.title),
+        geopolitics: { ...(snap.geopolitics || {}), headlines: undefined },
+        fomc: snap.fomc,
+        rates: snap.rates,
+        data_mode: "real",
+      };
+      const res = await api.aiMacroBrief(slim as Record<string, unknown>);
+      setBrief({
+        summary: res.result?.summary || "",
+        stance: res.result?.stance || "",
+        risks: res.result?.risks || [],
+      });
+      setBriefState("idle");
+    } catch {
+      setBriefState("error");
+    }
+  };
+
+  const stance = macro.fed_stance_score ?? 0;
+  const stancePos = Math.max(0, Math.min(100, (stance + 1) * 50)); // -1..1 -> 0..100
+  const gpr = macro.gpr_index ?? null;
+  const themes = Object.entries(macro.policy_themes || {});
+  return (
+    <Panel
+      title="Macro Intelligence — Fed · Policy · Geopolitics"
+      meta={macro.fomc_start ? `Next FOMC ${macro.fomc_start}${macro.fomc_days_until != null ? ` · ${macro.fomc_days_until}d` : ""}${macro.fomc_imminent ? " ⚑ imminent" : ""}` : undefined}
+    >
+      <div className="macro-grid">
+        <div className="macro-cell">
+          <span className="macro-cell__label">Fed stance</span>
+          {macro.fed_available ? (
+            <>
+              <div className="macro-meter" title={`score ${fmtNumber(stance, 2)}`}>
+                <span className="macro-meter__dove">DOVISH</span>
+                <div className="macro-meter__track"><div className="macro-meter__pin" style={{ left: `${stancePos}%` }} /></div>
+                <span className="macro-meter__hawk">HAWKISH</span>
+              </div>
+              <small>{(macro.fed_stance_label || "").toUpperCase()} ({fmtNumber(stance, 2)}) — lexicon over official Fed press + speeches</small>
+            </>
+          ) : (
+            <small>Fed feed unavailable — no stance assumed.</small>
+          )}
+        </div>
+        <div className="macro-cell">
+          <span className="macro-cell__label">Geopolitical risk</span>
+          {macro.gpr_available && gpr != null ? (
+            <>
+              <strong className={`macro-gpr macro-gpr--${macro.gpr_level || "calm"}`}>{fmtNumber(gpr * 100, 0)}<small>/100</small></strong>
+              <small>{(macro.gpr_level || "").toUpperCase()} — conflict lexicon over world news (3d)</small>
+            </>
+          ) : (
+            <small>Geopolitics feed unavailable — risk unknown, not assumed calm.</small>
+          )}
+        </div>
+        <div className="macro-cell">
+          <span className="macro-cell__label">White House policy themes</span>
+          {macro.policy_available && themes.length > 0 ? (
+            <div className="macro-themes">
+              {themes.map(([theme, count]) => (
+                <span className="macro-theme" key={theme}>{theme} ×{count}</span>
+              ))}
+            </div>
+          ) : (
+            <small>{macro.policy_available ? "No tagged themes in recent actions." : "Policy feed unavailable."}</small>
+          )}
+        </div>
+      </div>
+      <div className="macro-brief">
+        <button type="button" onClick={() => void fetchBrief()} disabled={briefState === "loading"}>
+          {briefState === "loading" ? "Copilot reading the tape…" : brief ? "Refresh copilot read" : "Copilot read"}
+        </button>
+        {briefState === "error" && <small className="macro-brief__err">Copilot brief unavailable — deterministic scores above still stand.</small>}
+        {brief && (
+          <div className="macro-brief__body">
+            <p>{brief.summary}</p>
+            {brief.stance && <p><b>Stance:</b> {brief.stance}</p>}
+            {brief.risks.length > 0 && (
+              <ul>{brief.risks.slice(0, 3).map((r) => <li key={r}>{r}</li>)}</ul>
+            )}
+          </div>
+        )}
+      </div>
+      <p className="forecast-note">
+        Ratings shrink conviction ahead of FOMC decisions and elevated geopolitical risk (transparent
+        damper, floor ×0.70) — macro context argues, it never fabricates a forecast.
+      </p>
+    </Panel>
+  );
 }

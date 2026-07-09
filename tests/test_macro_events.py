@@ -1,0 +1,167 @@
+"""Macro intelligence layer tests — all offline via the injected HTTP seam."""
+from __future__ import annotations
+
+from datetime import date
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from engine import forecast, macro_events, signals
+
+_FED_RSS = """<?xml version="1.0" encoding="utf-8" ?>
+<rss version="2.0"><channel><title>FRB</title>
+<item><title>Statement: inflation remains elevated and persistent; the Committee will tighten further</title>
+<link>https://fed.example/1</link><pubDate>Tue, 07 Jul 2026 10:00:00 GMT</pubDate>
+<description>Restrictive policy stance; vigilant on upside inflation risks.</description></item>
+<item><title>Speech: policy is restrictive and further hikes may be warranted</title>
+<link>https://fed.example/2</link><pubDate>Mon, 06 Jul 2026 10:00:00 GMT</pubDate>
+<description>Higher for longer; sticky inflation.</description></item>
+</channel></rss>"""
+
+_FED_DOVISH_RSS = """<?xml version="1.0" encoding="utf-8" ?>
+<rss version="2.0"><channel><title>FRB</title>
+<item><title>Statement: cuts are appropriate as disinflation continues</title>
+<link>https://fed.example/3</link><pubDate>Tue, 07 Jul 2026 10:00:00 GMT</pubDate>
+<description>Easing toward accommodative policy; cooling labor market, downside risks.</description></item>
+</channel></rss>"""
+
+_WH_RSS = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel><title>WH</title>
+<item><title>Executive Order imposing tariffs on semiconductor imports</title>
+<link>https://wh.example/1</link><pubDate>Mon, 06 Jul 2026 12:00:00 GMT</pubDate>
+<description>New tariffs and export controls on chips.</description></item>
+<item><title>Presidential Memorandum on drug pricing</title>
+<link>https://wh.example/2</link><pubDate>Sun, 05 Jul 2026 12:00:00 GMT</pubDate>
+<description>Medicare negotiation expansion.</description></item>
+</channel></rss>"""
+
+_GDELT_HOT = {"articles": [{"title": f"War escalation: missile attacks and invasion fears rise {i}"}
+                           for i in range(20)]}
+_GDELT_CALM = {"articles": [{"title": f"Trade talks continue as negotiations progress {i}"}
+                            for i in range(6)]}
+
+
+def _http(fed=_FED_RSS, wh=_WH_RSS, gdelt=_GDELT_HOT):
+    def fake(url):
+        if "federalreserve" in url:
+            return fed
+        if "whitehouse" in url:
+            return wh
+        if "gdeltproject" in url:
+            return gdelt
+        raise AssertionError(url)
+    return fake
+
+
+@pytest.fixture(autouse=True)
+def _reset():
+    macro_events.invalidate_cache()
+    yield
+    macro_events.set_http(None)
+    macro_events.invalidate_cache()
+
+
+def test_fed_component_scores_hawkish_and_dovish():
+    macro_events.set_http(_http())
+    snap = macro_events.macro_snapshot(force=True)
+    fed = snap["fed"]
+    assert fed["available"] and fed["stance_label"] == "hawkish" and fed["stance_score"] > 0
+    macro_events.set_http(_http(fed=_FED_DOVISH_RSS))
+    snap = macro_events.macro_snapshot(force=True)
+    assert snap["fed"]["stance_label"] == "dovish" and snap["fed"]["stance_score"] < 0
+
+
+def test_policy_component_tags_themes_and_sectors():
+    macro_events.set_http(_http())
+    snap = macro_events.macro_snapshot(force=True)
+    policy = snap["policy"]
+    assert policy["available"] and policy["n_actions"] == 2
+    assert "trade" in policy["themes"] and "healthcare" in policy["themes"]
+    assert "technology" in policy["sector_pressure"]
+    pressure = macro_events.sector_policy_pressure("technology", snap)
+    assert pressure and pressure["n_actions"] >= 1
+
+
+def test_geopolitics_index_hot_vs_calm():
+    macro_events.set_http(_http(gdelt=_GDELT_HOT))
+    hot = macro_events.macro_snapshot(force=True)["geopolitics"]
+    macro_events.set_http(_http(gdelt=_GDELT_CALM))
+    calm = macro_events.macro_snapshot(force=True)["geopolitics"]
+    assert hot["available"] and calm["available"]
+    assert hot["risk_index"] > calm["risk_index"]
+    assert hot["risk_level"] in {"elevated", "moderate"}
+
+
+def test_offline_sources_are_honestly_unavailable():
+    def down(url):
+        raise OSError("offline")
+    macro_events.set_http(down)
+    snap = macro_events.macro_snapshot(force=True)
+    assert snap["fed"]["available"] is False
+    assert snap["policy"]["available"] is False
+    assert snap["geopolitics"]["available"] is False
+    # Unknown geopolitics is None — never assumed calm OR risky.
+    assert snap["event_risk"]["gpr_index"] is None
+    assert snap["fomc"]["start"]  # static calendar still works offline
+
+
+def test_next_fomc_proximity():
+    on_meeting_eve = macro_events.next_fomc(date(2026, 7, 26))
+    assert on_meeting_eve["start"] == "2026-07-28" and on_meeting_eve["imminent"] is True
+    far = macro_events.next_fomc(date(2026, 8, 15))
+    assert far["start"] == "2026-09-15" and far["imminent"] is False
+    during = macro_events.next_fomc(date(2026, 7, 28))
+    assert during["in_progress"] is True
+
+
+# --------------------------------------------------------------------------- #
+# signals: event-risk damper
+# --------------------------------------------------------------------------- #
+def _close(n=300, seed=7):
+    idx = pd.bdate_range("2024-01-02", periods=n)
+    rng = np.random.default_rng(seed)
+    return pd.Series(100 * np.exp(np.cumsum(rng.normal(0.15 / 252, 0.01, n))), index=idx)
+
+
+_SENT = {"aggregate_score": 0.0, "aggregate_label": "neutral", "count": 0}
+
+
+def test_event_risk_damper_shrinks_conviction_never_flips():
+    close = _close()
+    fc = forecast.forecast(close, horizon=21, n_paths=200)
+    base = signals.evaluate(close, fc, _SENT)
+    risky = signals.evaluate(close, fc, _SENT, macro_context={
+        "fomc_imminent": True, "fomc_days_until": 2, "gpr_index": 1.0})
+    assert abs(risky["score"]) < abs(base["score"])
+    # 0.90 (FOMC) x 0.75 (gpr=1.0) = 0.675, floored at the documented 0.70.
+    assert risky["event_risk_damper"] == pytest.approx(signals._EVENT_DAMPER_FLOOR)
+    # Direction preserved: same sign, shrunk magnitude.
+    assert np.sign(risky["score"]) == np.sign(base["score"])
+    assert any("FOMC" in c for c in risky["caveats"])
+    assert any("Geopolitical" in c for c in risky["caveats"])
+
+
+def test_no_macro_context_means_no_damper_and_no_macro_keys():
+    close = _close()
+    fc = forecast.forecast(close, horizon=21, n_paths=200)
+    sig = signals.evaluate(close, fc, _SENT)
+    assert "event_risk_damper" not in sig
+    assert "macro" not in sig
+
+
+def test_unavailable_gpr_is_not_treated_as_risk():
+    close = _close()
+    fc = forecast.forecast(close, horizon=21, n_paths=200)
+    sig = signals.evaluate(close, fc, _SENT, macro_context={
+        "fomc_imminent": False, "gpr_index": None})
+    assert sig["event_risk_damper"] == pytest.approx(1.0)
+
+
+def test_sector_policy_pressure_becomes_caveat():
+    close = _close()
+    fc = forecast.forecast(close, horizon=21, n_paths=200)
+    sig = signals.evaluate(close, fc, _SENT, macro_context={
+        "fomc_imminent": False, "gpr_index": 0.2,
+        "sector_policy": {"sector": "technology", "n_actions": 2, "themes": ["trade"]}})
+    assert any("policy activity touching technology" in c for c in sig["caveats"])

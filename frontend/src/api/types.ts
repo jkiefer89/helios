@@ -566,8 +566,24 @@ export interface ResearchQueueItem {
   detail: string;
 }
 
+export interface MacroSummary {
+  as_of?: string;
+  fed_available: boolean;
+  fed_stance_label?: string | null;
+  fed_stance_score?: number | null;
+  gpr_available: boolean;
+  gpr_index?: number | null;
+  gpr_level?: string | null;
+  policy_available: boolean;
+  policy_themes?: Record<string, number>;
+  fomc_start?: string;
+  fomc_days_until?: number | null;
+  fomc_imminent?: boolean;
+}
+
 export interface CommandCenterResponse extends ProvenancePayload {
   regime: RegimePayload;
+  macro?: MacroSummary | null;
   top_opportunities: CommandItem[];
   top_risks: CommandItem[];
   model_alerts: ModelAlert[];
@@ -1408,6 +1424,7 @@ export interface AnalysisResponse {
   fundamentals?: Record<string, unknown>;
   rates?: Record<string, unknown>;
   sec_events?: SecEvents;
+  macro?: MacroSummary | null;
 }
 
 export interface SecEventItem {
@@ -1522,6 +1539,8 @@ export interface AIResult {
   key_points: string[];
   risks: string[];
   what_would_invalidate: string[];
+  stance?: string;
+  ai_disagrees_with_action?: boolean;
   advisor_language: string;
   compliance_caveats: string[];
   used_numbers: string[];

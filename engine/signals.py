@@ -65,6 +65,33 @@ def _sentiment_score(agg: float) -> float:
 # horizon — it is the horizon-independent leg of the rating.
 _FUNDAMENTALS_GAP_SATURATION_PP = 6.0
 
+# Macro event-risk damper bounds (multiplies conviction like the vol penalty —
+# it never flips a direction, it shrinks confidence ahead of known event risk).
+_FOMC_DAMPER = 0.90            # decision within FOMC_IMMINENT_DAYS of a meeting
+_GPR_MAX_DAMPER = 0.25         # up to -25% conviction at geopolitical index 1.0
+_EVENT_DAMPER_FLOOR = 0.70
+
+
+def _event_risk_damper(macro_context: dict | None) -> tuple[float, list[str]]:
+    """(multiplier, reasons) from the macro event-risk block. Transparent and
+    bounded: unknown/unavailable macro state means NO damper — the absence of
+    data is never treated as risk (or as calm)."""
+    if not macro_context:
+        return 1.0, []
+    damper, reasons = 1.0, []
+    if macro_context.get("fomc_imminent"):
+        damper *= _FOMC_DAMPER
+        days = macro_context.get("fomc_days_until")
+        reasons.append(f"FOMC decision {days}d away — rate-path repricing risk "
+                       f"(conviction ×{_FOMC_DAMPER:.2f})")
+    gpr = macro_context.get("gpr_index")
+    if isinstance(gpr, (int, float)) and gpr >= 0.6:
+        cut = _GPR_MAX_DAMPER * (min(float(gpr), 1.0) - 0.6) / 0.4
+        damper *= (1.0 - cut)
+        reasons.append(f"Geopolitical risk index {gpr:.2f} (elevated) — "
+                       f"conviction ×{1.0 - cut:.2f}")
+    return max(damper, _EVENT_DAMPER_FLOOR), reasons
+
 
 def _fundamentals_score(fundamental_result: dict | None) -> float | None:
     """Score in [-1, 1] from the CMA gap vs anchor, or None when unusable."""
@@ -97,7 +124,8 @@ def _conviction_band(conviction_pct: float) -> str:
 def evaluate(close: pd.Series, forecast_result: dict, sentiment_result: dict,
              mandate_key: str | None = None, portfolio_meta: dict | None = None,
              history_days: int | None = None, data_honesty: dict | None = None,
-             fundamental_result: dict | None = None) -> dict:
+             fundamental_result: dict | None = None,
+             macro_context: dict | None = None) -> dict:
     """Composite signal with mandate-aware weights and a numbers-backed rationale.
 
     Every threshold quoted in the rationale is the value actually used in the
@@ -149,7 +177,11 @@ def evaluate(close: pd.Series, forecast_result: dict, sentiment_result: dict,
         if vol > tgt_vol > 0:
             mandate_fit = float(np.clip(tgt_vol / vol, 0.5, 1.0))
 
-    score = float(np.clip(base_composite * vol_penalty * mandate_fit, -1, 1))
+    # Macro event risk (FOMC proximity, geopolitical stress) shrinks conviction
+    # transparently — the direction of the evidence is never altered.
+    event_damper, event_reasons = _event_risk_damper(macro_context)
+
+    score = float(np.clip(base_composite * vol_penalty * mandate_fit * event_damper, -1, 1))
     action = _to_action(score)
     conviction_pct = round(abs(score) * 100, 1)
     band = _conviction_band(conviction_pct)
@@ -159,7 +191,7 @@ def evaluate(close: pd.Series, forecast_result: dict, sentiment_result: dict,
     # weights — this is the horizon-sensitive leg (the Ridge forecast is over
     # the user's chart horizon by construction).
     tactical_composite = sum(tech_w[k] * raw[k] for k in ("trend", "momentum", "forecast", "sentiment"))
-    tactical_score = float(np.clip(tactical_composite * vol_penalty * mandate_fit, -1, 1))
+    tactical_score = float(np.clip(tactical_composite * vol_penalty * mandate_fit * event_damper, -1, 1))
     tactical = {
         "action": _to_action(tactical_score),
         "score": round(tactical_score, 3),
@@ -207,11 +239,19 @@ def evaluate(close: pd.Series, forecast_result: dict, sentiment_result: dict,
     if not has_fundamentals:
         caveats.append("No usable fundamentals for this instrument — rating is the "
                        "technical blend only (no strategic track).")
+    caveats.extend(event_reasons)
+    # Sector-level policy pressure is context (never scored): flag it honestly.
+    sector_policy = (macro_context or {}).get("sector_policy")
+    if sector_policy:
+        caveats.append(
+            f"White House policy activity touching {sector_policy.get('sector')} "
+            f"({sector_policy.get('n_actions')} recent action(s); themes: "
+            f"{', '.join(sector_policy.get('themes') or [])}) — headline/policy risk.")
     headline = _headline(action, conviction_pct, band, ordered, vol, vol_penalty,
                          mandate_fit, mandate_key, mlabel, portfolio_meta, caveats,
                          tactical=tactical, strategic=strategic)
 
-    return {
+    result = {
         "action": action,
         "score": round(score, 3),
         "conviction_pct": conviction_pct,
@@ -225,6 +265,12 @@ def evaluate(close: pd.Series, forecast_result: dict, sentiment_result: dict,
         "headline_rationale": headline,
         "caveats": caveats,
     }
+    if macro_context is not None:
+        result["event_risk_damper"] = round(event_damper, 3)
+        result["macro"] = {k: macro_context.get(k) for k in
+                           ("fomc_imminent", "fomc_days_until", "gpr_index",
+                            "fed_stance_label", "fed_stance_score") if k in macro_context}
+    return result
 
 
 def _fundamentals_clause(raw, eff_w, contrib, fr: dict) -> str:

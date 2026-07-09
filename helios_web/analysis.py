@@ -9,8 +9,8 @@ from flask import Blueprint, request
 
 from engine import (
     backtest, cma, data, evidence_lab, forecast, fundamentals, holdings, indicators, macro,
-    news, opportunity, portfolio, provenance, regime, sec_events, sentiment, signal_journal,
-    signals, strategy,
+    macro_events, news, opportunity, portfolio, provenance, regime, sec_events, sentiment,
+    signal_journal, signals, strategy,
 )
 
 from .core import (
@@ -258,7 +258,25 @@ def _strategy_request_args():
 
 @bp.route("/api/command-center")
 def command_center():
-    return ok(_command_center_payload())
+    payload = _command_center_payload()
+    # Macro block rides the warmed cache: the auto-live loop refreshes it, so
+    # the landing view never blocks on three feed fetches.
+    payload["macro"] = macro_events.compact_summary(macro_events.snapshot_cached())
+    return ok(payload)
+
+
+@bp.route("/api/macro")
+def macro_intelligence():
+    """Full macro snapshot: Fed stance (hawk/dove over official press+speeches),
+    White House policy themes with sector pressure, geopolitical risk index,
+    FOMC proximity, and the live rate context."""
+    force = (request.args.get("refresh") or "").lower() in {"1", "true", "yes"}
+    snap = macro_events.macro_snapshot(force=force)
+    return ok({
+        **snap,
+        "rates": macro.rate_context(),
+        "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+    })
 
 
 @bp.route("/api/analyze")
@@ -291,7 +309,13 @@ def analyze():
     # and the signal honestly reports a technicals-only rating.
     fnd = fundamentals.fetch(inst.symbol)
     fwd = cma.instrument_forward(inst.symbol, fnd)
-    sig = signals.evaluate(close, fc, sent, history_days=len(close), fundamental_result=fwd)
+    # Macro layer: Fed stance, White House policy pressure on this sector, and
+    # geopolitical event risk feed the rating as transparent conviction dampers
+    # and caveats (30-min cached; unavailable sources are never assumed calm).
+    macro_snap = macro_events.macro_snapshot()
+    macro_ctx = macro_events.build_macro_context(fwd.get("sector") or "", macro_snap)
+    sig = signals.evaluate(close, fc, sent, history_days=len(close),
+                           fundamental_result=fwd, macro_context=macro_ctx)
     bt = backtest.run(close)
     metrics = indicators.metrics_summary(close)
     journal_entry = _record_instrument_signal(inst, close, sig, horizon)
@@ -311,6 +335,7 @@ def analyze():
         # Regulatory event context (8-K material events + Form 4 insider trades).
         # Cached 1h; offline -> {"available": False} rather than fabricated calm.
         "sec_events": sec_events.events_for(inst.symbol),
+        "macro": macro_events.compact_summary(macro_snap),
         "signal": sig,
         "signal_journal_entry": journal_entry,
         "backtest": bt,

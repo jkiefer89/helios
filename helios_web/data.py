@@ -80,6 +80,13 @@ def _auto_live_worker(config: dict) -> None:
                     _sec.events_for(inst.symbol)
         except Exception:
             pass  # events are context, never worth failing the refresh loop
+        # Warm the macro snapshot (Fed/policy/geopolitics) the same way — the
+        # radar and command center read cached-only; 30-min TTL inside.
+        try:
+            from engine import macro_events as _macro_ev
+            _macro_ev.macro_snapshot()
+        except Exception:
+            pass
         _AUTO_LIVE_STOP.wait(config["interval_seconds"])
 
 

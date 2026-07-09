@@ -47,6 +47,11 @@ def ai_question():
     return _ai_call("answer_question", require_question=True)
 
 
+@bp.route("/api/ai/macro/brief", methods=["POST"])
+def ai_macro_brief():
+    return _ai_call("macro_brief")
+
+
 @bp.route("/api/ai/chat", methods=["POST"])
 def ai_chat():
     """Multi-turn research dialogue: {messages: [{role, content}...], payload: {...}}."""

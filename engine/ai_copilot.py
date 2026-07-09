@@ -180,6 +180,12 @@ class AIProvider:
     def answer_question(self, payload: dict[str, Any], question: str, regenerate: bool = False) -> dict[str, Any]:
         return self._run("question", payload, question=question, regenerate=regenerate)
 
+    def macro_brief(self, payload: dict[str, Any], regenerate: bool = False) -> dict[str, Any]:
+        """Analyst read of the macro snapshot: Fed stance, policy themes,
+        geopolitical risk, and what it means for positioning — pointed, sourced
+        from the deterministic snapshot only (the numbers never come from AI)."""
+        return self._run("macro_brief", payload, regenerate=regenerate)
+
     def chat(self, messages: list, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         """Multi-turn research dialogue over a sanitized Helios context.
 
@@ -267,14 +273,29 @@ class AnthropicProvider(AIProvider):
             privacy_warning="Sends sanitized Helios metrics to Anthropic Claude.",
         )
 
+    def _is_fable(self) -> bool:
+        return str(self.model or "").startswith(("claude-fable", "claude-mythos"))
+
+    def _fable_extras(self, body: dict, headers: dict) -> None:
+        """Claude Fable 5 API differences: thinking is always on (consumes
+        output tokens), and safety classifiers can decline requests. Opt into
+        the server-side fallback so a decline is transparently re-served by
+        Opus 4.8 inside the same call (Anthropic's recommended default)."""
+        if not self._is_fable():
+            return
+        body["fallbacks"] = [{"model": "claude-opus-4-8"}]
+        headers["anthropic-beta"] = "server-side-fallback-2026-06-01"
+
     def _complete(self, prompt: dict[str, Any]) -> str:
         api_key = os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
             raise AIUnavailableError("ANTHROPIC_API_KEY is missing.", self.status())
-        # No sampling params: Opus 4.7+ rejects temperature/top_p/top_k with a 400.
+        # No sampling params: Opus 4.7+ rejects temperature/top_p/top_k with a
+        # 400. max_tokens is generous because adaptive/always-on thinking counts
+        # against it — 1800 truncated Fable 5 answers mid-JSON.
         body = {
             "model": self.model,
-            "max_tokens": 1800,
+            "max_tokens": 8000,
             "system": prompt["system"],
             "messages": [{"role": "user", "content": prompt["user"]}],
         }
@@ -283,12 +304,13 @@ class AnthropicProvider(AIProvider):
             "x-api-key": api_key,
             "anthropic-version": "2023-06-01",
         }
+        self._fable_extras(body, headers)
         try:
             response = _post_json(
                 "https://api.anthropic.com/v1/messages",
                 body,
                 headers,
-                timeout=self.config.timeout_s,
+                timeout=max(self.config.timeout_s, 120 if self._is_fable() else 60),
             )
         except TimeoutError as exc:
             raise AITimeoutError("Claude request timed out.", self.status()) from exc
@@ -298,6 +320,10 @@ class AnthropicProvider(AIProvider):
             raise AIProviderError(f"Claude provider returned HTTP {exc.code}.", self.status()) from exc
         except urllib.error.URLError as exc:
             raise AIProviderError("Claude provider is unreachable.", self.status()) from exc
+        if isinstance(response, dict) and response.get("stop_reason") == "refusal":
+            raise AIProviderError(
+                "Claude declined this request (safety classifier) and no fallback served it.",
+                self.status())
         content = response.get("content") if isinstance(response, dict) else None
         if not isinstance(content, list):
             raise AIProviderError("Claude provider returned an unexpected response.", self.status())
@@ -319,10 +345,11 @@ class AnthropicProvider(AIProvider):
                         "recompute them):\n" + json.dumps(sanitized, sort_keys=True, separators=(",", ":"))),
         }]
         convo.extend(history)
-        # No sampling params: Opus 4.7+ rejects temperature/top_p/top_k with a 400.
+        # No sampling params: Opus 4.7+ rejects temperature/top_p/top_k with a
+        # 400. Generous max_tokens: always-on thinking (Fable 5) counts here.
         body = {
             "model": self.model,
-            "max_tokens": 2500,
+            "max_tokens": 8000,
             "system": DIALOGUE_SYSTEM,
             "messages": convo,
         }
@@ -331,12 +358,13 @@ class AnthropicProvider(AIProvider):
             "x-api-key": api_key,
             "anthropic-version": "2023-06-01",
         }
+        self._fable_extras(body, headers)
         try:
             response = _post_json(
                 "https://api.anthropic.com/v1/messages",
                 body,
                 headers,
-                timeout=max(self.config.timeout_s, 60),
+                timeout=max(self.config.timeout_s, 150 if self._is_fable() else 60),
             )
         except TimeoutError as exc:
             raise AITimeoutError("Claude request timed out.", st) from exc
@@ -346,6 +374,9 @@ class AnthropicProvider(AIProvider):
             raise AIProviderError(f"Claude provider returned HTTP {exc.code}.", st) from exc
         except urllib.error.URLError as exc:
             raise AIProviderError("Claude provider is unreachable.", st) from exc
+        if isinstance(response, dict) and response.get("stop_reason") == "refusal":
+            raise AIProviderError(
+                "Claude declined this request (safety classifier) and no fallback served it.", st)
         content = response.get("content") if isinstance(response, dict) else None
         if not isinstance(content, list):
             raise AIProviderError("Claude provider returned an unexpected response.", st)
@@ -924,10 +955,19 @@ def _normalize_result(result: dict[str, Any], provider: str, model: str) -> dict
     return normalized
 
 
+# "risk-free" as an ASSURANCE is forbidden; "risk-free rate/yield/curve/..."
+# is standard finance vocabulary and must never be censored (it made the macro
+# brief read "[unsupported assurance removed] rate" for the 3M T-bill).
+_TERM_OF_ART_EXCEPTIONS = {
+    "risk-free": r"(?!\s+(?:rate|rates|yield|yields|return|returns|benchmark|curve|proxy|asset|assets))",
+}
+
+
 def _remove_forbidden_phrases(result: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     blocked = []
     for phrase in FORBIDDEN_PHRASES:
-        pattern = re.compile(re.escape(phrase), re.IGNORECASE)
+        pattern = re.compile(re.escape(phrase) + _TERM_OF_ART_EXCEPTIONS.get(phrase, ""),
+                             re.IGNORECASE)
         if pattern.search(_result_text(result)):
             blocked.append(phrase)
             result = _map_strings(result, lambda s, p=pattern: p.sub("[unsupported assurance removed]", s))
