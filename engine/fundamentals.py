@@ -130,9 +130,11 @@ def _yfinance_provider(ticker: str) -> dict:
     # as a 38% one. earningsGrowth is already a fraction and passes through.
     dy = info.get("dividendYield")
     dy = dy / 100.0 if isinstance(dy, (int, float)) and dy == dy else None
-    # debtToEquity is reported as a percent (145.6 == 1.456x); normalize to a ratio.
+    # debtToEquity is uniformly reported as a percent (145.6 == 1.456x, 6.5 ==
+    # 0.065x) — always normalize; a >N heuristic would overstate low-leverage
+    # names 100x (review finding, verified live: NVDA 6.555 -> 0.066x).
     dte = _num(info.get("debtToEquity"))
-    if dte is not None and dte > 20:
+    if dte is not None:
         dte = dte / 100.0
     return {
         "dividend_yield": dy,
@@ -185,7 +187,11 @@ def _fmp_forward(estimates, price):
         return None, None
     rows.sort()
     year_now = datetime.date.today().year
-    future = [r for r in rows if r[0] >= year_now] or rows
+    # Past-only estimate rows must NOT masquerade as forward figures — the CMA
+    # falls back to trailing P/E + sector-anchor growth honestly instead.
+    future = [r for r in rows if r[0] >= year_now]
+    if not future:
+        return None, None
     near, far = future[0], future[-1]
     growth = None
     if near[1] and far[1] and near[1] > 0 and far[1] > 0 and far[0] > near[0]:
@@ -203,13 +209,16 @@ def _fmp_reject_legacy(payload):
 
 
 def _fmp_next_earnings(earnings) -> str:
-    """Next scheduled report date (epsActual still null) from /stable/earnings."""
+    """Next scheduled report date from /stable/earnings — must be TODAY OR
+    LATER (FMP sometimes lags backfilling epsActual on past dates; a stale
+    past date must never be shown as the next report)."""
+    today = datetime.date.today().isoformat()
     upcoming = []
     for row in earnings or []:
         if not isinstance(row, dict):
             continue
         date = str(row.get("date") or "")[:10]
-        if len(date) == 10 and row.get("epsActual") is None:
+        if len(date) == 10 and date >= today and row.get("epsActual") is None:
             upcoming.append(date)
     return min(upcoming) if upcoming else ""
 
@@ -404,8 +413,12 @@ def _auto_provider(ticker: str) -> dict:
 # Default-provider results are cached for a few hours: fundamentals move on
 # earnings cadence, not tick cadence, and /api/analyze must not re-hit the
 # provider on every request. Explicit-provider calls (tests) bypass the cache.
+# Unusable (empty) results are negative-cached with a SHORT TTL so a degraded
+# upstream is probed at most once per window instead of stalling every
+# analyze call (worst case was ~9 sequential 12s timeouts per uncovered name).
 _FETCH_CACHE: dict[str, tuple[float, "Fundamentals"]] = {}
 _FETCH_CACHE_TTL_S = 6 * 3600.0
+_FETCH_CACHE_EMPTY_TTL_S = 15 * 60.0
 _FETCH_CACHE_MAX = 512
 
 
@@ -432,8 +445,10 @@ def fetch(ticker: str, provider=None) -> Fundamentals:
     if use_default:
         with _PROVIDER_LOCK:
             hit = _FETCH_CACHE.get(sym)
-            if hit and _cache_now() - hit[0] < _FETCH_CACHE_TTL_S:
-                return hit[1]
+            if hit:
+                ttl = _FETCH_CACHE_TTL_S if hit[1].usable else _FETCH_CACHE_EMPTY_TTL_S
+                if _cache_now() - hit[0] < ttl:
+                    return hit[1]
         provider = _DEFAULT_PROVIDER or _auto_provider
     try:
         raw = provider(sym) or {}
@@ -447,7 +462,10 @@ def fetch(ticker: str, provider=None) -> Fundamentals:
             dividend_yield=_coerce_fraction(raw.get("dividend_yield")),
             forward_pe=_coerce_pe(raw.get("forward_pe")),
             trailing_pe=_coerce_pe(raw.get("trailing_pe")),
-            earnings_growth=_coerce_fraction(raw.get("earnings_growth")),
+            # All providers deliver growth as a true fraction and legitimate
+            # values exceed 150% (recovery years); the percent heuristic would
+            # corrupt 5.8 -> 0.058. The CMA's _GROWTH_CAP clips extremes.
+            earnings_growth=_num(raw.get("earnings_growth")),
             sector=str(raw.get("sector") or ""),
             source=str(raw.get("source") or ("yfinance" if use_default else "provider")),
             # roe/margins/revenue growth are true fractions from both providers and
@@ -463,7 +481,7 @@ def fetch(ticker: str, provider=None) -> Fundamentals:
             n_analysts=int(raw["n_analysts"]) if isinstance(raw.get("n_analysts"), (int, float)) else None,
             next_earnings_date=str(raw.get("next_earnings_date") or ""),
         )
-    if use_default and result.usable:  # cache real answers only; retry empties next call
+    if use_default:  # empties negative-cache briefly; usable answers cache long
         with _PROVIDER_LOCK:
             if len(_FETCH_CACHE) >= _FETCH_CACHE_MAX:
                 _FETCH_CACHE.pop(next(iter(_FETCH_CACHE)), None)

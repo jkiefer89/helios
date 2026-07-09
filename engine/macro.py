@@ -169,9 +169,11 @@ def asset_class_return(asset_class: str | None) -> float:
     """
     rf = risk_free()
     label = (asset_class or "").strip().lower()
-    if "cash" in label or "short-term" in label:
+    # Repurchase agreements (N-PORT 'Repurchase agreement') are collateralized
+    # cash-like sleeves — they must never earn the derivatives/unknown premium.
+    if "cash" in label or "short-term" in label or "repurchase" in label or "repo" in label:
         return rf
-    if "debt" in label:
+    if "debt" in label or "bond" in label or "fixed income" in label:
         return rf + 0.005
     if "asset-backed" in label or "loan" in label or "structured" in label:
         return rf + 0.02
