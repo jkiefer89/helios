@@ -59,20 +59,35 @@ def holding_expected_return(ticker, weight_pct, asset_class, fundamentals,
                              {"asset_class_anchor": round(er, 4)})
 
     if fundamentals is not None and getattr(fundamentals, "usable", False):
+        pe = fundamentals.forward_pe or fundamentals.trailing_pe
+        # Equity evidence means a real earnings signal: reported growth or a
+        # positive P/E. A provider-stamped SECTOR label alone does not count —
+        # FMP tags bond ETFs "Financial Services" (BND, verified live), and the
+        # old guard then fabricated a 7%/yr financials growth block onto a bond
+        # fund. Yield-only holdings refuse the equity building block entirely;
+        # the rating honestly falls back to the technical blend.
+        has_equity_evidence = bool(fundamentals.earnings_growth is not None
+                                   or (pe and pe > 0))
+        if not has_equity_evidence:
+            return HoldingReturn(ticker, weight_pct, None, "generic", False, {
+                "reason": ("yield-only fundamentals — no earnings evidence (P/E or "
+                           "growth); refusing to apply an equity growth anchor")})
         dy = _clip(fundamentals.dividend_yield or 0.0, *_DY_CAP)
         g = _clip(fundamentals.earnings_growth if fundamentals.earnings_growth is not None else
                   _macro.sector_anchor(fundamentals.sector)["growth"], *_GROWTH_CAP)
-        pe = fundamentals.forward_pe or fundamentals.trailing_pe
         rev = 0.0
         if pe and pe > 0:
             fair = _macro.sector_anchor(fundamentals.sector)["fair_pe"]
             rev = _clip(math.log(fair / pe) / horizon_years, *_REVERSION_CAP)
         er = _clip(dy + g + rev, *_ER_CAP)
-        return HoldingReturn(ticker, weight_pct, er, "fundamentals", True, {
+        blocks = {
             "dividend_yield": round(dy, 4),
             "earnings_growth": round(g, 4),
             "valuation_reversion": round(rev, 4),
-        })
+        }
+        if fundamentals.earnings_growth is None:
+            blocks["growth_basis"] = "sector_anchor"  # substituted, not reported — flagged
+        return HoldingReturn(ticker, weight_pct, er, "fundamentals", True, blocks)
 
     # Equity name with no usable fundamentals: defer to the generic anchor.
     return HoldingReturn(ticker, weight_pct, None, "generic", False,

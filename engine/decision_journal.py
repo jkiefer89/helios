@@ -16,7 +16,7 @@ are honestly marked not-measurable rather than scored against synthetic prices.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
 
 import pandas as pd
@@ -135,10 +135,33 @@ def evaluate_outcomes(entry: dict[str, Any]) -> dict[str, Any]:
     """Fill in any newly-measurable horizon outcomes for one decision."""
     if entry.get("outcome_status") == "not_measurable":
         return entry
+    # Decisions recorded against a stale price history must not be scored as
+    # if made at that stale date — later backfilled bars would grant the
+    # decision hindsight it never had (review finding). The decision date must
+    # sit at/after the record date minus a small settlement window.
+    created = str(entry.get("created_at") or "")[:10]
+    decision_date = str(entry.get("decision_date") or "")
+    if created and decision_date:
+        try:
+            lag = (date.fromisoformat(created) - date.fromisoformat(decision_date)).days
+        except ValueError:
+            lag = None
+        if lag is not None and lag > 7:
+            persistence.get_store().update_decision_outcomes(
+                entry["decision_id"], {}, "not_measurable",
+                datetime.now(timezone.utc).isoformat())
+            return {**entry, "outcome_status": "not_measurable",
+                    "outcomes": {},
+                    "not_measurable_reason": (f"price history was {lag} days stale at record "
+                                              "time — scoring it would grant hindsight")}
     try:
-        close, _, _, _ = _target_series(entry["target_kind"], entry["target_id"])
+        close, _, data_mode, _ = _target_series(entry["target_kind"], entry["target_id"])
     except ValueError:
         return entry  # target was deleted; leave the decision as recorded
+    # Provenance re-check at evaluation time: if the target's data is no longer
+    # real (e.g. replaced by sample/demo history), never measure against it.
+    if data_mode != "real":
+        return entry
     bench_close = pd.Series(dtype=float)
     try:
         bench = data.get(str(entry.get("benchmark") or ""))

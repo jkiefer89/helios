@@ -194,20 +194,30 @@ class EdgarClient:
 
     _CACHE_MAX = 64
 
+    # URL bodies expire after this long: submissions JSON changes with every
+    # new filing, so a forever-cache froze 8-K/Form 4 data at first fetch for
+    # the process lifetime while sec_events stamped it with a fresh as_of
+    # (review finding). Filing documents themselves are immutable, but a
+    # uniform short TTL is the simple honest policy — and it also bounds the
+    # damage of a cached 200-status SEC maintenance page to one TTL window.
+    _CACHE_TTL_S = 15 * 60.0
+
     def __init__(self, http_get=None, user_agent: str | None = None, timeout: float = 12.0):
         self.user_agent = user_agent or _DEFAULT_UA
         self.timeout = float(timeout)
         if http_get is None:
             http_get = lambda url, headers: _urllib_get(url, headers, self.timeout)  # noqa: E731
         self._http_get = http_get
-        self._cache: dict[str, str] = {}
+        self._cache: dict[str, tuple[float, str]] = {}
         self._lock = threading.RLock()
 
     # -- raw fetch + cache ------------------------------------------------- #
     def get_text(self, url: str) -> str:
+        import time as _time
         with self._lock:
-            if url in self._cache:
-                return self._cache[url]
+            hit = self._cache.get(url)
+            if hit and _time.monotonic() - hit[0] < self._CACHE_TTL_S:
+                return hit[1]
         headers = {"User-Agent": self.user_agent, "Accept": "application/json, text/xml, */*"}
         try:
             text = self._http_get(url, headers)
@@ -220,7 +230,7 @@ class EdgarClient:
         with self._lock:
             if url not in self._cache and len(self._cache) >= self._CACHE_MAX:
                 self._cache.pop(next(iter(self._cache)), None)
-            self._cache[url] = text
+            self._cache[url] = (_time.monotonic(), text)
         return text
 
     def get_json(self, url: str) -> dict | list:
@@ -299,11 +309,18 @@ class EdgarClient:
     def fetch_nport(self, resolution: Resolution, submissions: dict | None = None) -> NportReport:
         if resolution.kind != "fund":
             raise EdgarError(f"{resolution.symbol} is not a registered fund; no N-PORT look-through.")
-        # Per-series lookup first (correct for multi-series trusts); fall back to
-        # the registrant's recent-filing scan for single-series registrants.
+        # Per-series lookup for multi-series trusts. When a series id EXISTS,
+        # never fall back to the trust-level recent-filings scan — on a
+        # multi-series trust that returns a DIFFERENT fund's N-PORT and would
+        # present a sibling fund's holdings as this one's (review finding).
         filing = None
         if resolution.series_id:
             filing = self.latest_filing_for_series(resolution.series_id, ["NPORT-P", "NPORT-P/A"])
+            if filing is None:
+                raise EdgarError(
+                    f"No N-PORT-P found for series {resolution.series_id} ({resolution.symbol}); "
+                    "refusing the trust-level fallback — it can return a sibling fund's holdings."
+                )
         if filing is None:
             subs = submissions or self.get_submissions(resolution.cik)
             filing = self.latest_filing(subs, ["NPORT-P", "NPORT-P/A"])

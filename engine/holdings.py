@@ -92,9 +92,11 @@ def fetch_lookthrough(symbol: str, client=None, use_cache: bool = True) -> LookT
     client = client or default_client()
     result = _resolve_uncached(sym, client)
 
-    if use_cache and result.kind != "unresolved":
-        # Only cache confident outcomes; a transient network failure should be
-        # retryable on the next call rather than stick as "unresolved".
+    if use_cache and result.resolved:
+        # Only cache SUCCESSFUL look-throughs. The old kind != "unresolved"
+        # guard permanently cached funds whose N-PORT fetch FAILED (they come
+        # back kind='fund' with resolved=False), freezing a transient SEC
+        # failure into a forever-empty look-through (review finding).
         with _CACHE_LOCK:
             if sym not in _CACHE and len(_CACHE) >= _CACHE_MAX:
                 _CACHE.pop(next(iter(_CACHE)), None)

@@ -440,7 +440,7 @@ function LongForecastPanel({ forecast, mandate }: { forecast: LongForecast; mand
         {stats.map((stat) => <StatTile key={stat.label} label={stat.label} value={stat.value} tone={stat.tone} />)}
       </div>
       <div className={`notice ${breachPct > 20 ? "danger" : ""}`}>
-        {fmtNumber(breachPct, 0)}% of simulated paths breach the mandate&apos;s {tolerance != null ? `−${fmtNumber(tolerance, 0)}%` : "maximum"} drawdown tolerance
+        {breachPct > 0 && breachPct < 0.5 ? "<1" : fmtNumber(breachPct, 0)}% of simulated paths breach the mandate&apos;s {tolerance != null ? `−${fmtNumber(tolerance, 0)}%` : "maximum"} drawdown tolerance
         (worst-tail path drawdown {fmtNumber(forecast.drawdown_p95_pct, 0)}%).
       </div>
       <ForecastConeChart points={longConePoints(forecast)} baseline={forecast.base_value} ariaLabel={`${forecast.label} strategic value projection cone`} />

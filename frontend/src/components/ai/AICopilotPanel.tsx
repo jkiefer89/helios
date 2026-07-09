@@ -46,6 +46,13 @@ export function AICopilotPanel({
     void refreshStatus();
   }, [refreshStatus]);
 
+  // A narrative generated for one target must never stay rendered under a
+  // different target's header (review finding) — clear on context switch.
+  useEffect(() => {
+    setResult(null);
+    setError("");
+  }, [contextLabel]);
+
   const computedDataMode = useMemo(() => {
     const explicit = dataMode || readDataMode(payload);
     return (explicit || "").toLowerCase();

@@ -34,9 +34,11 @@ ITEM_LABELS = {
     "1.01": "entered a material agreement",
     "1.02": "terminated a material agreement",
     "1.03": "bankruptcy or receivership",
+    "1.05": "material cybersecurity incident",
     "2.01": "completed acquisition or disposition",
     "2.02": "results of operations (earnings)",
     "2.03": "created a direct financial obligation",
+    "2.04": "triggering event accelerating a financial obligation",
     "2.05": "exit/disposal costs",
     "2.06": "material impairment",
     "3.01": "delisting or listing-standard notice",
@@ -51,7 +53,8 @@ ITEM_LABELS = {
     "9.01": "exhibits",
 }
 # Items that should raise an eyebrow on their own.
-NOTABLE_ITEMS = {"1.02", "1.03", "2.05", "2.06", "3.01", "4.01", "4.02", "5.01", "5.02"}
+NOTABLE_ITEMS = {"1.02", "1.03", "1.05", "2.04", "2.05", "2.06", "3.01", "4.01", "4.02",
+                 "5.01", "5.02"}
 
 
 def invalidate_cache() -> None:
@@ -166,30 +169,50 @@ def events_for(symbol: str, window_days: int = WINDOW_DAYS, client=None) -> dict
 
     form4_rows = [r for r in rows if r["form"] == "4" and _within_window(r["filing_date"], cutoff)]
     parsed, purchases, sales = [], 0, 0
+    buy_shares = sell_shares = 0.0
+    attempted = fetch_failures = 0
     for row in form4_rows[:_FORM4_PARSE_BUDGET]:
         doc = row["primary_document"].split("/")[-1]  # strip the xsl viewer prefix
         if not doc.lower().endswith(".xml"):
             continue
+        attempted += 1
         try:
             xml_text = client.get_text(edgar.archives_doc_url(res.cik, row["accession"], doc))
         except edgar.EdgarError:
+            fetch_failures += 1  # counted honestly — never claimed as parsed
             continue
         detail = _parse_form4_xml(xml_text)
         if detail:
             parsed.append({"filing_date": row["filing_date"], **detail})
             purchases += detail["buys"]
             sales += detail["sells"]
+            buy_shares += detail["buy_shares"]
+            sell_shares += detail["sell_shares"]
 
+    # Direction by SHARE volume when known (a 50,000-share sale must outvote
+    # three 100-share buys — review finding), transaction counts as fallback.
+    if buy_shares or sell_shares:
+        net_signal = ("buying" if buy_shares > sell_shares else
+                      "selling" if sell_shares > buy_shares else "mixed")
+    else:
+        net_signal = ("buying" if purchases > sales else "selling" if sales > purchases
+                      else "mixed" if purchases else "none")
+    note = (f"Parsed {len(parsed)} of {len(form4_rows)} Form 4 filings "
+            f"({attempted} attempted, {fetch_failures} fetch failures); direction is "
+            "share-volume weighted; grants/exercises excluded — only open-market "
+            "trades (codes P/S) count.")
+    if fetch_failures and not parsed:
+        net_signal = "unknown"
+        note += " No filings could be parsed — insider direction is UNKNOWN, not calm."
     insider = {
         "filings_in_window": len(form4_rows),
         "parsed": parsed,
         "open_market_purchases": purchases,
         "open_market_sales": sales,
-        "net_signal": ("buying" if purchases > sales else "selling" if sales > purchases
-                       else "mixed" if purchases else "none"),
-        "note": (f"Parsed the {min(len(form4_rows), _FORM4_PARSE_BUDGET)} newest of "
-                 f"{len(form4_rows)} Form 4 filings; grants/exercises are excluded — "
-                 "only open-market trades (codes P/S) are counted."),
+        "buy_shares": round(buy_shares),
+        "sell_shares": round(sell_shares),
+        "net_signal": net_signal,
+        "note": note,
     }
     result = {
         "available": True,

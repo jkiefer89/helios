@@ -64,8 +64,11 @@ def headlines_for(symbol: str, company_name: str = "", max_records: int = 12) ->
     term = f'"{name}"' if len(name.split()) > 1 else (name or sym)
     query = f"{term} (stock OR shares OR earnings OR market)"
 
+    # Cache key includes the query inputs — a symbol-only key served one
+    # (name, max_records) variant's results to every caller (review finding).
+    cache_key = f"{sym}|{name.lower()}|{int(max_records)}"
     with _LOCK:
-        hit = _CACHE.get(sym)
+        hit = _CACHE.get(cache_key)
         if hit and time.monotonic() - hit[0] < _CACHE_TTL_S:
             return list(hit[1])
 
@@ -95,5 +98,5 @@ def headlines_for(symbol: str, company_name: str = "", max_records: int = 12) ->
     with _LOCK:
         if len(_CACHE) >= _CACHE_MAX:
             _CACHE.pop(next(iter(_CACHE)), None)
-        _CACHE[sym] = (time.monotonic(), titles)
+        _CACHE[cache_key] = (time.monotonic(), titles)
     return list(titles)

@@ -76,6 +76,10 @@ def test_outcomes_measured_from_forward_prices(store):
     store.update_decision_outcomes(entry["decision_id"], {}, "pending", "")
     raw = store.decision_journal(limit=10)[0]
     raw["decision_date"] = backdated
+    # Keep record time coherent with the backdated decision — a decision
+    # recorded long AFTER its price anchor is honestly not_measurable (the
+    # staleness guard), which is not what this test exercises.
+    raw["created_at"] = backdated + "T00:00:00+00:00"
     measured = decision_journal.evaluate_outcomes(raw)
     assert measured["outcomes"].get("21") is not None
     assert measured["outcomes"].get("252") is not None
@@ -197,3 +201,17 @@ def test_sec_events_offline_is_honest():
     assert ev["available"] is False
     assert "unreachable" in ev["reason"]
     assert sec_events.events_cached("TEST") is None
+
+
+def test_stale_price_anchor_blocks_outcome_scoring(store):
+    """A decision recorded against a price history >7 days stale must become
+    not_measurable — scoring it against later-backfilled bars grants hindsight."""
+    _upload("DECD", days=320)
+    entry = decision_journal.record_decision(
+        target_kind="instrument", target_id="DECD", my_action="BUY",
+        signal={"action": "BUY", "score": 0.5})
+    raw = dict(entry)
+    raw["decision_date"] = "2020-01-02"      # ancient anchor, recorded today
+    result = decision_journal.evaluate_outcomes(raw)
+    assert result["outcome_status"] == "not_measurable"
+    assert result["outcomes"] == {}

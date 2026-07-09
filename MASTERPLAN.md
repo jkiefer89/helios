@@ -49,6 +49,36 @@ journal** records the operator's calls vs the engine's and scores both at
 7. A degraded provider stalled every analyze up to ~108s → 15-min negative cache.
 8. Repo sleeves earned the derivatives premium; bond labels missed the debt branch → fixed anchors.
 
+**Second review pass (2026-07-09) — 48 findings confirmed, 32 refuted.**
+Fixed and regression-locked in this pass: bond funds receiving fabricated
+equity growth blocks (BND read strategic BUY at ~95% conviction — provider
+sector labels no longer count as equity evidence); FMP fiscal-year filter
+(reported years masqueraded as forward for non-December filers); EDGAR client
+forever-cache (stale 8-K/Form 4 served with fresh timestamps — 15-min TTL);
+multi-series N-PORT fallback returning a SIBLING fund's holdings; failed
+look-throughs cached forever; horizon-scaled forecast saturation (the tactical
+action no longer flips mechanically with the slider); NaN-truthy fallbacks;
+intraday cache-key collisions; insider signal now share-volume weighted with
+honest parse counts + 8-K items 1.05/2.04; copilot dict-KEY redaction, stance
+number-validation, chat-path scrubbing + injection guard, broadened dissent
+detection; measured journal results made immutable; decision outcomes gated on
+provenance-at-evaluation and stale-anchor hindsight; GDELT cache keying; FIGI
+share-class normalization; stale AI narratives cleared on target switch;
+sub-0.5% breach probabilities no longer render as "0%".
+
+**Backlog from pass 2 (confirmed, not yet fixed):** /api/analyze does ~30
+sequential network calls inline with no deadline (needs a fetch budget or
+background hydration); forecast_long band-inflation leaks into drift and
+monthly path sampling understates drawdown-breach probabilities (switch to
+weekly steps); trend/momentum/Ridge triple-count the same momentum evidence
+(reweight or orthogonalize); number-validation year-exemption and
+payload-key harvesting weaken the invented-number check; decision scoreboard
+mixes 21/63/252d outcomes in one hit rate and benchmarks everything vs SPY;
+expected_return_pct reports the median (relabel or report mean); rationale
+silently truncates at 800 chars; derivative-table Form 4s ignored; radar
+error-state and >200-decision count polish. Plus 19 findings whose verifiers
+hit the session limit — re-verify next session.
+
 **Review dimensions still owed a deep pass** (subagent capacity hit the 4am
 session limit): signal-math internals, web-layer threading, frontend state,
 ai-copilot sanitization, decision-journal edge cases, test-gap analysis.

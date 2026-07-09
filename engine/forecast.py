@@ -120,7 +120,12 @@ def forecast(close: pd.Series, horizon: int = 21, n_paths: int = 2000, alpha: fl
     hist_mu = float(r.tail(60).mean())
     sigma = float(r.tail(60).std())
     if not np.isfinite(sigma) or sigma <= 0:
-        sigma = float(r.std()) or 0.01
+        # NaN is truthy, so `float(r.std()) or 0.01` never fell back on the
+        # one case it existed for (whole-series std NaN on tiny series) and
+        # NaN cascaded into every band (review finding).
+        sigma = float(r.std())
+        if not np.isfinite(sigma) or sigma <= 0:
+            sigma = 0.01
 
     # Blend the model's view with the recent realized mean (shrinks noise),
     # then cap the drift so the implied annualized Sharpe stays <= ~1.5. This
@@ -205,7 +210,9 @@ def forecast_long(close: pd.Series, horizon_days: int, mandate_key: str = "balan
 
     sigma_252 = float(r.tail(252).std() * np.sqrt(252))
     if not np.isfinite(sigma_252) or sigma_252 <= 0:
-        sigma_252 = float(r.std() * np.sqrt(252)) or 0.10
+        sigma_252 = float(r.std() * np.sqrt(252))
+        if not np.isfinite(sigma_252) or sigma_252 <= 0:  # NaN is truthy — explicit check
+            sigma_252 = 0.10
     sigma_60 = float(r.tail(60).std() * np.sqrt(252))
     if not np.isfinite(sigma_60) or sigma_60 <= 0:
         sigma_60 = sigma_252  # fall back so the regime multiplier stays 1.0

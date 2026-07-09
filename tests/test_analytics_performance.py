@@ -115,7 +115,11 @@ def test_walk_forward_windows_match_per_prefix_reference():
 def test_series_key_identifies_series_and_rejects_empty():
     close = price_series(days=30)
     key = analytics_cache.series_key("AAPL", close)
-    assert key == ("AAPL", str(close.index[-1]), 30)
+    assert key == ("AAPL", str(close.index[-1]), 30, round(float(close.iloc[-1]), 6))
+    # An in-place revision of today's bar (same date, same rows) is a NEW key.
+    revised = close.copy()
+    revised.iloc[-1] = revised.iloc[-1] * 1.01
+    assert analytics_cache.series_key("AAPL", revised) != key
     assert analytics_cache.series_key("AAPL", pd.Series(dtype=float)) is None
     assert analytics_cache.series_key("AAPL", None) is None
 

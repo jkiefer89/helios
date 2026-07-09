@@ -98,7 +98,10 @@ def map_cusips(cusips, http_post=None, api_key: str | None = None, budget: int =
             if isinstance(item, dict):
                 rows = item.get("data")
                 if isinstance(rows, list) and rows:
-                    ticker = str(rows[0].get("ticker") or "").upper()
+                    # OpenFIGI writes share classes with a slash (BRK/B);
+                    # yfinance/FMP key them with a dash (BRK-B) — normalize so
+                    # the fundamentals join doesn't silently miss.
+                    ticker = str(rows[0].get("ticker") or "").upper().replace("/", "-")
             with _LOCK:
                 _CACHE[c] = ticker  # includes honest no-match ('') results
             if ticker:

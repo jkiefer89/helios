@@ -22,3 +22,4 @@ frontend/*.tsbuildinfo
 *.sqlite
 *.sqlite3
 *.db
+.venv-py39-backup/

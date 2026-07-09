@@ -50,9 +50,13 @@ def _momentum_score(f: pd.DataFrame, i: int) -> float:
     return float((rsi - 50) / 50 * 0.4)
 
 
-def _forecast_score(expected_return_pct: float) -> float:
-    # ~+/-5% over the horizon saturates the component.
-    return float(np.clip(expected_return_pct / 5.0, -1, 1))
+def _forecast_score(expected_return_pct: float, horizon_days: int = 21) -> float:
+    # The Ridge E[r] compounds ~linearly with the horizon, so a FIXED +/-5%
+    # saturation made the component's magnitude (and often the action) a
+    # mechanical function of the slider (review finding). Scale the saturation
+    # with the horizon instead: +/-5% at 21d, ~+/-21% at 90d, ~+/-1.2% at 5d.
+    saturation = 5.0 * max(int(horizon_days or 21), 1) / 21.0
+    return float(np.clip(expected_return_pct / saturation, -1, 1))
 
 
 def _sentiment_score(agg: float) -> float:
@@ -146,7 +150,8 @@ def evaluate(close: pd.Series, forecast_result: dict, sentiment_result: dict,
     raw = {
         "trend": _trend_score(f, i),
         "momentum": _momentum_score(f, i),
-        "forecast": _forecast_score(forecast_result.get("expected_return_pct", 0.0)),
+        "forecast": _forecast_score(forecast_result.get("expected_return_pct", 0.0),
+                                    forecast_result.get("horizon_days", 21)),
         "sentiment": _sentiment_score(sentiment_result.get("aggregate_score", 0.0)),
     }
     fund_raw = _fundamentals_score(fundamental_result)

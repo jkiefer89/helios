@@ -26,10 +26,19 @@ _STORE: "OrderedDict[tuple, Any]" = OrderedDict()
 
 
 def series_key(target_id: str, close: pd.Series | None) -> tuple | None:
-    """Cache key (target id, last price date, row count); None for empty series."""
+    """Cache key (target id, last price date, row count, last close).
+
+    The last close is included because an intraday refresh revises today's
+    partial bar in place — same date, same row count, different price — and
+    without it the radar kept serving the pre-revision candidate all day
+    (review finding)."""
     if close is None or len(close) == 0:
         return None
-    return (str(target_id), str(close.index[-1]), int(len(close)))
+    try:
+        last_px = round(float(close.iloc[-1]), 6)
+    except (TypeError, ValueError):
+        last_px = None
+    return (str(target_id), str(close.index[-1]), int(len(close)), last_px)
 
 
 def get(namespace: str, key: tuple | None) -> Any:

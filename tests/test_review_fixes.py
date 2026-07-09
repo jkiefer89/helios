@@ -151,3 +151,22 @@ def test_asset_class_anchors_for_repo_and_bond_labels():
     assert macro.asset_class_return("Fixed income") == pytest.approx(rf + 0.005)
     # Unknown sleeves still earn the coarse half-ERP premium (unchanged).
     assert macro.asset_class_return("Derivatives") > rf + 0.005
+
+
+# --------------------------------------------------------------------------- #
+# Pass-2 finding: bond/commodity funds must never receive a fabricated equity
+# growth block. Provider-stamped sector labels (FMP tags BND "Financial
+# Services") do NOT count as equity evidence — only a real P/E or growth does.
+# --------------------------------------------------------------------------- #
+def test_yield_only_fund_refuses_equity_building_block():
+    bnd_shaped = fundamentals.Fundamentals(
+        ticker="BND", dividend_yield=0.0399, sector="Financial Services", source="fmp")
+    fwd = cma.instrument_forward("BND", bnd_shaped)
+    assert fwd["usable"] is False
+    assert fwd["basis"] == "generic"
+    assert "expected_return_pct" not in fwd   # nothing fabricated
+    # A real equity with the same yield + sector but a P/E gets scored.
+    equity = fundamentals.Fundamentals(
+        ticker="JPM", dividend_yield=0.02, trailing_pe=14.0,
+        sector="financials", source="fmp")
+    assert cma.instrument_forward("JPM", equity)["usable"] is True

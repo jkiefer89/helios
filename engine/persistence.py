@@ -1243,13 +1243,30 @@ class SQLiteStore:
                       data_mode = excluded.data_mode,
                       eligible_for_real_research = excluded.eligible_for_real_research,
                       source_counts_json = excluded.source_counts_json,
-                      forward_status = excluded.forward_status,
-                      forward_start_date = excluded.forward_start_date,
-                      forward_end_date = excluded.forward_end_date,
-                      forward_result_pct = excluded.forward_result_pct,
-                      benchmark_result_pct = excluded.benchmark_result_pct,
-                      alpha_pct = excluded.alpha_pct,
-                      evaluated_at = excluded.evaluated_at,
+                      -- A MEASURED forward result is immutable evidence: a
+                      -- re-record of the same dedupe key must never regress it
+                      -- to pending and erase the measurement (review finding).
+                      forward_status = CASE WHEN signal_journal.forward_status = 'measured'
+                                            THEN signal_journal.forward_status
+                                            ELSE excluded.forward_status END,
+                      forward_start_date = CASE WHEN signal_journal.forward_status = 'measured'
+                                                THEN signal_journal.forward_start_date
+                                                ELSE excluded.forward_start_date END,
+                      forward_end_date = CASE WHEN signal_journal.forward_status = 'measured'
+                                              THEN signal_journal.forward_end_date
+                                              ELSE excluded.forward_end_date END,
+                      forward_result_pct = CASE WHEN signal_journal.forward_status = 'measured'
+                                                THEN signal_journal.forward_result_pct
+                                                ELSE excluded.forward_result_pct END,
+                      benchmark_result_pct = CASE WHEN signal_journal.forward_status = 'measured'
+                                                  THEN signal_journal.benchmark_result_pct
+                                                  ELSE excluded.benchmark_result_pct END,
+                      alpha_pct = CASE WHEN signal_journal.forward_status = 'measured'
+                                       THEN signal_journal.alpha_pct
+                                       ELSE excluded.alpha_pct END,
+                      evaluated_at = CASE WHEN signal_journal.forward_status = 'measured'
+                                          THEN signal_journal.evaluated_at
+                                          ELSE excluded.evaluated_at END,
                       metadata_json = excluded.metadata_json
                     """,
                     (

@@ -181,21 +181,24 @@ def _fmp_forward(estimates, price):
         # v3 legacy: estimatedEpsAvg; stable API: epsAvg.
         eps = _num(e.get("estimatedEpsAvg")) or _num(e.get("epsAvg"))
         date = str(e.get("date") or "")[:10]
-        if eps is not None and len(date) >= 4 and date[:4].isdigit():
-            rows.append((int(date[:4]), eps))
+        if eps is not None and len(date) == 10 and date[:4].isdigit():
+            rows.append((date, eps))
     if not rows:
         return None, None
     rows.sort()
-    year_now = datetime.date.today().year
-    # Past-only estimate rows must NOT masquerade as forward figures — the CMA
-    # falls back to trailing P/E + sector-anchor growth honestly instead.
-    future = [r for r in rows if r[0] >= year_now]
+    # Past-period rows must NOT masquerade as forward figures. Compare the FULL
+    # fiscal-period-end date against today: a calendar-year compare let NVDA's
+    # already-reported January-ending FY2026 pass as "forward" until December
+    # (review finding — a trailing P/E labeled forward, ~38% overstated).
+    today = datetime.date.today().isoformat()
+    future = [r for r in rows if r[0] > today]
     if not future:
         return None, None
     near, far = future[0], future[-1]
+    near_year, far_year = int(near[0][:4]), int(far[0][:4])
     growth = None
-    if near[1] and far[1] and near[1] > 0 and far[1] > 0 and far[0] > near[0]:
-        growth = (far[1] / near[1]) ** (1.0 / (far[0] - near[0])) - 1.0
+    if near[1] and far[1] and near[1] > 0 and far[1] > 0 and far_year > near_year:
+        growth = (far[1] / near[1]) ** (1.0 / (far_year - near_year)) - 1.0
     forward_pe = (price / near[1]) if price and near[1] and near[1] > 0 else None
     return forward_pe, growth
 
@@ -300,9 +303,13 @@ _INTRINIO_TAGS = {
 # "real estate"). Map keywords in industry_category first, then sector, to the
 # anchor vocabulary macro.sector_anchor understands; unknown -> "" (market anchor).
 _INTRINIO_SECTOR_KEYWORDS = (
-    ("real estate", "real estate"),
+    # FINANCIAL keywords must be tested BEFORE "real estate": the SIC division
+    # string "Finance, Insurance, And Real Estate" contains both, and testing
+    # real estate first put every bank/insurer on the real-estate anchor when
+    # industry_category was empty (review finding).
     ("bank", "financials"), ("insur", "financials"), ("financ", "financials"),
     ("invest", "financials"), ("securit", "financials"),
+    ("real estate", "real estate"),
     ("software", "technology"), ("computer", "technology"), ("semicond", "technology"),
     ("internet", "technology"), ("technology", "technology"),
     ("telecom", "communication services"), ("communicat", "communication services"),
@@ -478,7 +485,10 @@ def fetch(ticker: str, provider=None) -> Fundamentals:
             current_price=_num(raw.get("current_price")),
             target_mean_price=_num(raw.get("target_mean_price")),
             analyst_rating=_num(raw.get("analyst_rating")),
-            n_analysts=int(raw["n_analysts"]) if isinstance(raw.get("n_analysts"), (int, float)) else None,
+            n_analysts=(int(raw["n_analysts"])
+                        if isinstance(raw.get("n_analysts"), (int, float))
+                        and raw["n_analysts"] == raw["n_analysts"]          # NaN guard
+                        and abs(raw["n_analysts"]) < 10_000 else None),
             next_earnings_date=str(raw.get("next_earnings_date") or ""),
         )
     if use_default:  # empties negative-cache briefly; usable answers cache long
