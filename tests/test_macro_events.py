@@ -165,3 +165,56 @@ def test_sector_policy_pressure_becomes_caveat():
         "fomc_imminent": False, "gpr_index": 0.2,
         "sector_policy": {"sector": "technology", "n_actions": 2, "themes": ["trade"]}})
     assert any("policy activity touching technology" in c for c in sig["caveats"])
+
+
+def test_fed_full_text_scoring_outweighs_neutral_titles():
+    """Administrative titles score ~0; the stance must come from the fetched
+    document body when available (weighted 3x)."""
+    neutral_rss = """<?xml version="1.0" encoding="utf-8" ?>
+<rss version="2.0"><channel><title>FRB</title>
+<item><title>Minutes of the Federal Open Market Committee, June 2026</title>
+<link>https://www.federalreserve.gov/doc1</link><pubDate>x</pubDate>
+<description></description></item>
+</channel></rss>"""
+    hawkish_body = ("<html><body>" + "Participants judged inflation elevated and persistent; "
+                    "further tightening and a restrictive stance may be warranted; "
+                    "the Committee remains vigilant to upside risks. " * 20 + "</body></html>")
+
+    def fake(url):
+        if "federalreserve.gov/doc1" in url:
+            return hawkish_body
+        if "federalreserve" in url:
+            return neutral_rss
+        if "whitehouse" in url:
+            return _WH_RSS
+        if "gdeltproject" in url:
+            return _GDELT_CALM
+        raise AssertionError(url)
+
+    macro_events.set_http(fake)
+    snap = macro_events.macro_snapshot(force=True)
+    fed = snap["fed"]
+    assert fed["n_full_text"] >= 1
+    assert fed["stance_label"] == "hawkish"
+    assert any(d["scored"] == "full_text" for d in fed["documents"])
+
+
+def test_fed_full_text_fetch_failure_falls_back_to_title():
+    def fake(url):
+        if url.endswith("press_monetary.xml") or url.endswith("speeches.xml"):
+            return _FED_RSS.replace("https://fed.example", "https://www.federalreserve.gov/x")
+        if "federalreserve.gov/x" in url:
+            raise OSError("body fetch failed")
+        if "whitehouse" in url:
+            return _WH_RSS
+        if "gdeltproject" in url:
+            return _GDELT_CALM
+        raise AssertionError(url)
+
+    macro_events.set_http(fake)
+    snap = macro_events.macro_snapshot(force=True)
+    fed = snap["fed"]
+    assert fed["available"] is True
+    assert fed["n_full_text"] == 0
+    assert all(d["scored"] == "title" for d in fed["documents"])
+    assert fed["stance_label"] == "hawkish"   # title lexicon still works

@@ -194,7 +194,8 @@ def _parse_rss(xml_text: str, cap: int = _FEED_ITEM_CAP) -> list[dict]:
 
 
 def _lexicon_score(text: str, positive: dict, negative: dict) -> float:
-    """Net intensity-weighted score in [-1, 1] (positive = first lexicon)."""
+    """Net intensity-weighted score in [-1, 1] for SHORT text (headlines):
+    normalized by sqrt(length) so long headlines don't dominate."""
     tokens = _TOKEN.findall((text or "").lower())
     if not tokens:
         return 0.0
@@ -202,9 +203,27 @@ def _lexicon_score(text: str, positive: dict, negative: dict) -> float:
     return float(max(-1.0, min(1.0, score / (len(tokens) ** 0.5) / 2.0)))
 
 
+def _lexicon_balance(text: str, positive: dict, negative: dict) -> float:
+    """Balance ratio in [-1, 1] for LONG documents: (pos - neg) / (pos + neg)
+    over matched intensity, independent of document length — a 4,000-word FOMC
+    minutes with 3:1 hawkish-to-dovish language reads +0.5 instead of being
+    diluted toward zero by the sqrt normalization built for headlines."""
+    tokens = _TOKEN.findall((text or "").lower())
+    pos = sum(positive.get(t, 0.0) for t in tokens)
+    neg = sum(negative.get(t, 0.0) for t in tokens)
+    matched = pos + neg
+    if matched < 3.0:  # too few signal terms to call a stance from
+        return 0.0
+    return float(max(-1.0, min(1.0, (pos - neg) / matched)))
+
+
 # --------------------------------------------------------------------------- #
 # Component builders (each guarded; failure -> available: False)
 # --------------------------------------------------------------------------- #
+_FED_FULLTEXT_BUDGET = 5   # newest documents whose full body is fetched+scored
+_FED_FULLTEXT_WEIGHT = 3.0  # a scored statement/speech body outweighs a bare title
+
+
 def _fed_component() -> dict:
     docs = []
     errors = []
@@ -212,21 +231,51 @@ def _fed_component() -> dict:
         try:
             for item in _parse_rss(_fetch_text(url), cap=8):
                 text = f"{item['title']}. {item['summary']}"
-                docs.append({**item, "kind": label,
+                docs.append({**item, "kind": label, "scored": "title",
                              "hawk_score": round(_lexicon_score(text, _HAWKISH, _DOVISH), 3)})
         except Exception as exc:
             errors.append(f"{label}: {exc}")
     if not docs:
         return {"available": False, "reason": "; ".join(errors) or "no items"}
-    stance = sum(d["hawk_score"] for d in docs) / len(docs)
+    # Titles alone score near-zero ("Minutes of the FOMC ..." carries no
+    # hawk/dove language). Fetch the FULL BODY of the newest documents —
+    # bounded, cached at the snapshot level — and score the actual Fed speak.
+    # Minutes press releases are stubs: the document lives one link deeper at
+    # /monetarypolicy/fomcminutes*.htm (verified live: the stub matched 0.7
+    # lexicon intensity; the real minutes matched 51 and read +0.51 hawkish).
+    for doc in docs[:_FED_FULLTEXT_BUDGET]:
+        link = doc.get("link") or ""
+        if not link.startswith("https://www.federalreserve.gov"):
+            continue
+        try:
+            raw_html = _fetch_text(link)
+        except Exception:
+            continue  # honest fallback: the title score stands, marked as such
+        body = _strip_html(raw_html)[:60_000]
+        deeper = re.search(r'href="(/monetarypolicy/fomc\w*\d+[a-z]?\.htm)"', raw_html)
+        if deeper:
+            try:
+                deep_body = _strip_html(
+                    _fetch_text("https://www.federalreserve.gov" + deeper.group(1)))[:60_000]
+                if len(deep_body) > len(body):
+                    body = deep_body
+            except Exception:
+                pass  # the stub body is still better than the bare title
+        if len(body) > 400:  # a real document, not an error/redirect stub
+            doc["hawk_score"] = round(_lexicon_balance(body, _HAWKISH, _DOVISH), 3)
+            doc["scored"] = "full_text"
+    weights = [(_FED_FULLTEXT_WEIGHT if d["scored"] == "full_text" else 1.0) for d in docs]
+    stance = sum(w * d["hawk_score"] for w, d in zip(weights, docs)) / sum(weights)
     label = ("hawkish" if stance > 0.08 else "dovish" if stance < -0.08 else "neutral")
     return {
         "available": True,
         "stance_score": round(stance, 3),        # -1 dovish .. +1 hawkish
         "stance_label": label,
         "n_documents": len(docs),
+        "n_full_text": sum(1 for d in docs if d["scored"] == "full_text"),
         "documents": docs[:10],
-        "method": "intensity-weighted hawk/dove lexicon over official Fed press + speeches",
+        "method": ("intensity-weighted hawk/dove lexicon; newest documents scored on the "
+                   "FULL official text (weighted 3x), the rest on title+summary"),
     }
 
 
