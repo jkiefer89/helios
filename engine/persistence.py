@@ -28,7 +28,7 @@ except Exception:  # pragma: no cover - exercised when dependency install is bro
     Fernet = None
     InvalidToken = Exception
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6  # 6: + decision_journal table (operator decisions vs engine)
 REAL_SOURCES = {"live", "upload"}
 DISABLED_VALUES = {"", "0", "false", "off", "disabled", "none"}
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[1] / ".helios" / "helios.db"
@@ -1318,6 +1318,119 @@ class SQLiteStore:
         except Exception as exc:
             self.warning = f"Could not update signal journal result: {exc}"
 
+    # ----------------------------------------------------------------- #
+    # Decision journal — the OPERATOR's calls (vs the engine's), scored
+    # over time so agree/override value is measurable. Append-only facts;
+    # only outcome fields are ever updated.
+    # ----------------------------------------------------------------- #
+    def record_decision(self, entry: dict[str, Any]) -> dict[str, Any]:
+        if not self.available:
+            return {"recorded": False, "warning": self.warning}
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO decision_journal
+                      (decision_id, created_at, target_kind, target_id, target_name, mandate,
+                       benchmark, engine_action, engine_score, tactical_action, strategic_action,
+                       my_action, agreement, rationale, decision_date, decision_price, data_mode,
+                       context_json, outcome_status, outcomes_json, evaluated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        redact_secrets(str(entry["decision_id"]))[:64],
+                        utc_now(),
+                        redact_secrets(str(entry["target_kind"]))[:24],
+                        redact_secrets(str(entry["target_id"]))[:64],
+                        self._store_text(redact_secrets(str(entry.get("target_name") or ""))[:120]),
+                        redact_secrets(str(entry.get("mandate") or ""))[:32],
+                        self._store_text(redact_secrets(str(entry.get("benchmark") or ""))[:32]),
+                        self._store_text(redact_secrets(str(entry.get("engine_action") or ""))[:16]),
+                        self._store_number(entry.get("engine_score")),
+                        self._store_text(redact_secrets(str(entry.get("tactical_action") or ""))[:16]),
+                        self._store_text(redact_secrets(str(entry.get("strategic_action") or ""))[:16]),
+                        self._store_text(redact_secrets(str(entry["my_action"]))[:16]),
+                        redact_secrets(str(entry.get("agreement") or ""))[:16],
+                        self._store_text(redact_secrets(str(entry.get("rationale") or ""))[:2000]),
+                        str(entry.get("decision_date") or ""),
+                        self._store_number(entry.get("decision_price")),
+                        redact_secrets(str(entry.get("data_mode") or ""))[:32],
+                        self._store_json(entry.get("context") or {}),
+                        redact_secrets(str(entry.get("outcome_status") or "pending"))[:16],
+                        self._store_json(entry.get("outcomes") or {}),
+                        str(entry.get("evaluated_at") or ""),
+                    ),
+                )
+                row = conn.execute(
+                    "SELECT * FROM decision_journal WHERE decision_id = ?",
+                    (redact_secrets(str(entry["decision_id"]))[:64],),
+                ).fetchone()
+                return {"recorded": True, "entry": self._decision_row(row) if row else None}
+        except Exception as exc:
+            self.warning = f"Could not record decision: {exc}"
+            return {"recorded": False, "warning": self.warning}
+
+    def decision_journal(self, limit: int = 200) -> list[dict[str, Any]]:
+        if not self.available:
+            return []
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT * FROM decision_journal ORDER BY created_at DESC, decision_id DESC LIMIT ?",
+                    (max(1, min(int(limit), 1000)),),
+                ).fetchall()
+                return [self._decision_row(row) for row in rows]
+        except Exception as exc:
+            self.warning = f"Could not read decision journal: {exc}"
+            return []
+
+    def update_decision_outcomes(self, decision_id: str, outcomes: dict[str, Any],
+                                 status: str, evaluated_at: str) -> None:
+        if not self.available:
+            return
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    UPDATE decision_journal
+                    SET outcomes_json = ?, outcome_status = ?, evaluated_at = ?
+                    WHERE decision_id = ?
+                    """,
+                    (
+                        self._store_json(outcomes or {}),
+                        redact_secrets(str(status or "pending"))[:16],
+                        str(evaluated_at or ""),
+                        redact_secrets(str(decision_id))[:64],
+                    ),
+                )
+        except Exception as exc:
+            self.warning = f"Could not update decision outcomes: {exc}"
+
+    def _decision_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "decision_id": row["decision_id"],
+            "created_at": row["created_at"],
+            "target_kind": row["target_kind"],
+            "target_id": row["target_id"],
+            "target_name": self._load_text(row["target_name"]),
+            "mandate": row["mandate"],
+            "benchmark": self._load_text(row["benchmark"]),
+            "engine_action": self._load_text(row["engine_action"]),
+            "engine_score": self._load_number(row["engine_score"]),
+            "tactical_action": self._load_text(row["tactical_action"]),
+            "strategic_action": self._load_text(row["strategic_action"]),
+            "my_action": self._load_text(row["my_action"]),
+            "agreement": row["agreement"],
+            "rationale": self._load_text(row["rationale"]),
+            "decision_date": row["decision_date"],
+            "decision_price": self._load_number(row["decision_price"]),
+            "data_mode": row["data_mode"],
+            "context": self._load_json(row["context_json"]),
+            "outcome_status": row["outcome_status"],
+            "outcomes": self._load_json(row["outcomes_json"]),
+            "evaluated_at": row["evaluated_at"],
+        }
+
     def signal_journal(self, limit: int = 100) -> list[dict[str, Any]]:
         if not self.available:
             return []
@@ -1524,6 +1637,33 @@ def _create_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS decision_journal (
+          decision_id TEXT PRIMARY KEY,
+          created_at TEXT NOT NULL,
+          target_kind TEXT NOT NULL,
+          target_id TEXT NOT NULL,
+          target_name TEXT NOT NULL DEFAULT '',
+          mandate TEXT NOT NULL DEFAULT '',
+          benchmark TEXT NOT NULL DEFAULT '',
+          engine_action TEXT NOT NULL DEFAULT '',
+          engine_score REAL,
+          tactical_action TEXT NOT NULL DEFAULT '',
+          strategic_action TEXT NOT NULL DEFAULT '',
+          my_action TEXT NOT NULL,
+          agreement TEXT NOT NULL DEFAULT '',
+          rationale TEXT NOT NULL DEFAULT '',
+          decision_date TEXT NOT NULL DEFAULT '',
+          decision_price REAL,
+          data_mode TEXT NOT NULL DEFAULT '',
+          context_json TEXT NOT NULL DEFAULT '{}',
+          outcome_status TEXT NOT NULL DEFAULT 'pending',
+          outcomes_json TEXT NOT NULL DEFAULT '{}',
+          evaluated_at TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS report_snapshots (
           snapshot_id TEXT PRIMARY KEY,
           created_at TEXT NOT NULL,
@@ -1592,6 +1732,7 @@ def _create_schema(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_price_history_symbol_date ON price_history(symbol, date)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_refresh_log_symbol_time ON refresh_log(symbol, attempted_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_signal_journal_target ON signal_journal(target_kind, target_id, input_end_date)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_decision_journal_target ON decision_journal(target_kind, target_id, created_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_report_snapshots_target ON report_snapshots(target_kind, target_id, created_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_model_governance_model ON model_governance_events(model_id, created_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_data_quality_alerts_status ON data_quality_alerts(status, category, severity)")

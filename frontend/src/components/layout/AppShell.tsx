@@ -4,7 +4,7 @@ import { DataModeBadge, SourcePill } from "../badges/DataModeBadge";
 import { TerminalSelect } from "../forms/TerminalSelect";
 import { fmtMoney, fmtPct } from "../../utils/format";
 
-export type ViewId = "command" | "instruments" | "models" | "opportunities" | "strategy" | "evidence" | "clinic" | "risk" | "reports" | "journal" | "data-quality" | "analysis";
+export type ViewId = "command" | "instruments" | "models" | "opportunities" | "strategy" | "evidence" | "clinic" | "risk" | "reports" | "journal" | "decisions" | "data-quality" | "analysis";
 
 interface ShellProps {
   activeView: ViewId;
@@ -38,6 +38,7 @@ const views: Array<{ id: ViewId; label: string }> = [
   { id: "risk", label: "Risk Analytics" },
   { id: "reports", label: "Reports" },
   { id: "journal", label: "Signal Journal" },
+  { id: "decisions", label: "Decision Journal" },
   { id: "data-quality", label: "Data Quality" },
   { id: "analysis", label: "Analysis" },
 ];
@@ -47,7 +48,7 @@ const views: Array<{ id: ViewId; label: string }> = [
 const navGroups: Array<{ label: string; ids: ViewId[] }> = [
   { label: "Overview", ids: ["command"] },
   { label: "Data", ids: ["instruments", "data-quality"] },
-  { label: "Research", ids: ["opportunities", "analysis", "strategy", "evidence", "journal"] },
+  { label: "Research", ids: ["opportunities", "analysis", "strategy", "evidence", "journal", "decisions"] },
   { label: "Portfolio", ids: ["models", "clinic", "risk"] },
   { label: "Output", ids: ["reports"] },
 ];

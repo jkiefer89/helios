@@ -21,6 +21,7 @@ import { Instruments } from "./views/Instruments";
 import { Models } from "./views/Models";
 import { DataQuality } from "./views/DataQuality";
 import { SignalJournal } from "./views/SignalJournal";
+import { Decisions } from "./views/Decisions";
 import { RiskAnalytics } from "./views/RiskAnalytics";
 import { EvidenceLab } from "./views/EvidenceLab";
 
@@ -339,6 +340,9 @@ export default function App() {
     }
     if (activeView === "journal") {
       return <SignalJournal />;
+    }
+    if (activeView === "decisions") {
+      return <Decisions />;
     }
     return (
       <Analysis

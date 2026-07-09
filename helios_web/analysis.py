@@ -9,8 +9,8 @@ from flask import Blueprint, request
 
 from engine import (
     backtest, cma, data, evidence_lab, forecast, fundamentals, holdings, indicators, macro,
-    news, opportunity, portfolio, provenance, regime, sentiment, signal_journal, signals,
-    strategy,
+    news, opportunity, portfolio, provenance, regime, sec_events, sentiment, signal_journal,
+    signals, strategy,
 )
 
 from .core import (
@@ -308,6 +308,9 @@ def analyze():
         "sentiment": sent,
         "fundamentals": fwd,
         "rates": macro.rate_context(),
+        # Regulatory event context (8-K material events + Form 4 insider trades).
+        # Cached 1h; offline -> {"available": False} rather than fabricated calm.
+        "sec_events": sec_events.events_for(inst.symbol),
         "signal": sig,
         "signal_journal_entry": journal_entry,
         "backtest": bt,

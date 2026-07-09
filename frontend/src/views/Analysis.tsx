@@ -143,6 +143,7 @@ function AnalysisPayload({ payload }: { payload: AnalysisResponse }) {
           <span>{eligible ? `${fmtNumber(payload.signal.conviction_pct, 0)}% conviction${payload.signal.conviction_band ? ` (${payload.signal.conviction_band})` : ""}` : "Research locked"}</span>
         </div>
         {eligible && <SignalTracks signal={payload.signal} />}
+        {eligible && <DecisionQuickLog payload={payload} />}
         {!eligible && <div className="warning-list"><span>{quality.required_action || "Replace demo or mixed inputs before treating this as research evidence."}</span></div>}
         {payload.signal.caveats?.length ? <div className="warning-list">{payload.signal.caveats.map((caveat) => <span key={caveat}>{caveat}</span>)}</div> : null}
       </Panel>
@@ -225,10 +226,130 @@ function AnalysisPayload({ payload }: { payload: AnalysisResponse }) {
           </div>
         </Panel>
       )}
+      {payload.sec_events && !isModel && (
+        <Panel title="SEC Events — 8-K Material Filings and Insider Activity">
+          <SecEventsPanel events={payload.sec_events} />
+        </Panel>
+      )}
       <Panel title="AI Copilot — Research Dialogue" className="span-2">
         <CopilotChat contextLabel={payload.symbol || payload.name} payload={chatContext(payload)} />
       </Panel>
     </>
+  );
+}
+
+const QUICK_ACTIONS = ["BUY", "ADD", "HOLD", "TRIM", "SELL"] as const;
+
+/** One-click decision logging with the engine snapshot attached — feeds the
+    Decision Journal so agree/override value gets measured. */
+function DecisionQuickLog({ payload }: { payload: AnalysisResponse }) {
+  const [myAction, setMyAction] = useState<string>(payload.signal.action || "HOLD");
+  const [rationale, setRationale] = useState("");
+  const [state, setState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [message, setMessage] = useState("");
+  const isModel = Boolean(payload.mandate);
+  const targetId = isModel ? String(payload.id || "") : String(payload.symbol || "");
+
+  const engineBucket = bucketOf(payload.signal.action);
+  const agreement = bucketOf(myAction) === engineBucket ? "agree" : "override";
+
+  const log = async () => {
+    if (!targetId || state === "saving") return;
+    setState("saving");
+    try {
+      await api.recordDecision({
+        target_kind: isModel ? "model" : "instrument",
+        target_id: targetId,
+        my_action: myAction,
+        rationale: rationale.trim(),
+        mandate: payload.mandate?.key || "",
+        signal: {
+          action: payload.signal.action,
+          score: payload.signal.score,
+          tactical: payload.signal.tactical,
+          strategic: payload.signal.strategic,
+        },
+        context: {
+          conviction_pct: payload.signal.conviction_pct,
+          strategic_er_pct: payload.signal.strategic?.expected_return_pct,
+          anchor_pct: payload.signal.strategic?.anchor_pct,
+        },
+      });
+      setState("saved");
+      setMessage(`Logged ${myAction} on ${targetId} (${agreement}).`);
+      setRationale("");
+    } catch (err) {
+      setState("error");
+      setMessage(err instanceof Error ? err.message : "Could not record the decision.");
+    }
+  };
+
+  return (
+    <div className="decision-quicklog">
+      <span className="decision-quicklog__label">Log your call</span>
+      <select value={myAction} onChange={(e) => { setMyAction(e.target.value); setState("idle"); }}>
+        {QUICK_ACTIONS.map((a) => <option key={a} value={a}>{a}</option>)}
+      </select>
+      <span className={agreement === "override" ? "decision-override" : "decision-agree"}>{agreement}</span>
+      <input
+        value={rationale}
+        onChange={(e) => { setRationale(e.target.value); setState("idle"); }}
+        placeholder="Why? (recorded for the scoreboard)"
+      />
+      <button type="button" onClick={() => void log()} disabled={state === "saving" || !targetId}>
+        {state === "saving" ? "Logging…" : "Log decision"}
+      </button>
+      {state === "saved" && <span className="decision-quicklog__ok">{message}</span>}
+      {state === "error" && <span className="decision-quicklog__err">{message}</span>}
+    </div>
+  );
+}
+
+function bucketOf(action?: string): string {
+  const a = String(action || "").toUpperCase();
+  if (a === "BUY" || a === "ADD") return "BUY";
+  if (a === "SELL" || a === "TRIM") return "SELL";
+  return "HOLD";
+}
+
+function SecEventsPanel({ events }: { events: NonNullable<AnalysisResponse["sec_events"]> }) {
+  if (!events.available) {
+    return <EmptyState title="SEC events unavailable" body={events.reason || "EDGAR could not be reached — no events shown rather than fabricated calm."} />;
+  }
+  const eightKs = events.eight_ks || [];
+  const insider = events.insider;
+  return (
+    <div className="sec-events">
+      <div className="sec-events__insider">
+        <strong>Insider activity ({events.window_days}d):</strong>{" "}
+        {insider && insider.filings_in_window > 0 ? (
+          <>
+            <span className={`sec-insider sec-insider--${insider.net_signal}`}>{insider.net_signal.toUpperCase()}</span>
+            {" — "}{insider.open_market_purchases} open-market buy{insider.open_market_purchases === 1 ? "" : "s"},{" "}
+            {insider.open_market_sales} sale{insider.open_market_sales === 1 ? "" : "s"} across {insider.filings_in_window} Form 4 filings.
+            {insider.parsed.slice(0, 3).map((p) => (
+              <span key={`${p.filing_date}-${p.owner}`} className="sec-events__detail">
+                {p.filing_date} {p.owner}{p.is_officer ? " (officer)" : ""}: {p.buys ? `bought ${p.buy_shares.toLocaleString()} sh` : `sold ${p.sell_shares.toLocaleString()} sh`}
+              </span>
+            ))}
+          </>
+        ) : (
+          <span>no Form 4 filings in the window.</span>
+        )}
+      </div>
+      <div className="sec-events__filings">
+        <strong>8-K filings:</strong>{" "}
+        {eightKs.length === 0 ? (
+          <span>none in the last {events.window_days} days.</span>
+        ) : (
+          eightKs.map((e) => (
+            <span key={`${e.filing_date}-${e.items.join(",")}`} className={`sec-8k ${e.notable ? "sec-8k--notable" : ""}`}>
+              {e.filing_date}: {e.labels.join("; ")}{e.notable ? " ⚑" : ""}
+            </span>
+          ))
+        )}
+      </div>
+    </div>
   );
 }
 

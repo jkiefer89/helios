@@ -2,6 +2,8 @@ import type {
   AIChatResponse,
   AIResponse,
   AIStatusResponse,
+  DecisionEntry,
+  DecisionsResponse,
   AnalysisResponse,
   ClinicResponse,
   CommandCenterResponse,
@@ -202,6 +204,21 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ messages, payload }),
+    }),
+  listDecisions: (limit = 200) => request<DecisionsResponse>(`/api/decisions?limit=${limit}`),
+  recordDecision: (body: {
+    target_kind: string;
+    target_id: string;
+    my_action: string;
+    rationale?: string;
+    signal?: Record<string, unknown>;
+    mandate?: string;
+    context?: Record<string, unknown>;
+  }) =>
+    request<{ decision: DecisionEntry; disclaimer?: string }>("/api/decisions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
     }),
 };
 

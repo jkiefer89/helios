@@ -1405,6 +1405,103 @@ export interface AnalysisResponse {
   data_provenance?: DataQuality;
   mandate?: AnalysisMandate;
   horizon?: AnalysisHorizon;
+  fundamentals?: Record<string, unknown>;
+  rates?: Record<string, unknown>;
+  sec_events?: SecEvents;
+}
+
+export interface SecEventItem {
+  filing_date: string;
+  form: string;
+  items: string[];
+  labels: string[];
+  notable: boolean;
+  url?: string;
+}
+
+export interface SecInsider {
+  filings_in_window: number;
+  parsed: Array<{
+    filing_date: string;
+    owner: string;
+    is_officer: boolean;
+    buys: number;
+    sells: number;
+    buy_shares: number;
+    sell_shares: number;
+  }>;
+  open_market_purchases: number;
+  open_market_sales: number;
+  net_signal: "buying" | "selling" | "mixed" | "none" | string;
+  note?: string;
+}
+
+export interface SecEvents {
+  available: boolean;
+  reason?: string;
+  symbol?: string;
+  window_days?: number;
+  eight_ks?: SecEventItem[];
+  notable_8k?: boolean;
+  insider?: SecInsider;
+}
+
+export interface DecisionOutcome {
+  end_date: string;
+  target_return_pct: number;
+  benchmark_return_pct?: number;
+  alpha_pct?: number;
+  hit?: boolean | null;
+  engine_hit?: boolean | null;
+}
+
+export interface DecisionEntry {
+  decision_id: string;
+  created_at: string;
+  target_kind: string;
+  target_id: string;
+  target_name: string;
+  mandate: string;
+  benchmark: string;
+  engine_action: string;
+  engine_score?: number | null;
+  tactical_action?: string;
+  strategic_action?: string;
+  my_action: string;
+  agreement: string;
+  rationale: string;
+  decision_date: string;
+  decision_price?: number | null;
+  data_mode: string;
+  context?: Record<string, unknown>;
+  outcome_status: string;
+  outcomes: Record<string, DecisionOutcome>;
+  evaluated_at?: string;
+}
+
+export interface DecisionBucketStats {
+  count: number;
+  measured_count: number;
+  hit_count: number;
+  hit_rate_pct: number | null;
+  avg_target_return_pct: number | null;
+  avg_alpha_pct: number | null;
+}
+
+export interface DecisionScoreboard {
+  total: DecisionBucketStats;
+  agree: DecisionBucketStats;
+  override: DecisionBucketStats;
+  override_vs_engine: { override_won: number; engine_won: number; tied: number; note?: string };
+  by_mandate: Record<string, DecisionBucketStats>;
+  not_measurable_count: number;
+  disclaimer?: string;
+}
+
+export interface DecisionsResponse {
+  decisions: DecisionEntry[];
+  scoreboard: DecisionScoreboard;
+  disclaimer?: string;
 }
 
 export interface AIStatusResponse {

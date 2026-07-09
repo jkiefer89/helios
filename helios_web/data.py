@@ -68,6 +68,18 @@ def _auto_live_worker(config: dict) -> None:
         with _AUTO_LIVE_LOCK:
             _AUTO_LIVE_LAST_RUN = started
             _AUTO_LIVE_LAST_RESULT = result
+        # Warm the SEC event cache in the background so the radar's cached-only
+        # read has data without ever paying EDGAR latency inside a request. The
+        # 1h TTL in sec_events makes this a no-op on most 5-minute cycles.
+        try:
+            from engine import provenance as _prov, sec_events as _sec
+            for inst in data.all_instruments():
+                if _AUTO_LIVE_STOP.is_set():
+                    break
+                if _prov.is_real_source(inst.source):
+                    _sec.events_for(inst.symbol)
+        except Exception:
+            pass  # events are context, never worth failing the refresh loop
         _AUTO_LIVE_STOP.wait(config["interval_seconds"])
 
 

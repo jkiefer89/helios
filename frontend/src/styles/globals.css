@@ -4766,6 +4766,163 @@ button.locked-table-row:hover {
   color: var(--muted);
 }
 
+/* Decision journal — quick-log strip, table, form */
+.decision-quicklog {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  margin-top: 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(6, 9, 15, 0.55);
+  padding: 0.5rem 0.75rem;
+}
+
+.decision-quicklog__label {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.decision-quicklog select,
+.decision-quicklog input {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(12, 17, 26, 0.85);
+  color: var(--soft);
+  font: inherit;
+  font-size: 0.74rem;
+  padding: 0.32rem 0.5rem;
+}
+
+.decision-quicklog input {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.decision-quicklog__ok { color: var(--green); font-size: 0.72rem; }
+.decision-quicklog__err { color: var(--red); font-size: 0.72rem; }
+
+.decision-agree {
+  color: var(--green);
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.decision-override {
+  color: var(--amber, #d9a441);
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.decision-table {
+  display: grid;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(6, 9, 15, 0.55);
+  overflow-x: auto;
+}
+
+.decision-table__head,
+.decision-table__row {
+  display: grid;
+  grid-template-columns: 130px 110px 64px 64px 84px 84px 84px 84px minmax(160px, 1fr);
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.45rem 0.7rem;
+  border-bottom: 1px solid rgba(158, 176, 202, 0.07);
+  font-size: 0.72rem;
+}
+
+.decision-table__head {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.decision-rationale {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--soft);
+}
+
+.decision-mandates {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.9rem;
+  margin-top: 0.6rem;
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.decision-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.decision-form__row {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.decision-form select,
+.decision-form input,
+.decision-form textarea {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(12, 17, 26, 0.85);
+  color: var(--soft);
+  font: inherit;
+  font-size: 0.74rem;
+  padding: 0.4rem 0.55rem;
+}
+
+.decision-form input { flex: 1 1 auto; min-width: 0; }
+
+/* SEC events */
+.sec-events {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  font-size: 0.76rem;
+  color: var(--soft);
+  line-height: 1.55;
+}
+
+.sec-events__detail {
+  display: block;
+  color: var(--muted);
+  font-size: 0.7rem;
+  padding-left: 0.9rem;
+}
+
+.sec-events__filings .sec-8k {
+  display: block;
+  padding-left: 0.9rem;
+  color: var(--soft);
+}
+
+.sec-8k--notable { color: var(--amber, #d9a441); }
+
+.sec-insider {
+  font-family: var(--font-mono);
+  letter-spacing: 0.05em;
+}
+
+.sec-insider--buying { color: var(--green); }
+.sec-insider--selling { color: var(--red); }
+
 /* AI copilot research dialogue */
 .copilot-chat {
   display: flex;

@@ -22,14 +22,14 @@ def init_app():
     """Wire the singleton Flask app once: engine warmup, blueprints, auto-live."""
     from engine import data as engine_data, portfolio
 
-    from . import ai, analysis, core, data, models, reports, spa
+    from . import ai, analysis, core, data, decisions, models, reports, spa
 
     app = core.app
     if not app.blueprints:
         engine_data.load_samples()
         engine_data.load_persisted_instruments()
         portfolio.load_persisted_models()
-        for module in (data, analysis, models, reports, ai, spa):
+        for module in (data, analysis, models, reports, ai, decisions, spa):
             app.register_blueprint(module.bp)
         data._start_auto_live_refresh()
     return app

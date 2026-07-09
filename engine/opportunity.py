@@ -10,7 +10,7 @@ import numpy as np
 
 from . import (
     analytics_cache, cma, data, forecast, fundamentals, indicators, mandate, portfolio,
-    provenance, regime as regime_mod, sentiment, signals, strategy,
+    provenance, regime as regime_mod, sec_events, sentiment, signals, strategy,
 )
 from ._common import dedupe as _dedupe
 
@@ -107,6 +107,7 @@ def score_candidate(candidate: dict, regime: dict | None = None) -> dict:
         "reason": candidate.get("reason", ""),
         "tactical": candidate.get("tactical"),
         "strategic": candidate.get("strategic"),
+        "insider_signal": candidate.get("insider_signal"),
         "forecast_quality": round(forecast_quality, 1),
         "backtest_quality": round(backtest_quality, 1),
         "data_quality": round(data_quality, 1),
@@ -226,6 +227,18 @@ def instrument_candidate(inst: data.Instrument) -> dict | None:
         "reason": sig.get("headline_rationale", ""),
         "warnings": sig.get("caveats", []),
     }
+    # Regulatory event flags — cached-only read (the radar never waits on EDGAR;
+    # the cache is warmed by the analyze path and the background refresh loop).
+    events = sec_events.events_cached(inst.symbol)
+    if events and events.get("available"):
+        if events.get("notable_8k"):
+            latest = next((e for e in events.get("eight_ks", []) if e.get("notable")), None)
+            if latest:
+                candidate["warnings"] = list(candidate["warnings"]) + [
+                    f"Notable 8-K {latest['filing_date']}: {'; '.join(latest['labels'][:3])}."]
+        insider = events.get("insider") or {}
+        if insider.get("net_signal") in {"buying", "selling"}:
+            candidate["insider_signal"] = insider["net_signal"]
     analytics_cache.put("opportunity_candidate", cache_key, candidate)
     return candidate
 
