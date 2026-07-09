@@ -113,6 +113,19 @@ def instrument_forward(ticker: str, fnd, mandate_key: str = "balanced") -> dict:
             quality[field] = round(float(val), 4)
     if quality:
         out["quality"] = quality
+    # Upcoming earnings (FMP calendar) — timing context, never scored.
+    next_earnings = getattr(fnd, "next_earnings_date", "") or ""
+    if next_earnings:
+        import datetime as _dt
+        try:
+            days_until = (_dt.date.fromisoformat(next_earnings) - _dt.date.today()).days
+            out["earnings"] = {
+                "next_date": next_earnings,
+                "days_until": days_until,
+                "imminent": 0 <= days_until <= 7,
+            }
+        except ValueError:
+            pass
     # Analyst consensus context (free via yfinance) — evidence, not a component.
     price = getattr(fnd, "current_price", None)
     target = getattr(fnd, "target_mean_price", None)

@@ -227,6 +227,14 @@ def instrument_candidate(inst: data.Instrument) -> dict | None:
         "reason": sig.get("headline_rationale", ""),
         "warnings": sig.get("caveats", []),
     }
+    # Earnings proximity — a rating computed days before a report carries event
+    # risk the price history can't see yet; flag it rather than hide it.
+    earnings = (fwd or {}).get("earnings") or {}
+    if earnings.get("imminent"):
+        candidate["warnings"] = list(candidate["warnings"]) + [
+            f"Earnings scheduled {earnings['next_date']} ({earnings['days_until']}d away) — "
+            "expect an event-driven move this rating cannot anticipate."]
+        candidate["next_earnings"] = earnings.get("next_date")
     # Regulatory event flags — cached-only read (the radar never waits on EDGAR;
     # the cache is warmed by the analyze path and the background refresh loop).
     events = sec_events.events_cached(inst.symbol)

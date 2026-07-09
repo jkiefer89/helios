@@ -295,3 +295,50 @@ def test_forward_enriches_cusip_only_holdings_via_figi(client):
     fr = client.get("/api/model/forward?id=MCUS").get_json()["forward_return"]
     assert fr["coverage_pct"] == 100.0 and fr["n_usable"] == 1
     assert any(c["ticker"] == "NVDA" and c["basis"] == "fundamentals" for c in fr["top_contributions"])
+
+
+def test_fmp_stable_api_fields_and_next_earnings(monkeypatch):
+    """Post-Aug-2025 FMP accounts get the /stable API: different paths, different
+    field names (epsAvg, priceToEarningsRatioTTM, lastDividend) + earnings dates."""
+    fundamentals.set_default_provider(None)
+    monkeypatch.setenv("HELIOS_FMP_KEY", "testkey")
+    monkeypatch.delenv("HELIOS_INTRINIO_KEY", raising=False)
+    monkeypatch.setattr(fundamentals, "_yfinance_provider", lambda t: {})
+
+    def fake_fmp(url):
+        if "/api/v3/" in url:
+            return {"Error Message": "Legacy Endpoint : no longer supported"}
+        if "/stable/profile" in url:
+            return [{"sector": "Technology", "price": 100.0, "lastDividend": 2.0}]
+        if "/stable/ratios-ttm" in url:
+            return [{"dividendYieldTTM": 0.02, "priceToEarningsRatioTTM": 25.0,
+                     "netProfitMarginTTM": 0.24, "debtToEquityRatioTTM": 1.1}]
+        if "/stable/analyst-estimates" in url:
+            return [{"date": "2099-12-31", "epsAvg": 6.0},
+                    {"date": "2097-12-31", "epsAvg": 4.0}]
+        if "/stable/earnings" in url:
+            return [{"date": "2097-01-30", "epsActual": None, "epsEstimated": 1.9},
+                    {"date": "2096-10-30", "epsActual": 1.8, "epsEstimated": 1.7}]
+        return None
+
+    fundamentals.set_fmp_http(fake_fmp)
+    try:
+        f = fundamentals.fetch("AAPL")
+        assert f.source == "fmp" and f.usable
+        assert f.dividend_yield == pytest.approx(0.02)
+        assert f.trailing_pe == pytest.approx(25.0)
+        assert f.forward_pe == pytest.approx(25.0)        # 100 / nearest-year eps 4.0
+        assert f.earnings_growth == pytest.approx((6.0 / 4.0) ** 0.5 - 1.0, abs=1e-4)
+        assert f.profit_margin == pytest.approx(0.24)
+        assert f.next_earnings_date == "2097-01-30"       # first not-yet-reported date
+    finally:
+        fundamentals.set_fmp_http(None)
+
+
+def test_instrument_forward_flags_imminent_earnings():
+    fnd = fundamentals.Fundamentals(
+        ticker="X", dividend_yield=0.02, forward_pe=15.0, earnings_growth=0.08,
+        sector="technology", source="fmp", next_earnings_date="2099-01-01")
+    fwd = cma.instrument_forward("X", fnd)
+    assert fwd["earnings"]["next_date"] == "2099-01-01"
+    assert fwd["earnings"]["imminent"] is False           # far future, not imminent

@@ -69,6 +69,7 @@ class Fundamentals:
     target_mean_price: float | None = None  # analyst consensus 12m target
     analyst_rating: float | None = None     # 1 strong buy .. 5 sell (Yahoo scale)
     n_analysts: int | None = None
+    next_earnings_date: str = ""            # next scheduled report (YYYY-MM-DD)
 
     @property
     def usable(self) -> bool:
@@ -175,7 +176,8 @@ def _fmp_forward(estimates, price):
     for e in estimates or []:
         if not isinstance(e, dict):
             continue
-        eps = _num(e.get("estimatedEpsAvg"))
+        # v3 legacy: estimatedEpsAvg; stable API: epsAvg.
+        eps = _num(e.get("estimatedEpsAvg")) or _num(e.get("epsAvg"))
         date = str(e.get("date") or "")[:10]
         if eps is not None and len(date) >= 4 and date[:4].isdigit():
             rows.append((int(date[:4]), eps))
@@ -192,7 +194,30 @@ def _fmp_forward(estimates, price):
     return forward_pe, growth
 
 
+def _fmp_reject_legacy(payload):
+    """FMP returns {"Error Message": "Legacy Endpoint ..."} dicts instead of
+    HTTP errors; treat any error payload as no-data."""
+    if isinstance(payload, dict) and payload.get("Error Message"):
+        return None
+    return payload
+
+
+def _fmp_next_earnings(earnings) -> str:
+    """Next scheduled report date (epsActual still null) from /stable/earnings."""
+    upcoming = []
+    for row in earnings or []:
+        if not isinstance(row, dict):
+            continue
+        date = str(row.get("date") or "")[:10]
+        if len(date) == 10 and row.get("epsActual") is None:
+            upcoming.append(date)
+    return min(upcoming) if upcoming else ""
+
+
 def _fmp_provider(ticker: str) -> dict:
+    """FMP consensus fundamentals. Accounts created after Aug 2025 use the
+    ``/stable`` API; the ``/api/v3`` paths remain as a fallback for legacy
+    subscriptions. Field names differ between the two — both are handled."""
     key = os.environ.get("HELIOS_FMP_KEY", "").strip()
     if not key:
         return {}
@@ -202,21 +227,32 @@ def _fmp_provider(ticker: str) -> dict:
         sep = "&" if "?" in path else "?"
         return f"{base}{path}{sep}apikey={key}"
 
-    profile = _first(_fmp_http_json(url(f"/api/v3/profile/{ticker}")))
-    ratios = _first(_fmp_http_json(url(f"/api/v3/ratios-ttm/{ticker}")))
-    estimates = _fmp_http_json(url(f"/api/v3/analyst-estimates/{ticker}?period=annual&limit=6"))
+    # Stable API first (current accounts)...
+    profile = _first(_fmp_reject_legacy(_fmp_http_json(url(f"/stable/profile?symbol={ticker}"))) or {})
+    ratios = _first(_fmp_reject_legacy(_fmp_http_json(url(f"/stable/ratios-ttm?symbol={ticker}"))) or {})
+    estimates = _fmp_reject_legacy(
+        _fmp_http_json(url(f"/stable/analyst-estimates?symbol={ticker}&period=annual&limit=8")))
+    earnings = _fmp_reject_legacy(_fmp_http_json(url(f"/stable/earnings?symbol={ticker}&limit=6")))
+    # ...then the legacy v3 paths for pre-2025 subscriptions.
+    if not profile and not ratios and not estimates:
+        profile = _first(_fmp_reject_legacy(_fmp_http_json(url(f"/api/v3/profile/{ticker}"))) or {})
+        ratios = _first(_fmp_reject_legacy(_fmp_http_json(url(f"/api/v3/ratios-ttm/{ticker}"))) or {})
+        estimates = _fmp_reject_legacy(
+            _fmp_http_json(url(f"/api/v3/analyst-estimates/{ticker}?period=annual&limit=6")))
     if not profile and not ratios and not estimates:
         return {}
 
     price = _num(profile.get("price"))
     dy = _num(ratios.get("dividendYieldTTM"))
     if dy is None:
-        last_div = _num(profile.get("lastDiv"))
+        last_div = _num(profile.get("lastDividend")) or _num(profile.get("lastDiv"))
         if price and last_div is not None and price > 0:
             dy = last_div / price
-    trailing_pe = _num(ratios.get("peRatioTTM")) or _num(ratios.get("priceEarningsRatioTTM"))
+    trailing_pe = (_num(ratios.get("priceToEarningsRatioTTM"))       # stable
+                   or _num(ratios.get("peRatioTTM"))                 # v3
+                   or _num(ratios.get("priceEarningsRatioTTM")))
     forward_pe, growth = _fmp_forward(estimates, price)
-    return {
+    out = {
         "dividend_yield": dy,
         "forward_pe": forward_pe,
         "trailing_pe": trailing_pe,
@@ -225,9 +261,13 @@ def _fmp_provider(ticker: str) -> dict:
         "source": "fmp",
         "roe": _num(ratios.get("returnOnEquityTTM")),
         "profit_margin": _num(ratios.get("netProfitMarginTTM")),
-        "debt_to_equity": _num(ratios.get("debtEquityRatioTTM")),
+        "debt_to_equity": _num(ratios.get("debtToEquityRatioTTM")) or _num(ratios.get("debtEquityRatioTTM")),
         "current_price": price,
     }
+    next_earnings = _fmp_next_earnings(earnings)
+    if next_earnings:
+        out["next_earnings_date"] = next_earnings
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -421,6 +461,7 @@ def fetch(ticker: str, provider=None) -> Fundamentals:
             target_mean_price=_num(raw.get("target_mean_price")),
             analyst_rating=_num(raw.get("analyst_rating")),
             n_analysts=int(raw["n_analysts"]) if isinstance(raw.get("n_analysts"), (int, float)) else None,
+            next_earnings_date=str(raw.get("next_earnings_date") or ""),
         )
     if use_default and result.usable:  # cache real answers only; retry empties next call
         with _PROVIDER_LOCK:
