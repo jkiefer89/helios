@@ -28,7 +28,7 @@ except Exception:  # pragma: no cover - exercised when dependency install is bro
     Fernet = None
     InvalidToken = Exception
 
-SCHEMA_VERSION = 6  # 6: + decision_journal table (operator decisions vs engine)
+SCHEMA_VERSION = 7  # 6: + decision_journal; 7: + macro_history (daily stance/GPR readings)
 REAL_SOURCES = {"live", "upload"}
 DISABLED_VALUES = {"", "0", "false", "off", "disabled", "none"}
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[1] / ".helios" / "helios.db"
@@ -1431,6 +1431,64 @@ class SQLiteStore:
             "evaluated_at": row["evaluated_at"],
         }
 
+    # ----------------------------------------------------------------- #
+    # Macro history — one reading per UTC day (upsert) so the regime layer
+    # can reason about stance/GPR CHANGES, not just levels.
+    # ----------------------------------------------------------------- #
+    def record_macro_reading(self, reading: dict[str, Any]) -> None:
+        if not self.available:
+            return
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO macro_history
+                      (reading_date, recorded_at, fed_stance, fed_n_documents,
+                       gpr_index, fomc_days_until, policy_themes_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(reading_date) DO UPDATE SET
+                      recorded_at = excluded.recorded_at,
+                      fed_stance = excluded.fed_stance,
+                      fed_n_documents = excluded.fed_n_documents,
+                      gpr_index = excluded.gpr_index,
+                      fomc_days_until = excluded.fomc_days_until,
+                      policy_themes_json = excluded.policy_themes_json
+                    """,
+                    (
+                        str(reading["reading_date"]),
+                        utc_now(),
+                        self._store_number(reading.get("fed_stance")),
+                        int(reading["fed_n_documents"]) if reading.get("fed_n_documents") is not None else None,
+                        self._store_number(reading.get("gpr_index")),
+                        int(reading["fomc_days_until"]) if reading.get("fomc_days_until") is not None else None,
+                        self._store_json(reading.get("policy_themes") or {}),
+                    ),
+                )
+        except Exception as exc:
+            self.warning = f"Could not record macro reading: {exc}"
+
+    def macro_history(self, limit: int = 60) -> list[dict[str, Any]]:
+        if not self.available:
+            return []
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT * FROM macro_history ORDER BY reading_date DESC LIMIT ?",
+                    (max(1, min(int(limit), 400)),),
+                ).fetchall()
+                return [{
+                    "reading_date": row["reading_date"],
+                    "recorded_at": row["recorded_at"],
+                    "fed_stance": self._load_number(row["fed_stance"]),
+                    "fed_n_documents": row["fed_n_documents"],
+                    "gpr_index": self._load_number(row["gpr_index"]),
+                    "fomc_days_until": row["fomc_days_until"],
+                    "policy_themes": self._load_json(row["policy_themes_json"]),
+                } for row in rows]
+        except Exception as exc:
+            self.warning = f"Could not read macro history: {exc}"
+            return []
+
     def signal_journal(self, limit: int = 100) -> list[dict[str, Any]]:
         if not self.available:
             return []
@@ -1659,6 +1717,19 @@ def _create_schema(conn: sqlite3.Connection) -> None:
           outcome_status TEXT NOT NULL DEFAULT 'pending',
           outcomes_json TEXT NOT NULL DEFAULT '{}',
           evaluated_at TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS macro_history (
+          reading_date TEXT PRIMARY KEY,
+          recorded_at TEXT NOT NULL,
+          fed_stance REAL,
+          fed_n_documents INTEGER,
+          gpr_index REAL,
+          fomc_days_until INTEGER,
+          policy_themes_json TEXT NOT NULL DEFAULT '{}'
         )
         """
     )

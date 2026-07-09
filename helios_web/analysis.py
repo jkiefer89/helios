@@ -216,10 +216,32 @@ def _record_instrument_signal(inst: data.Instrument, close: pd.Series, sig: dict
             source_counts={inst.source: 1},
             eligible_for_real_research=p["eligible_for_real_research"],
             data_mode=p["data_mode"],
-            metadata={"endpoint": "/api/analyze"},
+            metadata=_signal_evidence_metadata(sig, endpoint="/api/analyze"),
         )
     except Exception:
         return None
+
+
+def _signal_evidence_metadata(sig: dict, endpoint: str) -> dict:
+    """Persist the NEW rating tracks alongside each journal entry so the
+    Evidence Lab can score them out-of-sample as forward results measure in —
+    the honest, prospective validation of the strategic/macro layers (no
+    point-in-time fundamentals exist for a retrospective backtest; pretending
+    otherwise would be look-ahead bias)."""
+    meta: dict = {"endpoint": endpoint}
+    tactical = sig.get("tactical") or {}
+    if tactical:
+        meta["tactical_action"] = tactical.get("action")
+        meta["tactical_score"] = tactical.get("score")
+    strategic = sig.get("strategic") or {}
+    if strategic.get("usable"):
+        meta["strategic_action"] = strategic.get("action")
+        meta["strategic_gap_pp"] = strategic.get("gap_vs_anchor_pct")
+        meta["strategic_er_pct"] = strategic.get("expected_return_pct")
+    if "event_risk_damper" in sig:
+        meta["event_risk_damper"] = sig.get("event_risk_damper")
+        meta["macro"] = sig.get("macro") or {}
+    return meta
 
 
 def _record_model_signal(mdl: portfolio.Model, ps: portfolio.PortfolioSeries, close: pd.Series, sig: dict, horizon_days: int) -> dict | None:
@@ -237,7 +259,8 @@ def _record_model_signal(mdl: portfolio.Model, ps: portfolio.PortfolioSeries, cl
             source_counts={str(k): int(v) for k, v in ps.sources.items()},
             eligible_for_real_research=p["eligible_for_real_research"],
             data_mode=p["data_mode"],
-            metadata={"endpoint": "/api/model/analyze", "mandate": mdl.mandate_key},
+            metadata={**_signal_evidence_metadata(sig, endpoint="/api/model/analyze"),
+                      "mandate": mdl.mandate_key},
         )
     except Exception:
         return None
@@ -274,6 +297,7 @@ def macro_intelligence():
     snap = macro_events.macro_snapshot(force=force)
     return ok({
         **snap,
+        "history": macro_events.history_and_changes(),
         "rates": macro.rate_context(),
         "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
     })

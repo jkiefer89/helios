@@ -218,3 +218,50 @@ def test_fed_full_text_fetch_failure_falls_back_to_title():
     assert fed["n_full_text"] == 0
     assert all(d["scored"] == "title" for d in fed["documents"])
     assert fed["stance_label"] == "hawkish"   # title lexicon still works
+
+
+def test_macro_reading_persists_and_changes_compute(monkeypatch, tmp_path):
+    from engine import persistence
+    monkeypatch.setenv("HELIOS_DB_PATH", str(tmp_path / "helios.db"))
+    persistence.reset_store_for_tests()
+    store = persistence.get_store()
+    assert store.available
+    store.record_macro_reading({"reading_date": "2026-06-30", "fed_stance": -0.2,
+                                "fed_n_documents": 10, "gpr_index": 0.3,
+                                "fomc_days_until": 20, "policy_themes": {"trade": 1}})
+    store.record_macro_reading({"reading_date": "2026-07-08", "fed_stance": 0.1,
+                                "fed_n_documents": 16, "gpr_index": 0.6,
+                                "fomc_days_until": 19, "policy_themes": {"fiscal": 1}})
+    # Upsert: same day overwrites, no duplicate rows.
+    store.record_macro_reading({"reading_date": "2026-07-08", "fed_stance": 0.12,
+                                "fed_n_documents": 16, "gpr_index": 0.61,
+                                "fomc_days_until": 19, "policy_themes": {"fiscal": 1}})
+    rows = store.macro_history()
+    assert len(rows) == 2 and rows[0]["fed_stance"] == pytest.approx(0.12)
+    changes = macro_events.history_and_changes()
+    assert changes["fed_stance_change_7d"] == pytest.approx(0.32, abs=0.01)   # -0.2 -> +0.12
+    assert changes["gpr_change_7d"] == pytest.approx(0.31, abs=0.01)
+    persistence.reset_store_for_tests()
+
+
+def test_track_evidence_reports_insufficient_below_minimum():
+    from engine import signal_journal
+    few = [{"metadata": {"strategic_gap_pp": 5.0}, "forward_result_pct": 2.0,
+            "forward_status": "measured", "eligible_for_real_research": True}] * 3
+    out = signal_journal.track_evidence(few)
+    assert out["sufficient"] is False and "direction_agreement_pct" not in out
+
+
+def test_track_evidence_scores_direction_agreement():
+    from engine import signal_journal
+    entries = []
+    for i in range(12):
+        gap = 5.0 if i % 2 == 0 else -5.0
+        fwd = 3.0 if i % 2 == 0 else -2.0        # perfectly agreeing
+        entries.append({"metadata": {"strategic_gap_pp": gap, "strategic_action": "BUY"},
+                        "forward_result_pct": fwd, "forward_status": "measured",
+                        "eligible_for_real_research": True})
+    out = signal_journal.track_evidence(entries)
+    assert out["sufficient"] is True
+    assert out["direction_agreement_pct"] == pytest.approx(100.0)
+    assert out["spread_pp"] == pytest.approx(5.0)

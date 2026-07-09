@@ -104,8 +104,58 @@ def dashboard_payload(entries: list[dict[str, Any]]) -> dict[str, Any]:
         "summary": summarize_entries(entries),
         "benchmark_comparison": benchmark_comparison(entries),
         "model_evidence": model_evidence(entries),
+        "track_evidence": track_evidence(entries),
         "drift": drift_series(entries),
     }
+
+
+_TRACK_EVIDENCE_MIN_N = 10
+
+
+def track_evidence(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    """Out-of-sample evidence for the STRATEGIC (fundamentals) track.
+
+    Prospective by design: entries record the strategic gap at signal time
+    (metadata.strategic_gap_pp) and are scored here once their forward window
+    measures. No point-in-time fundamentals exist for a retrospective backtest,
+    so below the minimum sample this reports "insufficient evidence" honestly
+    instead of a noise statistic.
+    """
+    scored = []
+    for entry in entries:
+        meta = entry.get("metadata") or {}
+        gap = _finite(meta.get("strategic_gap_pp"))
+        fwd = _finite(entry.get("forward_result_pct"))
+        if gap is None or fwd is None or entry.get("forward_status") != "measured":
+            continue
+        if not _real_eligible(entry):
+            continue
+        scored.append({"gap_pp": gap, "forward_pct": fwd,
+                       "strategic_action": str(meta.get("strategic_action") or "")})
+    n = len(scored)
+    out: dict[str, Any] = {
+        "measured_count": n,
+        "min_required": _TRACK_EVIDENCE_MIN_N,
+        "sufficient": n >= _TRACK_EVIDENCE_MIN_N,
+        "note": ("Prospective validation: strategic gaps recorded at signal time, scored "
+                 "as forward windows measure. Retrospective backtests are impossible "
+                 "without point-in-time fundamentals and are not faked here."),
+    }
+    if n < _TRACK_EVIDENCE_MIN_N:
+        return out
+    # Directional agreement: did positive gaps precede positive forward returns?
+    agree = sum(1 for s in scored if (s["gap_pp"] > 0) == (s["forward_pct"] > 0))
+    pos = [s["forward_pct"] for s in scored if s["gap_pp"] > 0]
+    neg = [s["forward_pct"] for s in scored if s["gap_pp"] <= 0]
+    avg_pos, avg_neg = _avg(pos), _avg(neg)
+    out.update({
+        "direction_agreement_pct": _pct(agree, n),
+        "avg_forward_when_gap_positive_pct": avg_pos,
+        "avg_forward_when_gap_negative_pct": avg_neg,
+        "spread_pp": (round(avg_pos - avg_neg, 2)
+                      if avg_pos is not None and avg_neg is not None else None),
+    })
+    return out
 
 
 def summarize_entries(entries: list[dict[str, Any]]) -> dict[str, Any]:

@@ -396,7 +396,54 @@ def macro_snapshot(force: bool = False) -> dict:
     }
     with _LOCK:
         _SNAPSHOT_CACHE[0], _SNAPSHOT_CACHE[1] = time.monotonic(), snapshot
+    _persist_reading(snapshot)
     return dict(snapshot)
+
+
+def _persist_reading(snapshot: dict) -> None:
+    """One reading per UTC day (upsert) — enables stance/GPR CHANGE signals.
+    Lazy import avoids an engine import cycle; failure never blocks a snapshot."""
+    try:
+        from . import persistence
+        fed = snapshot.get("fed") or {}
+        geo = snapshot.get("geopolitics") or {}
+        policy = snapshot.get("policy") or {}
+        fomc = snapshot.get("fomc") or {}
+        persistence.get_store().record_macro_reading({
+            "reading_date": datetime.now(timezone.utc).date().isoformat(),
+            "fed_stance": fed.get("stance_score") if fed.get("available") else None,
+            "fed_n_documents": fed.get("n_documents") if fed.get("available") else None,
+            "gpr_index": geo.get("risk_index") if geo.get("available") else None,
+            "fomc_days_until": fomc.get("days_until"),
+            "policy_themes": policy.get("themes") or {},
+        })
+    except Exception:
+        pass
+
+
+def history_and_changes(limit: int = 30) -> dict:
+    """Recent daily readings plus ~7-day deltas. A change is only reported when
+    BOTH endpoints exist — no delta is fabricated across unavailable days."""
+    try:
+        from . import persistence
+        rows = persistence.get_store().macro_history(limit=limit)
+    except Exception:
+        rows = []
+    out: dict = {"readings": rows, "fed_stance_change_7d": None, "gpr_change_7d": None}
+    if len(rows) >= 2:
+        latest = rows[0]
+        past = next((r for r in rows[1:]
+                     if r["reading_date"] <= _days_ago_iso(7)), rows[-1])
+        if latest.get("fed_stance") is not None and past.get("fed_stance") is not None:
+            out["fed_stance_change_7d"] = round(latest["fed_stance"] - past["fed_stance"], 3)
+        if latest.get("gpr_index") is not None and past.get("gpr_index") is not None:
+            out["gpr_change_7d"] = round(latest["gpr_index"] - past["gpr_index"], 3)
+        out["compared_to"] = past.get("reading_date")
+    return out
+
+
+def _days_ago_iso(days: int) -> str:
+    return (datetime.now(timezone.utc).date() - timedelta(days=days)).isoformat()
 
 
 def snapshot_cached() -> dict | None:
