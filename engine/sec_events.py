@@ -97,7 +97,12 @@ def _parse_form4_xml(xml_text: str) -> dict[str, Any] | None:
     is_officer = (root.findtext(".//reportingOwner/reportingOwnerRelationship/isOfficer") or "").strip()
     buys = sells = 0
     buy_shares = sell_shares = 0.0
-    for txn in root.findall(".//nonDerivativeTransaction"):
+    # Both tables count: derivative-only Form 4s (options/warrants bought or
+    # sold on the open market, codes P/S) previously read as "no signal"
+    # (review finding).
+    transactions = (root.findall(".//nonDerivativeTransaction")
+                    + root.findall(".//derivativeTransaction"))
+    for txn in transactions:
         code = (txn.findtext(".//transactionCoding/transactionCode") or "").strip().upper()
         try:
             shares = float(txn.findtext(".//transactionAmounts/transactionShares/value") or 0)

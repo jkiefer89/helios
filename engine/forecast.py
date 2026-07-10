@@ -160,7 +160,11 @@ def forecast(close: pd.Series, horizon: int = 21, n_paths: int = 2000, alpha: fl
     }
 
     future_idx = pd.bdate_range(start=close.index[-1] + pd.Timedelta(days=1), periods=horizon)
-    exp_return = float(median[-1] / last_price - 1)
+    # EXPECTED return is the mean terminal — the median sits ~sigma^2/2 lower
+    # (volatility drag) and reporting it as "expected" understated every
+    # forecast (review finding). The median stays in the p50 band.
+    exp_return = float(paths[:, -1].mean() / last_price - 1)
+    median_return = float(median[-1] / last_price - 1)
     prob_up = float(np.mean(paths[:, -1] > last_price))
 
     return {
@@ -168,6 +172,7 @@ def forecast(close: pd.Series, horizon: int = 21, n_paths: int = 2000, alpha: fl
         "bands": bands,
         "horizon_days": horizon,
         "expected_return_pct": exp_return * 100,
+        "median_return_pct": median_return * 100,
         "prob_up": prob_up,
         "model_daily_drift_pct": float(mu) * 100,
         "annualized_drift_pct": (float(mu) * 252) * 100,
@@ -231,13 +236,22 @@ def forecast_long(close: pd.Series, horizon_days: int, mandate_key: str = "balan
     floor = mnd.RF - LONG_SHARPE_CAP * sigma_252
     mu_lt = float(np.clip(mu_lt, floor, cap))
 
-    # Volatility: full-cycle vol, widened to a horizon floor or the current regime.
-    kappa = float(np.interp(horizon_days, _KAPPA_H[0], _KAPPA_H[1]))
+    # Volatility. Two review fixes here:
+    # 1. The CENTRAL scenario uses real observed vol (regime-adjusted); the
+    #    horizon-uncertainty cushion kappa applies to the OUTER bands only.
+    #    Feeding kappa into the central paths dragged the p50 down through the
+    #    Ito term — a band-widening device was silently lowering the median.
+    # 2. Paths are sampled WEEKLY, not monthly: monthly points systematically
+    #    understated intra-path max drawdown and therefore the mandate-breach
+    #    probability — worst exactly where it matters (capital-preservation /
+    #    CD-alternative tolerance gates).
     regime = sigma_60 / sigma_252 if sigma_252 > 0 else 1.0
-    sigma_eff = sigma_252 * max(kappa, regime)
+    kappa = float(np.interp(horizon_days, _KAPPA_H[0], _KAPPA_H[1]))
+    sigma_central = sigma_252 * max(1.0, regime)
+    sigma_outer = sigma_252 * max(kappa, regime) * OUTER_BAND_VOL_INFLATION
 
-    steps = max(1, int(round(horizon_days / 21.0)))   # monthly steps
-    dt = 1.0 / 12.0
+    steps = max(1, int(round(horizon_days / 5.0)))    # weekly steps
+    dt = 1.0 / 52.0
     rng = np.random.default_rng(12345)
     Z = rng.standard_normal((LONG_N_PATHS, steps))
 
@@ -245,8 +259,9 @@ def forecast_long(close: pd.Series, horizon_days: int, mandate_key: str = "balan
         log_step = (mu_lt - 0.5 * sig**2) * dt + sig * np.sqrt(dt) * Z
         return base * np.exp(np.cumsum(log_step, axis=1))
 
-    inner = _paths(sigma_eff)                              # central scenario
-    outer = _paths(sigma_eff * OUTER_BAND_VOL_INFLATION)  # widened tails
+    inner = _paths(sigma_central)   # central scenario: observed vol
+    outer = _paths(sigma_outer)     # tails: horizon cushion + vol-of-vol
+    sigma_eff = sigma_outer         # reported as the band vol in params
 
     pct = lambda a, q: np.percentile(a, q, axis=0)  # noqa: E731
     bands = {
@@ -267,7 +282,7 @@ def forecast_long(close: pd.Series, horizon_days: int, mandate_key: str = "balan
     tol = -mnd.get(mandate_key)["max_drawdown_tolerance_pct"] / 100.0
 
     future = pd.bdate_range(start=close.index[-1] + pd.Timedelta(days=1),
-                            periods=steps, freq="21B")
+                            periods=steps, freq="5B")
     return {
         "kind": "long",
         "label": _long_label(horizon_days),
@@ -292,10 +307,11 @@ def forecast_long(close: pd.Series, horizon_days: int, mandate_key: str = "balan
             "anchor_basis": anchor_basis,
             "anchor_weight_lambda": round(lam, 2),
             "sigma_ann_pct": round(sigma_252 * 100, 1),
+            "sigma_central_pct": round(sigma_central * 100, 1),
             "sigma_eff_pct": round(sigma_eff * 100, 1),
             "regime_mult": round(max(kappa, regime), 2),
             "n_paths": LONG_N_PATHS,
-            "step": "monthly",
+            "step": "weekly",
         },
         "disclaimer": "Strategic statistical projection, not a trading forecast or guarantee. "
                       "Bands widen with the square root of time and assume the trailing-vol regime persists.",

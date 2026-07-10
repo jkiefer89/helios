@@ -128,9 +128,12 @@ _SENT = {"aggregate_score": 0.0, "aggregate_label": "neutral", "count": 0}
 
 
 def test_event_risk_damper_shrinks_conviction_never_flips():
-    close = _close()
+    idx = pd.bdate_range("2024-01-02", periods=300)
+    rng = np.random.default_rng(3)
+    close = pd.Series(100 * np.exp(np.cumsum(rng.normal(0.60 / 252, 0.008, 300))), index=idx)
     fc = forecast.forecast(close, horizon=21, n_paths=200)
     base = signals.evaluate(close, fc, _SENT)
+    assert abs(base["score"]) > 0.05  # precondition: a real signal to damp
     risky = signals.evaluate(close, fc, _SENT, macro_context={
         "fomc_imminent": True, "fomc_days_until": 2, "gpr_index": 1.0})
     assert abs(risky["score"]) < abs(base["score"])

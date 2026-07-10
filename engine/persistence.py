@@ -1368,7 +1368,10 @@ class SQLiteStore:
                         self._store_text(redact_secrets(str(entry.get("strategic_action") or ""))[:16]),
                         self._store_text(redact_secrets(str(entry["my_action"]))[:16]),
                         redact_secrets(str(entry.get("agreement") or ""))[:16],
-                        self._store_text(redact_secrets(str(entry.get("rationale") or ""))[:2000]),
+                        # redact_long_text, not redact_secrets: the latter caps
+                        # its INPUT at 800 chars, silently truncating rationales
+                        # before the [:2000] limit applied (review finding).
+                        self._store_text(redact_long_text(str(entry.get("rationale") or ""), limit=2000)),
                         str(entry.get("decision_date") or ""),
                         self._store_number(entry.get("decision_price")),
                         redact_secrets(str(entry.get("data_mode") or ""))[:32],
