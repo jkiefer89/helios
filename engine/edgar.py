@@ -254,8 +254,16 @@ class EdgarClient:
                 if len(row) >= 4 and str(row[3]).strip().upper() == sym:
                     return Resolution(symbol=sym, cik=str(int(row[0])), kind="fund",
                                       series_id=str(row[1] or ""), class_id=str(row[2] or ""))
-        except EdgarError:
-            pass  # fall through to the stock map; surface a combined error below
+        except EdgarError as exc:
+            # Without the fund map we cannot tell fund from stock, and tickers
+            # like QQQ appear in BOTH maps. Falling through here classified an
+            # ETF as a permanent stock leaf during a transient SEC outage (the
+            # look-through cache then froze it for the process lifetime —
+            # review finding). Refusing to guess keeps the failure transient.
+            raise EdgarError(
+                f"Cannot classify {sym!r}: the fund ticker map is unavailable "
+                f"({exc}); refusing to guess fund-vs-stock."
+            ) from exc
         # Operating companies (a stock holding has no look-through; it is a leaf).
         stocks = self.get_json(STOCK_TICKERS_URL)
         values = stocks.values() if isinstance(stocks, dict) else []

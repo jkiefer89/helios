@@ -57,7 +57,12 @@ _MF_MAP = {"fields": ["cik", "seriesId", "classId", "symbol"],
                     [PART_CIK, "S000077777", "C000077777", "VPART"],
                     [NEWFUND_CIK, "S000088888", "C000088888", "VNEW"]]}
 
-_STOCK_MAP = {"0": {"cik_str": AAPL_CIK, "ticker": "AAPL", "title": "Apple Inc."}}
+GOLD_CIK = 3456789    # commodity trust: stock ticker map, SIC 6221, no N-PORT
+UIT_CIK = 4567890     # SPY-style UIT: stock ticker map, files registrant-level N-PORT
+
+_STOCK_MAP = {"0": {"cik_str": AAPL_CIK, "ticker": "AAPL", "title": "Apple Inc."},
+              "1": {"cik_str": GOLD_CIK, "ticker": "GLDT", "title": "Gold Shares Test Trust"},
+              "2": {"cik_str": UIT_CIK, "ticker": "SPYT", "title": "Test UIT ETF Trust"}}
 
 
 def _subs(cik, name, former, form, acc, prim, report_date):
@@ -78,6 +83,18 @@ _SUBS_PART = _subs(PART_CIK, "Helios Partial Fund", "Helios Old Partial Fund",
 # A newly-launched fund that has registered but not yet filed any N-PORT.
 _SUBS_NEWFUND = _subs(NEWFUND_CIK, "Helios Brand New Fund", "Helios Predecessor Fund",
                       "485BPOS", "0002222222-25-000009", "prospectus.htm", "")
+# An operating company (SIC 3571), a commodity trust (SIC 6221 — the live GLD/
+# SLV/IAU/USO shape), and a UIT that files N-PORT at the REGISTRANT level with
+# no series id (the live SPY shape).
+_SUBS_AAPL = {**_subs(AAPL_CIK, "Apple Inc.", "Apple Computer Inc",
+                      "10-K", "0000320193-25-000001", "aapl-10k.htm", "2025-09-27"),
+              "sic": "3571"}
+_SUBS_GOLD = {**_subs(GOLD_CIK, "Gold Shares Test Trust", "",
+                      "10-K", "0004444444-25-000004", "gold-10k.htm", "2025-09-30"),
+              "sic": "6221"}
+_SUBS_UIT = {**_subs(UIT_CIK, "Test UIT ETF Trust", "",
+                     "NPORT-P", "0005555555-25-000005", "primary_doc.xml", _AS_OF),
+             "sic": "6726"}
 
 
 def _atom(accession: str, ftype: str = "NPORT-P", date: str = "2025-05-20") -> str:
@@ -97,6 +114,10 @@ def _url_map() -> dict:
         edgar.submissions_url(FUND_CIK): json.dumps(_SUBS_FUND),
         edgar.submissions_url(PART_CIK): json.dumps(_SUBS_PART),
         edgar.submissions_url(NEWFUND_CIK): json.dumps(_SUBS_NEWFUND),
+        edgar.submissions_url(AAPL_CIK): json.dumps(_SUBS_AAPL),
+        edgar.submissions_url(GOLD_CIK): json.dumps(_SUBS_GOLD),
+        edgar.submissions_url(UIT_CIK): json.dumps(_SUBS_UIT),
+        edgar.archives_doc_url(UIT_CIK, "0005555555-25-000005", "primary_doc.xml"): _NPORT_XML,
         # N-PORT is selected per series via the browse feed (multi-series trusts).
         edgar.browse_series_url("S000099999"): _atom("0001111111-25-000001"),
         edgar.browse_series_url("S000077777"): _atom("0003333333-25-000003"),
@@ -194,6 +215,38 @@ def test_newly_launched_fund_resolves_but_reports_no_nport_honestly():
     assert lt.source == "none"
     assert "N-PORT" in lt.warning
     assert lt.former_names[0]["name"] == "Helios Predecessor Fund"
+
+
+def test_commodity_trust_leaf_is_not_common_equity():
+    # GLD/SLV/IAU/USO live in the STOCK ticker map; a 10% gold sleeve was
+    # rolled up as full-confidence "Equity (common)" (review finding).
+    lt = holdings.fetch_lookthrough("GLDT", client=_fake_client())
+    assert lt.resolved and lt.kind == "stock"
+    assert lt.asset_class == "Commodity trust / ETP (non-transparent)"
+    roll = holdings.model_lookthrough(_model(("GLDT", 0.1), ("AAPL", 0.9)), client=_fake_client())
+    classes = roll["exposure"]["asset_class_weights_pct"]
+    assert classes["Equity (common)"] == pytest.approx(90.0, abs=0.01)
+    assert classes["Commodity trust / ETP (non-transparent)"] == pytest.approx(10.0, abs=0.01)
+    states = {p["ticker"]: p["state"] for p in roll["per_holding"]}
+    assert states == {"GLDT": "leaf_etp", "AAPL": "leaf"}
+
+
+def test_registrant_level_nport_filer_gets_real_lookthrough():
+    # SPY files trust-level NPORT-P despite living in the stock ticker map:
+    # it must get the real look-through, not an opaque equity leaf.
+    lt = holdings.fetch_lookthrough("SPYT", client=_fake_client())
+    assert lt.resolved and lt.kind == "fund" and lt.source == "sec_nport"
+    assert {p["ticker"] for p in lt.positions} == {"MSFT", "NVDA", ""}
+
+
+def test_mf_map_outage_refuses_to_guess_stock_vs_fund():
+    # QQQ appears in BOTH ticker maps; guessing "stock" during a transient MF-map
+    # outage froze the misclassification in the look-through cache forever.
+    um = _url_map()
+    del um[edgar.MF_TICKERS_URL]
+    lt = holdings.fetch_lookthrough("AAPL", client=_fake_client(um), use_cache=False)
+    assert lt.resolved is False and lt.kind == "unresolved"
+    assert "refusing to guess" in lt.warning
 
 
 def test_unresolved_symbol_is_flagged_not_fabricated():

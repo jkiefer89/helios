@@ -68,6 +68,7 @@ class LookThrough:
     parse_errors: int = 0       # positions the filing carried but we could not parse
     truncated: bool = False     # filing exceeded the position cap
     warning: str = ""
+    asset_class: str = "Equity (common)"   # leaf classification (stock kind only)
 
 
 # --------------------------------------------------------------------------- #
@@ -104,6 +105,15 @@ def fetch_lookthrough(symbol: str, client=None, use_cache: bool = True) -> LookT
     return result
 
 
+# SEC registrants in the stock ticker map that are NOT operating companies.
+# GLD/SLV/IAU/USO all file under SIC 6221 (commodity contracts); 6799
+# ("Investors, NEC") covers other pooled vehicles. Verified live 2026-07-10.
+_LEAF_SIC_LABELS = {
+    "6221": "Commodity trust / ETP (non-transparent)",
+    "6799": "Pooled vehicle (non-transparent)",
+}
+
+
 def _resolve_uncached(sym: str, client) -> LookThrough:
     try:
         res = client.resolve(sym)
@@ -112,13 +122,48 @@ def _resolve_uncached(sym: str, client) -> LookThrough:
                            warning=str(exc))
 
     if res.kind == "stock":
-        return LookThrough(symbol=sym, resolved=True, kind="stock", source="leaf",
-                           cik=res.cik, warning="")
+        return _classify_stock_leaf(sym, res, client)
 
-    # Fund: pull submissions (for former names + filing list) then N-PORT.
-    former: list = []
+    return _fund_lookthrough(sym, res, client)
+
+
+def _classify_stock_leaf(sym: str, res, client) -> LookThrough:
+    """A stock-map hit is NOT automatically a common-equity leaf.
+
+    Commodity/grantor trusts (GLD, USO) and UIT ETFs (SPY) live in the STOCK
+    ticker map, not the fund map, and were rolled up as full-confidence
+    'Equity (common)' (review finding: a 10% GLD / 5% USO model reported 100%
+    common equity). The registrant's submissions — one cached fetch — say what
+    it really is: an N-PORT filer gets the real look-through, a non-operating
+    SIC gets an honest ETP label, and only an operating company stays equity.
+    """
     try:
         subs = client.get_submissions(res.cik)
+    except edgar.EdgarError as exc:
+        return LookThrough(symbol=sym, resolved=True, kind="stock", source="leaf",
+                           cik=res.cik, asset_class="Equity (leaf, unverified)",
+                           warning=f"Could not verify registrant type: {exc}")
+    recent = ((subs.get("filings") or {}).get("recent")) or {}
+    forms = {str(f).upper() for f in recent.get("form") or []}
+    if any(f in ("NPORT-P", "NPORT-P/A") for f in forms):
+        # SPY-style trusts file registrant-level N-PORT: do the real look-through.
+        fund_res = edgar.Resolution(symbol=sym, cik=res.cik, kind="fund")
+        return _fund_lookthrough(sym, fund_res, client, submissions=subs)
+    sic = str(subs.get("sic") or "").strip()
+    label = _LEAF_SIC_LABELS.get(sic)
+    if label:
+        return LookThrough(symbol=sym, resolved=True, kind="stock", source="leaf",
+                           cik=res.cik, asset_class=label, warning="")
+    return LookThrough(symbol=sym, resolved=True, kind="stock", source="leaf",
+                       cik=res.cik, warning="")
+
+
+def _fund_lookthrough(sym: str, res, client, submissions: dict | None = None) -> LookThrough:
+    # Pull submissions (for former names + filing list) then N-PORT.
+    former: list = []
+    subs = submissions
+    try:
+        subs = subs or client.get_submissions(res.cik)
         former = client.former_names(subs)
     except edgar.EdgarError:
         subs = None
@@ -263,9 +308,10 @@ def model_lookthrough(model, client=None, budget: int = _RESOLVE_BUDGET) -> dict
             state = "looked_through"
         elif lt.kind == "stock" and lt.resolved:
             leaf_w += w
-            _accumulate(combined, lt.symbol, lt.symbol, "Equity (common)", w)
-            by_class["Equity (common)"] = by_class.get("Equity (common)", 0.0) + w
-            state = "leaf"
+            label = lt.asset_class or "Equity (common)"
+            _accumulate(combined, lt.symbol, lt.symbol, label, w)
+            by_class[label] = by_class.get(label, 0.0) + w
+            state = "leaf" if label == "Equity (common)" else "leaf_etp"
         else:
             uncovered_w += w
             unresolved.append({"ticker": h.ticker, "reason": lt.warning or "could not look through"})
