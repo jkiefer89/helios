@@ -1527,6 +1527,32 @@ class SQLiteStore:
         except Exception:
             return []
 
+    def pending_signal_entries(self, limit: int = 500) -> list[dict[str, Any]]:
+        """Journal rows still awaiting a forward measurement, OLDEST first.
+
+        The refresh loop used the newest-first ``signal_journal`` listing, so
+        pending 63/252-day entries fell out of its window long before their
+        forward horizon completed and were never measured again (review
+        finding). Oldest-first over pending-only rows cannot starve.
+        """
+        if not self.available:
+            return []
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM signal_journal
+                    WHERE forward_status NOT IN ('measured', 'not_measurable')
+                    ORDER BY created_at ASC, id ASC
+                    LIMIT ?
+                    """,
+                    (max(1, min(int(limit), 2000)),),
+                ).fetchall()
+                return [self._signal_row(row) for row in rows]
+        except Exception:
+            return []
+
     def save_report_snapshot(self, snapshot: dict[str, Any]) -> dict[str, Any]:
         if not self.available:
             return {"saved": False, "warning": self.warning}

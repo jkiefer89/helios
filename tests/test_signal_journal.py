@@ -200,3 +200,36 @@ def test_journal_read_path_does_not_refresh_or_fetch(monkeypatch, tmp_path):
     assert resp.get_json()["entries"][0]["target_id"] == "READONLY"
     assert refresh_calls == []
     assert write_calls == []
+
+
+def test_refresh_cannot_starve_old_pending_entries(monkeypatch, tmp_path):
+    # A pending long-horizon entry buried under newer rows must still be
+    # refreshed: the newest-first listing starved it forever (review finding).
+    store = _use_db(monkeypatch, tmp_path)
+    close = price_series(days=90, start=100.0, daily=0.002)
+    signal_journal.record_signal(
+        target_kind="instrument", target_id="OLDPEND", target_name="Old Pending",
+        close=close.iloc[:70], input_close=close.iloc[:70],
+        signal={"action": "BUY", "score": 0.5}, horizon_days=10, benchmark="",
+        source_counts={"upload": 1}, eligible_for_real_research=True, data_mode="real",
+    )
+    assert store.signal_journal(limit=1)[0]["forward_status"] == "pending"
+    # Bury it under newer measured entries (distinct scores -> distinct dedupe keys).
+    for i in range(5):
+        signal_journal.record_signal(
+            target_kind="instrument", target_id=f"NEW{i}", target_name=f"New {i}",
+            close=close, input_close=close.iloc[:70],
+            signal={"action": "BUY", "score": 0.1 + i / 100.0}, horizon_days=10,
+            benchmark="", source_counts={"upload": 1},
+            eligible_for_real_research=True, data_mode="real",
+        )
+    # Register full history so the pending entry can now be measured.
+    inst = data.Instrument("OLDPEND", "Old Pending", close.to_frame("close"), "upload", [])
+    data.register(inst)
+    # A tiny newest-first window would never reach the old row; the pending
+    # queue (oldest first) must.
+    pend = store.pending_signal_entries(limit=1)
+    assert pend and pend[0]["target_id"] == "OLDPEND"
+    signal_journal.refresh_forward_results(limit=2)
+    statuses = {e["target_id"]: e["forward_status"] for e in store.signal_journal(limit=20)}
+    assert statuses["OLDPEND"] == "measured"

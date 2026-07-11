@@ -215,3 +215,32 @@ def test_stale_price_anchor_blocks_outcome_scoring(store):
     result = decision_journal.evaluate_outcomes(raw)
     assert result["outcome_status"] == "not_measurable"
     assert result["outcomes"] == {}
+
+
+# --------------------------------------------------------------------------- #
+# model-target decisions must be measurable when the model data is real
+# --------------------------------------------------------------------------- #
+def test_model_decision_with_real_holdings_is_measurable(store):
+    from engine import portfolio
+    _upload("MDA")
+    _upload("MDB")
+    portfolio.register(portfolio.Model(
+        id="MDEC", name="Decision Model", mandate_key="balanced", mandate_context="",
+        holdings=[portfolio.Holding("MDA", 0.6), portfolio.Holding("MDB", 0.4)]))
+    entry = decision_journal.record_decision(
+        target_kind="model", target_id="MDEC", my_action="HOLD")
+    # Raw build_series provenance has no data_mode key; reading it directly
+    # left every model decision permanently not_measurable (review finding).
+    assert entry["data_mode"] == "real"
+    assert entry["outcome_status"] == "pending"
+
+
+def test_model_decision_with_sample_holdings_stays_not_measurable(store):
+    from engine import portfolio
+    sample = next(iter(data.all_instruments()))
+    portfolio.register(portfolio.Model(
+        id="MSAMP", name="Sample Model", mandate_key="balanced", mandate_context="",
+        holdings=[portfolio.Holding(sample.symbol, 1.0)]))
+    entry = decision_journal.record_decision(
+        target_kind="model", target_id="MSAMP", my_action="HOLD")
+    assert entry["outcome_status"] == "not_measurable"

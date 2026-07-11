@@ -301,7 +301,9 @@ def drift_series(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def refresh_forward_results(limit: int = 250) -> None:
     store = persistence.get_store()
-    for entry in store.signal_journal(limit=limit):
+    # Pending-only, oldest first: the newest-250 listing starved long-horizon
+    # (63/252d) entries out of the refresh window forever (review finding).
+    for entry in store.pending_signal_entries(limit=limit):
         if entry["forward_status"] == "measured":
             continue
         if not _real_eligible(entry):

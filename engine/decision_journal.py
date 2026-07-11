@@ -47,7 +47,11 @@ def _target_series(target_kind: str, target_id: str) -> tuple[pd.Series, str, st
         if mdl is None:
             raise ValueError(f"Unknown model '{target_id}'.")
         ps = portfolio.build_series(mdl)
-        prov = ps.provenance or {}
+        # build_series' raw provenance carries no data_mode key — reading it
+        # directly left EVERY model decision permanently not_measurable
+        # (review finding). provenance.portfolio() derives the mode the same
+        # way every other consumer does: real / mixed / invalid_for_research.
+        prov = provenance.portfolio(ps.provenance or {})
         return _clean_close(ps.close), mdl.name, str(prov.get("data_mode") or ""), mdl.mandate_key
     inst = data.get(target_id)
     if inst is None:
