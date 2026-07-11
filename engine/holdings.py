@@ -214,8 +214,11 @@ def summarize(lt: LookThrough) -> dict:
     explicit warning rather than being implied to be zero.
     """
     positions = lt.positions or []
-    covered = sum((p["weight_pct"] or 0.0) for p in positions)
-    matched = sum((p["weight_pct"] or 0.0) for p in positions if p["identified"])
+    # Gross (absolute) representation: negative rows (shorts, payables) are
+    # REPRESENTED positions — netting them deflated covered_weight_pct and
+    # inflated the uncovered remainder past 100% (review finding).
+    covered = sum(abs(p["weight_pct"] or 0.0) for p in positions)
+    matched = sum(abs(p["weight_pct"] or 0.0) for p in positions if p["identified"])
     uncovered = round(max(0.0, 100.0 - covered), 2)
     by_class: dict[str, float] = {}
     for p in positions:
@@ -289,7 +292,11 @@ def model_lookthrough(model, client=None, budget: int = _RESOLVE_BUDGET) -> dict
 
         intra = 0.0
         if lt.kind == "fund" and lt.resolved and lt.positions:
-            intra = min(1.0, max(0.0, sum((p["weight_pct"] or 0.0) for p in lt.positions) / 100.0))
+            # GROSS representation: real filings carry negative pctVal rows
+            # (shorts, written derivatives, payables — review finding). Netting
+            # them here clamped inverse funds to intra=0 and mislabeled them
+            # "could not look through"; gross measures what the filing SHOWS.
+            intra = min(1.0, sum(abs(p["weight_pct"] or 0.0) for p in lt.positions) / 100.0)
         if lt.kind == "fund" and lt.resolved and intra > 0:
             # Only the represented share of the fund is "looked through"; the
             # unseen remainder (cash/derivatives/unparsed) counts as uncovered so
@@ -300,7 +307,10 @@ def model_lookthrough(model, client=None, budget: int = _RESOLVE_BUDGET) -> dict
                 as_of_dates.append(lt.as_of)
             for p in lt.positions:
                 contrib = w * ((p["weight_pct"] or 0.0) / 100.0)
-                if contrib <= 0:
+                # Signed accumulation: dropping shorts attributed long-only
+                # exposure to long-short funds while coverage counted the
+                # netted book (review finding).
+                if contrib == 0.0:
                     continue
                 _accumulate(combined, p["name"], p["ticker"], p["asset_class"], contrib,
                             cusip=p.get("cusip", ""))

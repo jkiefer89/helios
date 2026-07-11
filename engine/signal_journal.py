@@ -62,6 +62,13 @@ def record_signal(
     score = float(signal.get("score") or 0.0)
     action = str(signal.get("action") or "HOLD").upper()
     real_eligible = bool(eligible_for_real_research)
+    # Settlement guard (mirrors the decision journal's 7-day rule): a signal
+    # recorded TODAY on a price window ending months ago blends today's
+    # sentiment/macro with stale prices, then scores a forward window whose
+    # bars were already knowable at record time (review finding).
+    lag_days = (datetime.now(timezone.utc).date() - clean_input.index.max().date()).days
+    fresh_enough = lag_days <= 7
+    measurable = real_eligible and fresh_enough
     event = {
         "dedupe_key": _dedupe_key(target_kind, target_id, input_end, horizon_days, action, score),
         "target_kind": target_kind,
@@ -78,11 +85,16 @@ def record_signal(
         "eligible_for_real_research": real_eligible,
         "source_counts": source_counts,
         "metadata": dict(metadata or {}),
-        **(_forward_result(full_close, input_end, horizon_days) if real_eligible
+        **(_forward_result(full_close, input_end, horizon_days) if measurable
            else _not_measurable_result()),
     }
-    if real_eligible:
-        benchmark_result = _benchmark_result(benchmark, input_end, horizon_days)
+    if real_eligible and not fresh_enough:
+        event["metadata"]["not_measurable_reason"] = (
+            f"Price history ends {lag_days} days before the signal was recorded; "
+            "scoring a forward window that was already observable grants hindsight.")
+    if measurable:
+        benchmark_result = _benchmark_result(benchmark, input_end, horizon_days,
+                                             target_end_date=event.get("forward_end_date"))
         if benchmark_result.get("benchmark_result_pct") is not None:
             event.update(benchmark_result)
             if event.get("forward_result_pct") is not None:
@@ -313,7 +325,9 @@ def refresh_forward_results(limit: int = 250) -> None:
             continue
         close = _series_for_entry(entry)
         result = _forward_result(close, entry["input_end_date"], entry["horizon_days"])
-        benchmark_result = _benchmark_result(entry["benchmark"], entry["input_end_date"], entry["horizon_days"])
+        benchmark_result = _benchmark_result(entry["benchmark"], entry["input_end_date"],
+                                             entry["horizon_days"],
+                                             target_end_date=result.get("forward_end_date"))
         if benchmark_result.get("benchmark_result_pct") is not None:
             result.update(benchmark_result)
         if result.get("forward_result_pct") is not None and result.get("benchmark_result_pct") is not None:
@@ -341,7 +355,13 @@ def _series_for_entry(entry: dict[str, Any]) -> pd.Series:
     try:
         if entry["target_kind"] == "instrument":
             inst = data.get(entry["target_id"])
-            return inst.df["close"] if inst is not None else pd.Series(dtype=float)
+            if inst is None or not provenance.is_real_source(inst.source):
+                # Mirrors the model/benchmark guards: if the symbol currently
+                # resolves to a bundled sample/simulated series, a real-eligible
+                # entry must stay pending — never measured against synthetic
+                # prices and frozen as "measured" (review finding).
+                return pd.Series(dtype=float)
+            return inst.df["close"]
         if entry["target_kind"] == "model":
             model = portfolio.get(entry["target_id"])
             if model is None:
@@ -355,7 +375,8 @@ def _series_for_entry(entry: dict[str, Any]) -> pd.Series:
     return pd.Series(dtype=float)
 
 
-def _benchmark_result(benchmark: str, input_end_date: str, horizon_days: int) -> dict[str, Any]:
+def _benchmark_result(benchmark: str, input_end_date: str, horizon_days: int,
+                      target_end_date: str | None = None) -> dict[str, Any]:
     try:
         inst = data.get(benchmark)
         if inst is None:
@@ -367,7 +388,20 @@ def _benchmark_result(benchmark: str, input_end_date: str, horizon_days: int) ->
                 f"Benchmark {benchmark} has no live/uploaded price history; "
                 "benchmark result and alpha are withheld."
             )}
-        result = _forward_result(inst.df["close"], input_end_date, horizon_days)
+        close = _clean_close(inst.df["close"])
+        if target_end_date:
+            # Align to the TARGET's realized calendar window: counting
+            # `horizon` benchmark bars compared mismatched periods whenever
+            # the target trades a different calendar (review finding).
+            if close.empty or close.index.max() < pd.Timestamp(target_end_date):
+                return {}
+            start_px = close[close.index <= pd.Timestamp(input_end_date)]
+            end_px = close[close.index <= pd.Timestamp(target_end_date)]
+            if start_px.empty or end_px.empty or float(start_px.iloc[-1]) <= 0:
+                return {}
+            ret = (float(end_px.iloc[-1]) / float(start_px.iloc[-1]) - 1.0) * 100.0
+            return {"benchmark_result_pct": round(ret, 4)}
+        result = _forward_result(close, input_end_date, horizon_days)
         if result.get("forward_result_pct") is None:
             return {}
         return {"benchmark_result_pct": result["forward_result_pct"]}

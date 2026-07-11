@@ -97,6 +97,13 @@ _ACTION_UPGRADE_RE = re.compile(
     r"|add(?:ing)?\s+(?:\w+\s+){0,2}exposure"
     r"|increas(?:e|ing)\s+(?:\w+\s+){0,2}(?:position|allocation|exposure|weight|stake|holding)s?)\b"
 )
+# Downgrade language against a BUY is dissent too — there was no downgrade
+# detection at all (review finding).
+_ACTION_DOWNGRADE_RE = re.compile(
+    r"\b(?:sell|exit(?:ing)?|trim(?:ming)?|underweight"
+    r"|clos(?:e|ing)\s+(?:the\s+)?position"
+    r"|reduc(?:e|ing)\s+(?:\w+\s+){0,2}(?:position|allocation|exposure|weight|stake|holding)s?)\b"
+)
 DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-8"
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_LOCAL_MODEL = ""
@@ -849,12 +856,24 @@ def validate_ai_output(
         # can weigh both. Detected from the stance field, or (fallback) from
         # upgrade language against a HOLD/REVIEW action.
         stance = str(result.get("stance") or "").strip()
-        # Any dissent phrasing counts ("**DISAGREE**", "Strongly disagree",
-        # "I disagree with the HOLD"), not only a leading literal — a
-        # startswith check missed most real dissents (review finding).
-        disagrees = bool(re.search(r"\bdisagree", stance, re.IGNORECASE))
-        if not stance and action in {"HOLD", "REVIEW"} and _ACTION_UPGRADE_RE.search(_result_text(result).lower()):
-            disagrees = True
+        stance_l = stance.lower()
+        # Negation-aware stance parsing ("I don't disagree", "hard to
+        # disagree" are AGREEMENT), plus a direction-aware narrative fallback
+        # that runs unless the stance is an explicit AGREE — the old fallback
+        # only ran on an EMPTY stance and only knew upgrade-vs-HOLD, so
+        # "the engine is wrong, I'd be selling" against a BUY never flagged
+        # dissent (review finding).
+        explicit_agree = bool(re.match(r"[\s*_#>\"']*agree\b", stance_l))
+        negated = bool(re.search(
+            r"\b(?:don'?t|do not|hard to|difficult to|can'?t|cannot|won'?t|not going to)\s+disagree",
+            stance_l))
+        disagrees = bool(re.search(r"\bdisagree", stance_l)) and not negated
+        if not disagrees and not explicit_agree:
+            text_l = _result_text(result).lower()
+            if action in {"HOLD", "REVIEW", "SELL"} and _ACTION_UPGRADE_RE.search(text_l):
+                disagrees = True
+            elif action == "BUY" and _ACTION_DOWNGRADE_RE.search(text_l):
+                disagrees = True
         result["ai_disagrees_with_action"] = disagrees
     data_mode = _data_mode(sanitized_payload)
     if data_mode:

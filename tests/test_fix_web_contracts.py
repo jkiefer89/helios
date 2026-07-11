@@ -189,7 +189,9 @@ def test_model_analyze_ships_real_verdict_for_uploaded_model(client, monkeypatch
 # --------------------------------------------------------------------------- #
 def test_sample_benchmark_never_supplies_alpha_for_real_signals(monkeypatch, tmp_path):
     _use_db(monkeypatch, tmp_path)
-    close = price_series(days=90, daily=0.002)
+    # Input window ends today (settlement guard); synthetic future bars make
+    # the forward window immediately measurable offline.
+    close = price_series(days=90, daily=0.002, future_days=20)
 
     entry = signal_journal.record_signal(
         target_kind="instrument",
@@ -213,8 +215,8 @@ def test_sample_benchmark_never_supplies_alpha_for_real_signals(monkeypatch, tmp
 
 def test_real_benchmark_still_supplies_alpha(monkeypatch, tmp_path):
     _use_db(monkeypatch, tmp_path)
-    close = price_series(days=90, daily=0.002)
-    benchmark = price_series(days=95, daily=0.0005)
+    close = price_series(days=90, daily=0.002, future_days=20)
+    benchmark = price_series(days=95, daily=0.0005, future_days=20)
     data.register(data.Instrument("BENCHR", "Bench R", benchmark.to_frame("close"), "live", []))
 
     entry = signal_journal.record_signal(

@@ -179,13 +179,31 @@ def parse_model_file(raw: bytes, filename: str, name: str,
     if not raw_pairs:
         raise ValueError("No valid tickers found in the file.")
     if len(raw_pairs) > MAX_HOLDINGS:
-        raw_pairs = raw_pairs[:MAX_HOLDINGS]
+        # Loud, not silent: the row cap in _read_table means the true count may
+        # not even be known — truncating a client book without saying so
+        # misstates the model (review finding).
+        raise ValueError(
+            f"The file has more than {MAX_HOLDINGS} holdings; Helios caps models "
+            f"at {MAX_HOLDINGS}. Split the model or trim the file — silently "
+            "dropping holdings would misstate the book.")
+
+    # Silently reweighting a client book is unacceptable: when a Weight column
+    # exists and SOME weights parse, blank/unreadable cells used to merge as
+    # 0.0 — dropped from the model with the remainder renormalized, no warning
+    # (review finding). Reject and name the offenders instead.
+    any_weights = any(not np.isnan(w) for _, w in raw_pairs)
+    if wcol is not None and any_weights:
+        blank = [tk for tk, w in raw_pairs if np.isnan(w)]
+        if blank:
+            shown = ", ".join(blank[:8]) + ("…" if len(blank) > 8 else "")
+            raise ValueError(
+                f"{len(blank)} holding(s) have a blank or unreadable Weight cell: {shown}. "
+                "Fix the Weight column, or remove it to equal-weight all holdings.")
 
     # Merge duplicate tickers (sum their weights).
     merged: dict[str, float] = {}
     for tk, w in raw_pairs:
         merged[tk] = merged.get(tk, 0.0) + (0.0 if np.isnan(w) else w)
-    any_weights = any(not np.isnan(w) for _, w in raw_pairs)
 
     tickers = list(merged.keys())
     if not any_weights:

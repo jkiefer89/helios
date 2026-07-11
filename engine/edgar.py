@@ -39,6 +39,23 @@ _RETRY_STATUS = {429, 500, 502, 503, 504}
 _MAX_RETRIES = 3
 _RETRY_BACKOFF_S = 0.6
 
+# Process-wide request spacing toward SEC's 10 req/s fair-access limit. The
+# shared client is hit concurrently by the background warm loop, analyze
+# requests, and look-throughs with no throttle at all (review finding) — an
+# IP block would take out events, look-through, AND N-PORT at once.
+_MIN_REQUEST_INTERVAL_S = 0.15   # ~6.7 req/s worst case
+_THROTTLE_LOCK = threading.Lock()
+_last_request_ts = 0.0
+
+
+def _throttle() -> None:
+    global _last_request_ts
+    with _THROTTLE_LOCK:
+        wait = _MIN_REQUEST_INTERVAL_S - (time.monotonic() - _last_request_ts)
+        if wait > 0:
+            time.sleep(wait)
+        _last_request_ts = time.monotonic()
+
 # --------------------------------------------------------------------------- #
 # Endpoints (exposed so tests can build identical cache/fetch keys)
 # --------------------------------------------------------------------------- #
@@ -155,6 +172,7 @@ def browse_series_url(series_id: str, form: str = "NPORT-P", count: int = 10) ->
 def _urllib_get(url: str, headers: dict, timeout: float) -> str:
     last_exc: Exception | None = None
     for attempt in range(_MAX_RETRIES):
+        _throttle()   # global spacing across every thread, retries included
         try:
             req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 (https only, fixed hosts)
@@ -438,14 +456,10 @@ def parse_nport(xml_text: str) -> NportReport:
 
     positions: list[NportPosition] = []
     parse_errors = 0
-    truncated = False
     if container is not None:
         for sec in list(container):
             if _localname(sec.tag) != "invstOrSec":
                 continue
-            if len(positions) >= _MAX_NPORT_POSITIONS:
-                truncated = True
-                break
             try:
                 positions.append(_parse_position(sec))
             except Exception:
@@ -453,7 +467,14 @@ def parse_nport(xml_text: str) -> NportReport:
                 # but it must be COUNTED so the gap is visible, not silent.
                 parse_errors += 1
                 continue
+    # Parse EVERYTHING first, sort by weight, THEN truncate: cutting in
+    # document order dropped an arbitrary tail — including possibly the fund's
+    # largest positions — and presented the first 10k as the "top" holdings
+    # (review finding: a real bond ETF files 17,829 positions).
     positions.sort(key=lambda p: (p.weight_pct if p.weight_pct is not None else -1.0), reverse=True)
+    truncated = len(positions) > _MAX_NPORT_POSITIONS
+    if truncated:
+        positions = positions[:_MAX_NPORT_POSITIONS]
     return NportReport(as_of=as_of, total_net_assets=total_net_assets, positions=positions,
                        parse_errors=parse_errors, truncated=truncated)
 

@@ -534,10 +534,12 @@ def test_report_snapshot_embeds_signal_journal_evidence_record(monkeypatch, tmp_
         target_kind="model",
         target_id=model_id,
         target_name="Journal Evidence Model",
+        # Input ends 3 business days ago (within the 7-day settlement guard)
+        # and the remaining bars cover the short horizon -> measurable now.
         close=model_close,
-        input_close=model_close.iloc[:220],
+        input_close=model_close.iloc[:-3],
         signal={"action": "BUY", "score": 0.64},
-        horizon_days=10,
+        horizon_days=3,
         benchmark="BENCHJ",
         source_counts={"upload": 2},
         eligible_for_real_research=True,

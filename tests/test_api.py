@@ -138,6 +138,12 @@ def test_data_quality_dashboard_reports_institutional_issue_categories(client, m
 
     short_live = pd.DataFrame({"close": price_series(days=45).values}, index=price_series(days=45).index)
     data.register(data.Instrument("SHORTLIVE", "Short Live", short_live, "live", []))
+    # An explicitly BACKDATED live series exercises the stale_symbols category
+    # (the shared fixture now ends today, so freshness must be broken on purpose).
+    stale = price_series(days=90)
+    stale.index = stale.index - pd.offsets.BDay(60)
+    data.register(data.Instrument("STALELIVE", "Stale Live",
+                                  stale.to_frame("close"), "live", []))
     store.record_refresh(
         symbol="SHORTLIVE",
         status="error",
@@ -183,7 +189,7 @@ def test_data_quality_dashboard_reports_institutional_issue_categories(client, m
         "coverage_gaps",
         "source_conflicts",
     } <= categories
-    assert any(row["symbol"] == "SHORTLIVE" and row["is_stale"] for row in body["symbols"])
+    assert any(row["symbol"] == "STALELIVE" and row["is_stale"] for row in body["symbols"])
     assert any(row["symbol"] == "SHORTLIVE" and not row["research_ready"] for row in body["symbols"])
     assert any(row["symbol"] == "MISSINGQ" for row in body["missing_data"])
     assert any(row["model_name"] == "Quality Model" for row in body["coverage_gaps"])

@@ -63,8 +63,19 @@ def reset_process_local_stores():
     persistence.reset_store_for_tests()
 
 
-def price_series(days: int = 260, start: float = 100.0, daily: float = 0.001) -> pd.Series:
-    idx = pd.bdate_range("2024-01-02", periods=days)
+def price_series(days: int = 260, start: float = 100.0, daily: float = 0.001,
+                 future_days: int = 0) -> pd.Series:
+    """Synthetic close series ending at the most recent business day.
+
+    The journals' settlement guards treat an input window ending long ago as
+    hindsight (correctly), so fixtures must be FRESH unless a test explicitly
+    backdates. ``future_days`` extends the index past today with synthetic
+    "future" bars — used to exercise forward-measurement paths offline.
+    """
+    end = pd.Timestamp.today().normalize()
+    if future_days:
+        end = end + pd.offsets.BDay(int(future_days))
+    idx = pd.bdate_range(end=end, periods=days)
     values = start * np.cumprod(np.full(days, 1.0 + daily))
     return pd.Series(values, index=idx, name="close")
 

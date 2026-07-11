@@ -158,8 +158,10 @@ def test_evidence_lab_includes_prospective_signal_journal_evidence(monkeypatch, 
     _use_db(monkeypatch, tmp_path)
     from engine.evidence_lab import analyze_instrument
 
-    benchmark = price_series(days=120, start=100, daily=0.0005)
-    close = price_series(days=430, start=100, daily=0.0011)
+    # close extends past today so the 21-day forward window after an input
+    # ending TODAY (row 180) is measurable; benchmark must span that window too.
+    benchmark = price_series(days=120, start=100, daily=0.0005, future_days=30)
+    close = price_series(days=430, start=100, daily=0.0011, future_days=250)
     _register_upload("SPY", benchmark)
     _register_upload("PROSPECT", close)
     inst = data.get("PROSPECT")

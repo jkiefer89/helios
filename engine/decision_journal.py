@@ -135,6 +135,31 @@ def _forward_return(close: pd.Series, start_date: str, horizon_days: int) -> dic
     }
 
 
+def _return_over_span(close: pd.Series, start_date: str, end_date: str) -> float | None:
+    """Benchmark pct return over the SAME calendar window as the target's
+    forward window (last bar at/before each date). Counting `horizon`
+    benchmark BARS instead compared mismatched periods whenever the target
+    trades a different calendar — crypto weeks, international holidays,
+    sparse uploads (review finding). Requires the series to extend through
+    end_date so the window is covered, not truncated by stale data."""
+    if close.empty:
+        return None
+    try:
+        start_ts, end_ts = pd.Timestamp(start_date), pd.Timestamp(end_date)
+    except Exception:
+        return None
+    if close.index.max() < end_ts:
+        return None
+    start_px = close[close.index <= start_ts]
+    end_px = close[close.index <= end_ts]
+    if start_px.empty or end_px.empty:
+        return None
+    base = float(start_px.iloc[-1])
+    if base <= 0:
+        return None
+    return round((float(end_px.iloc[-1]) / base - 1.0) * 100.0, 4)
+
+
 def evaluate_outcomes(entry: dict[str, Any]) -> dict[str, Any]:
     """Fill in any newly-measurable horizon outcomes for one decision."""
     if entry.get("outcome_status") == "not_measurable":
@@ -175,20 +200,28 @@ def evaluate_outcomes(entry: dict[str, Any]) -> dict[str, Any]:
             bench_close = _clean_close(bench.df["close"])
     except Exception:
         pass
+    # Score from the RECORD date, not the (possibly up to 7 days older)
+    # last-bar date: the operator records AFTER observing the price action
+    # between the two, and the engine's snapshot could not react intraday —
+    # scoring from the stale anchor asymmetrically inflated the operator's
+    # hit rate (review finding). ISO dates compare lexicographically.
+    score_anchor = str(entry.get("decision_date") or "")
+    if created and created > score_anchor:
+        score_anchor = created
     outcomes = dict(entry.get("outcomes") or {})
     changed = False
     for horizon in OUTCOME_HORIZONS_D:
         key = str(horizon)
         if key in outcomes:
             continue
-        fwd = _forward_return(close, entry["decision_date"], horizon)
+        fwd = _forward_return(close, score_anchor, horizon)
         if fwd is None:
             continue
         row: dict[str, Any] = {"end_date": fwd["end_date"], "target_return_pct": fwd["return_pct"]}
-        bench_fwd = _forward_return(bench_close, entry["decision_date"], horizon)
-        if bench_fwd is not None:
-            row["benchmark_return_pct"] = bench_fwd["return_pct"]
-            row["alpha_pct"] = round(fwd["return_pct"] - bench_fwd["return_pct"], 4)
+        bench_ret = _return_over_span(bench_close, score_anchor, fwd["end_date"])
+        if bench_ret is not None:
+            row["benchmark_return_pct"] = bench_ret
+            row["alpha_pct"] = round(fwd["return_pct"] - bench_ret, 4)
         row["hit"] = _paper_hit(_bucket(entry.get("my_action")), fwd["return_pct"], row.get("alpha_pct"))
         engine_action = entry.get("engine_action") or ""
         if engine_action:

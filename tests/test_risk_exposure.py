@@ -24,8 +24,7 @@ def _register_upload(symbol: str, series, volume: int | None = None):
 def test_risk_exposure_engine_reports_portfolio_analytics_for_real_model():
     from engine.risk_exposure import analyze_model_risk
 
-    dates = pd.bdate_range("2024-01-02", periods=320)
-    base = pd.Series(100 * (1.001 ** pd.Series(range(320)).to_numpy()), index=dates, name="close")
+    base = price_series(days=320, start=100, daily=0.001)  # same window as the holdings
     tech = price_series(days=320, start=100, daily=0.0015)
     defense = price_series(days=320, start=90, daily=0.0008)
     gold = price_series(days=320, start=80, daily=0.0003)

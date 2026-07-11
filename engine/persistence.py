@@ -1410,6 +1410,27 @@ class SQLiteStore:
             return
         try:
             with self._connect() as conn:
+                # Guarded MERGE, not a wholesale replace: concurrent GETs
+                # under multithreaded waitress evaluate the same pending rows
+                # from stale snapshots, and last-writer-wins dropped already-
+                # measured horizons (review finding). Measured-once horizons
+                # are immutable: existing keys win; not_measurable is sticky.
+                clean_id = redact_secrets(str(decision_id))[:64]
+                row = conn.execute(
+                    "SELECT outcomes_json, outcome_status FROM decision_journal WHERE decision_id = ?",
+                    (clean_id,),
+                ).fetchone()
+                existing = self._load_json(row["outcomes_json"]) if row else {}
+                existing_status = str(row["outcome_status"] or "") if row else ""
+                merged = {**(outcomes or {}), **existing}
+                if existing_status == "not_measurable" or str(status) == "not_measurable":
+                    merged_status = "not_measurable"
+                elif len(merged) >= 3:      # all of 21/63/252 present
+                    merged_status = "measured"
+                elif merged:
+                    merged_status = "partial"
+                else:
+                    merged_status = str(status or "pending")
                 conn.execute(
                     """
                     UPDATE decision_journal
@@ -1417,10 +1438,10 @@ class SQLiteStore:
                     WHERE decision_id = ?
                     """,
                     (
-                        self._store_json(outcomes or {}),
-                        redact_secrets(str(status or "pending"))[:16],
+                        self._store_json(merged),
+                        redact_secrets(merged_status)[:16],
                         str(evaluated_at or ""),
-                        redact_secrets(str(decision_id))[:64],
+                        clean_id,
                     ),
                 )
         except Exception as exc:

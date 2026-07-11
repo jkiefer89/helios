@@ -29,8 +29,7 @@ def test_analysis_endpoint_records_signal_journal_entry(monkeypatch, tmp_path):
     assert isinstance(entry["score"], float)
     assert entry["benchmark"] == "SPY"
     assert entry["horizon_days"] == 21
-    assert entry["input_start_date"] == "2024-01-02"
-    assert entry["input_end_date"]
+    assert entry["input_start_date"] and entry["input_end_date"] >= entry["input_start_date"]
     assert entry["input_rows"] == 120
     assert entry["forward_status"] == "pending"
     assert entry["eligible_for_real_research"] is True
@@ -39,7 +38,9 @@ def test_analysis_endpoint_records_signal_journal_entry(monkeypatch, tmp_path):
 
 def test_signal_journal_measures_forward_result_when_history_exists(monkeypatch, tmp_path):
     _use_db(monkeypatch, tmp_path)
-    close = price_series(days=90, start=100.0, daily=0.002)
+    # Input window ends TODAY (settlement guard) with synthetic future bars
+    # beyond it so the forward window is immediately measurable offline.
+    close = price_series(days=90, start=100.0, daily=0.002, future_days=20)
     input_close = close.iloc[:70]
 
     result = signal_journal.record_signal(
@@ -65,7 +66,7 @@ def test_signal_journal_measures_forward_result_when_history_exists(monkeypatch,
 
 def test_live_refresh_resolves_pending_forward_results(monkeypatch, tmp_path):
     store = _use_db(monkeypatch, tmp_path)
-    initial = price_series(days=80, start=100.0, daily=0.001)
+    initial = price_series(days=80, start=100.0, daily=0.001)  # ends today -> pending
     live = data.Instrument("JOURNALX", "Journal X", initial.to_frame("close"), "live", [])
     data.register(live)
     data._persist_instrument(live, adjusted=True)
@@ -84,7 +85,9 @@ def test_live_refresh_resolves_pending_forward_results(monkeypatch, tmp_path):
     )
     assert store.signal_journal()[0]["forward_status"] == "pending"
 
-    refreshed = price_series(days=90, start=100.0, daily=0.001)
+    # Same start/daily, 10 synthetic future bars: the refresh now covers the
+    # 5-bar forward window that was pending at record time.
+    refreshed = price_series(days=90, start=100.0, daily=0.001, future_days=10)
 
     def fake_fetch(symbol):
         assert symbol == "JOURNALX"
@@ -102,10 +105,10 @@ def test_live_refresh_resolves_pending_forward_results(monkeypatch, tmp_path):
 def test_signal_journal_endpoint_summarizes_paper_performance_evidence(monkeypatch, tmp_path):
     _use_db(monkeypatch, tmp_path)
     client = helios.app.test_client()
-    benchmark = price_series(days=95, start=100.0, daily=0.0005)
+    benchmark = price_series(days=95, start=100.0, daily=0.0005, future_days=25)
     data.register(data.Instrument("BENCHX", "Benchmark X", benchmark.to_frame("close"), "live", []))
-    buy_close = price_series(days=95, start=100.0, daily=0.003)
-    model_close = price_series(days=95, start=100.0, daily=0.002)
+    buy_close = price_series(days=95, start=100.0, daily=0.003, future_days=25)
+    model_close = price_series(days=95, start=100.0, daily=0.002, future_days=25)
     pending_close = price_series(days=70, start=100.0, daily=0.001)
 
     signal_journal.record_signal(
@@ -206,7 +209,7 @@ def test_refresh_cannot_starve_old_pending_entries(monkeypatch, tmp_path):
     # A pending long-horizon entry buried under newer rows must still be
     # refreshed: the newest-first listing starved it forever (review finding).
     store = _use_db(monkeypatch, tmp_path)
-    close = price_series(days=90, start=100.0, daily=0.002)
+    close = price_series(days=90, start=100.0, daily=0.002, future_days=20)
     signal_journal.record_signal(
         target_kind="instrument", target_id="OLDPEND", target_name="Old Pending",
         close=close.iloc[:70], input_close=close.iloc[:70],

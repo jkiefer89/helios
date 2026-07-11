@@ -125,11 +125,29 @@ def all_instruments() -> list[Instrument]:
 def register(inst: Instrument) -> None:
     sym = inst.symbol.upper()
     with _STORE_LOCK:
+        prev = _STORE.get(sym)
         _STORE[sym] = inst
         # Evict oldest user-added instruments (samples are never evicted).
         user_keys = [k for k, v in _STORE.items() if v.source != "sample"]
         for stale in user_keys[:-MAX_USER_INSTRUMENTS] if len(user_keys) > MAX_USER_INSTRUMENTS else []:
             _STORE.pop(stale, None)
+    # Identical re-registration (the 5-minute auto-live cycle refetching an
+    # unchanged series) must not destroy memoized analytics: full wipes up to
+    # 17x per cycle forced Command Center/Radar to redo Monte-Carlo + backtests
+    # near-constantly and silently flipped the model cone between the CMA
+    # anchor and the generic mandate anchor (review finding).
+    try:
+        unchanged = (
+            prev is not None and prev.source == inst.source
+            and "close" in prev.df and "close" in inst.df
+            and len(prev.df) == len(inst.df)
+            and bool(prev.df.index.equals(inst.df.index))
+            and bool(prev.df["close"].equals(inst.df["close"]))
+        )
+    except Exception:
+        unchanged = False
+    if unchanged:
+        return
     # The replaced frame supersedes any memoized holding-price resolution (and
     # any failed-resolution back-off) for this symbol.
     _invalidate_resolution_caches(sym)
@@ -302,6 +320,11 @@ def parse_csv(
         adjusted=None,
         metadata={"source_filename": source_filename or "", "imported_via": "price_csv"},
     )
+    # Uploads extend history exactly like live refreshes do: without this, an
+    # upload-only/offline workflow never measured its pending journal signals
+    # even when the new history covered the full forward window (review
+    # finding). Swallows its own exceptions — cannot break the upload.
+    _refresh_signal_journal_forward_results()
     return inst
 
 
