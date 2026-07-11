@@ -14,7 +14,7 @@ from engine import (
 )
 
 from .core import (
-    ANALYSIS_ONLY_DISCLAIMER, _safe_float_arg, _safe_int_arg, app, err, ok,
+    ANALYSIS_ONLY_DISCLAIMER, _LIVE_SEMAPHORE, _safe_float_arg, _safe_int_arg, app, err, ok,
 )
 
 bp = Blueprint("analysis", __name__)
@@ -320,24 +320,43 @@ def analyze():
         return err("Need at least 60 rows of history to analyze.", 400)
 
     fc = forecast.forecast(close, horizon=horizon)
-    # Headlines: yfinance per-ticker plus the free GDELT news wire (deduped;
-    # GDELT is TTL-cached and returns [] offline, so this never blocks honesty).
-    merged_headlines = list(inst.headlines or [])
-    seen_titles = {h.lower() for h in merged_headlines}
-    for title in news.headlines_for(inst.symbol, inst.name):
-        if title.lower() not in seen_titles:
-            seen_titles.add(title.lower())
-            merged_headlines.append(title)
-    sent = sentiment.score_headlines(merged_headlines)
-    # Fundamentals (6h-cached) drive the strategic track; offline -> usable=False
-    # and the signal honestly reports a technicals-only rating.
-    fnd = fundamentals.fetch(inst.symbol)
-    fwd = cma.instrument_forward(inst.symbol, fnd)
-    # Macro layer: Fed stance, White House policy pressure on this sector, and
-    # geopolitical event risk feed the rating as transparent conviction dampers
-    # and caveats (30-min cached; unavailable sources are never assumed calm).
-    macro_snap = macro_events.macro_snapshot()
-    macro_ctx = macro_events.build_macro_context(fwd.get("sector") or "", macro_snap)
+    # Outbound-network phase, bounded by the same semaphore as /api/live: only
+    # a couple of analyze requests may fan out to GDELT/FMP/Intrinio/EDGAR/Fed
+    # feeds at once; the rest degrade to cached-only reads instead of pinning
+    # worker threads behind stacks of 10-12s provider timeouts (review
+    # finding: analyze was the most network-heavy route and the only unbounded
+    # one). Every degraded block still reports its own availability honestly.
+    live_slot = _LIVE_SEMAPHORE.acquire(blocking=False)
+    try:
+        # Headlines: yfinance per-ticker plus the free GDELT news wire (deduped;
+        # GDELT is TTL-cached and returns [] offline, so this never blocks honesty).
+        merged_headlines = list(inst.headlines or [])
+        seen_titles = {h.lower() for h in merged_headlines}
+        if live_slot:
+            for title in news.headlines_for(inst.symbol, inst.name):
+                if title.lower() not in seen_titles:
+                    seen_titles.add(title.lower())
+                    merged_headlines.append(title)
+        sent = sentiment.score_headlines(merged_headlines)
+        # Fundamentals (6h-cached) drive the strategic track; offline -> usable=False
+        # and the signal honestly reports a technicals-only rating.
+        if live_slot:
+            fnd = fundamentals.fetch(inst.symbol)
+        else:
+            fnd = fundamentals.fetch_cached(inst.symbol) or fundamentals.Fundamentals(
+                ticker=inst.symbol, source="none")
+        fwd = cma.instrument_forward(inst.symbol, fnd)
+        # Macro layer: Fed stance, White House policy pressure on this sector, and
+        # geopolitical event risk feed the rating as transparent conviction dampers
+        # and caveats (30-min cached; unavailable sources are never assumed calm).
+        macro_snap = macro_events.macro_snapshot() if live_slot else macro_events.snapshot_cached()
+        macro_ctx = macro_events.build_macro_context(fwd.get("sector") or "", macro_snap)
+        sec = (sec_events.events_for(inst.symbol) if live_slot
+               else sec_events.events_cached(inst.symbol)
+               or {"available": False, "reason": "Live provider slots busy; no cached SEC events yet."})
+    finally:
+        if live_slot:
+            _LIVE_SEMAPHORE.release()
     sig = signals.evaluate(close, fc, sent, history_days=len(close),
                            fundamental_result=fwd, macro_context=macro_ctx)
     bt = backtest.run(close)
@@ -358,7 +377,7 @@ def analyze():
         "rates": macro.rate_context(),
         # Regulatory event context (8-K material events + Form 4 insider trades).
         # Cached 1h; offline -> {"available": False} rather than fabricated calm.
-        "sec_events": sec_events.events_for(inst.symbol),
+        "sec_events": sec,
         "macro": macro_events.compact_summary(macro_snap),
         "signal": sig,
         "signal_journal_entry": journal_entry,

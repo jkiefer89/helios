@@ -40,6 +40,9 @@ _GDELT_MAX_RECORDS = 40
 
 _HTTP = None
 _LOCK = threading.RLock()
+# Serializes the expensive cold-snapshot BUILD (single-flight); _LOCK guards
+# only the cheap cache reads/writes so they never queue behind a slow build.
+_FETCH_LOCK = threading.Lock()
 _SNAPSHOT_CACHE: list = [0.0, None]   # [monotonic_ts, snapshot]
 
 FED_MONETARY_FEED = "https://www.federalreserve.gov/feeds/press_monetary.xml"
@@ -379,10 +382,20 @@ def macro_snapshot(force: bool = False) -> dict:
         ts, cached = _SNAPSHOT_CACHE
         if cached is not None and not force and time.monotonic() - ts < _SNAPSHOT_TTL_S:
             return dict(cached)
-    fed = _fed_component()
-    policy = _policy_component()
-    geo = _geopolitics_component()
-    fomc = next_fomc()
+    # Single-flight the cold build: it performs up to ~14 network fetches, and
+    # without this every concurrent analyze arriving on an expired cache
+    # rebuilt it in parallel — a redundant fetch herd (review finding).
+    # _FETCH_LOCK is separate from _LOCK so cache reads never queue behind a
+    # slow build; the double-check inside returns the copy a winner just made.
+    with _FETCH_LOCK:
+        with _LOCK:
+            ts, cached = _SNAPSHOT_CACHE
+            if cached is not None and not force and time.monotonic() - ts < _SNAPSHOT_TTL_S:
+                return dict(cached)
+        fed = _fed_component()
+        policy = _policy_component()
+        geo = _geopolitics_component()
+        fomc = next_fomc()
     snapshot = {
         "as_of": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "fed": fed,

@@ -350,7 +350,11 @@ def _intrinio_http_json(url: str):
 
 
 def _intrinio_sector(company: dict) -> str:
-    for field in ("industry_category", "sector"):
+    # industry_group leads: it is the only field in Intrinio's live taxonomy
+    # that actually says "REIT" (verified on SPG/O/PLD/AMT, where
+    # industry_category is the useless "Trading" and the SIC division string
+    # would misroute every REIT to the financials anchor).
+    for field in ("industry_group", "industry_category", "sector"):
         text = str(company.get(field) or "").lower()
         if not text:
             continue
@@ -440,6 +444,21 @@ def _cache_now() -> float:
 def invalidate_cache() -> None:
     with _PROVIDER_LOCK:
         _FETCH_CACHE.clear()
+
+
+def fetch_cached(ticker: str) -> "Fundamentals | None":
+    """Get-only cache read: never touches the network (latency-sensitive
+    callers degrade to this when the live-provider slots are contended)."""
+    sym = (ticker or "").strip().upper()
+    if not sym:
+        return None
+    with _PROVIDER_LOCK:
+        hit = _FETCH_CACHE.get(sym)
+        if hit:
+            ttl = _FETCH_CACHE_TTL_S if hit[1].usable else _FETCH_CACHE_EMPTY_TTL_S
+            if _cache_now() - hit[0] < ttl:
+                return hit[1]
+    return None
 
 
 def fetch(ticker: str, provider=None) -> Fundamentals:

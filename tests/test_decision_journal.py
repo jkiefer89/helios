@@ -200,7 +200,22 @@ def test_sec_events_offline_is_honest():
     ev = sec_events.events_for("TEST", client=_Down())
     assert ev["available"] is False
     assert "unreachable" in ev["reason"]
-    assert sec_events.events_cached("TEST") is None
+    # Failures negative-cache briefly (a degraded EDGAR is probed once per
+    # window, not on every analyze call) — still honestly unavailable, never
+    # fabricated events; the short TTL picks recovery up within minutes.
+    cached = sec_events.events_cached("TEST")
+    assert cached is not None and cached["available"] is False
+    calls = {"n": 0}
+
+    class _Counting:
+        def resolve(self, symbol):
+            calls["n"] += 1
+            from engine.edgar import EdgarError
+            raise EdgarError("EDGAR unreachable")
+
+    assert sec_events.events_for("TEST", client=_Counting())["available"] is False
+    assert calls["n"] == 0   # served from the negative cache, no re-probe
+    sec_events.invalidate_cache()
 
 
 def test_stale_price_anchor_blocks_outcome_scoring(store):
@@ -244,3 +259,29 @@ def test_model_decision_with_sample_holdings_stays_not_measurable(store):
     entry = decision_journal.record_decision(
         target_kind="model", target_id="MSAMP", my_action="HOLD")
     assert entry["outcome_status"] == "not_measurable"
+
+
+def test_sec_events_malformed_edgar_payload_degrades_not_crashes():
+    # Malformed-but-JSON submissions shapes crashed the whole analyze route
+    # with an AttributeError (review finding) — they must degrade honestly.
+    sec_events.invalidate_cache()
+
+    class _Malformed:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def resolve(self, symbol):
+            from engine.edgar import Resolution
+            return Resolution(symbol=symbol, cik="12345", kind="stock")
+
+        def get_submissions(self, cik):
+            return self._payload
+
+    for bad in ({"filings": ["oops"]}, {"filings": {"recent": ["x"]}},
+                {"filings": {"recent": {"form": "8-K"}}}):
+        sec_events.invalidate_cache()
+        ev = sec_events.events_for("TEST", client=_Malformed(bad))
+        assert ev["available"] in (False, True)   # never raises
+        if ev["available"]:
+            assert ev["eight_ks"] == []           # scalar columns -> no garbage rows
+    sec_events.invalidate_cache()

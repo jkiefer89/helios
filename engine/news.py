@@ -20,11 +20,14 @@ import urllib.request
 _GDELT_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 _MAX_RESP_BYTES = 4 * 1024 * 1024
 _CACHE_TTL_S = 15 * 60.0
+# Failures negative-cache briefly so a degraded GDELT is probed once per
+# window instead of adding a 10s stall to every analyze call (review finding).
+_CACHE_NEG_TTL_S = 5 * 60.0
 _CACHE_MAX = 256
 
 _HTTP = None
 _LOCK = threading.RLock()
-_CACHE: dict[str, tuple[float, list[str]]] = {}
+_CACHE: dict[str, tuple[float, list[str], float]] = {}   # (ts, titles, ttl)
 
 
 def set_http(fn) -> None:
@@ -69,7 +72,7 @@ def headlines_for(symbol: str, company_name: str = "", max_records: int = 12) ->
     cache_key = f"{sym}|{name.lower()}|{int(max_records)}"
     with _LOCK:
         hit = _CACHE.get(cache_key)
-        if hit and time.monotonic() - hit[0] < _CACHE_TTL_S:
+        if hit and time.monotonic() - hit[0] < (hit[2] if len(hit) > 2 else _CACHE_TTL_S):
             return list(hit[1])
 
     url = _GDELT_URL + "?" + urllib.parse.urlencode({
@@ -84,6 +87,10 @@ def headlines_for(symbol: str, company_name: str = "", max_records: int = 12) ->
     try:
         payload = fn(url) or {}
     except Exception:
+        with _LOCK:
+            if cache_key not in _CACHE and len(_CACHE) >= _CACHE_MAX:
+                _CACHE.pop(next(iter(_CACHE)), None)
+            _CACHE[cache_key] = (time.monotonic(), [], _CACHE_NEG_TTL_S)
         return []
     seen: set[str] = set()
     titles: list[str] = []
@@ -96,7 +103,7 @@ def headlines_for(symbol: str, company_name: str = "", max_records: int = 12) ->
             seen.add(key)
             titles.append(title)
     with _LOCK:
-        if len(_CACHE) >= _CACHE_MAX:
+        if cache_key not in _CACHE and len(_CACHE) >= _CACHE_MAX:
             _CACHE.pop(next(iter(_CACHE)), None)
-        _CACHE[cache_key] = (time.monotonic(), titles)
+        _CACHE[cache_key] = (time.monotonic(), titles, _CACHE_TTL_S)
     return list(titles)

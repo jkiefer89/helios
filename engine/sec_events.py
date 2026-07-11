@@ -24,6 +24,9 @@ WINDOW_DAYS = 45
 _FORM4_PARSE_BUDGET = 5      # newest Form 4 XMLs parsed per symbol per refresh
 _MAX_8KS = 12
 _CACHE_TTL_S = 3600.0
+# Failures are cached too, briefly: a degraded EDGAR is probed once per window
+# instead of on every analyze call (review finding — no negative caching).
+_CACHE_NEG_TTL_S = 300.0
 _CACHE_MAX = 256
 
 _LOCK = threading.RLock()
@@ -63,13 +66,19 @@ def invalidate_cache() -> None:
 
 
 def _recent_rows(submissions: dict) -> list[dict]:
-    recent = ((submissions.get("filings") or {}).get("recent")) or {}
-    forms = recent.get("form") or []
+    # isinstance guards throughout: a malformed EDGAR payload ({"filings":
+    # ["oops"]}) crashed the whole analyze route, and a scalar column (string
+    # filingDate) silently yielded per-character garbage (review finding).
+    filings = submissions.get("filings") if isinstance(submissions, dict) else None
+    recent = filings.get("recent") if isinstance(filings, dict) else None
+    recent = recent if isinstance(recent, dict) else {}
+    forms = recent.get("form")
+    forms = forms if isinstance(forms, list) else []
     rows = []
     for i, form in enumerate(forms):
         def col(name):  # noqa: B023 — i is read immediately
-            values = recent.get(name) or []
-            return values[i] if i < len(values) else ""
+            values = recent.get(name)
+            return values[i] if isinstance(values, list) and i < len(values) else ""
         rows.append({
             "form": str(form).upper(),
             "filing_date": str(col("filingDate")),
@@ -131,8 +140,10 @@ def events_cached(symbol: str) -> dict[str, Any] | None:
     sym = (symbol or "").strip().upper()
     with _LOCK:
         hit = _CACHE.get(sym)
-    if hit and time.monotonic() - hit[0] < _CACHE_TTL_S:
-        return dict(hit[1])
+    if hit:
+        ttl = _CACHE_TTL_S if hit[1].get("available") else _CACHE_NEG_TTL_S
+        if time.monotonic() - hit[0] < ttl:
+            return dict(hit[1])
     return None
 
 
@@ -143,14 +154,27 @@ def events_for(symbol: str, window_days: int = WINDOW_DAYS, client=None) -> dict
         return {"available": False, "reason": "No symbol."}
     with _LOCK:
         hit = _CACHE.get(sym)
-        if hit and time.monotonic() - hit[0] < _CACHE_TTL_S:
-            return dict(hit[1])
+        if hit:
+            ttl = _CACHE_TTL_S if hit[1].get("available") else _CACHE_NEG_TTL_S
+            if time.monotonic() - hit[0] < ttl:
+                return dict(hit[1])
     client = client or default_client()
     try:
-        res = client.resolve(sym)
-        submissions = client.get_submissions(res.cik)
+        result = _build_events(sym, int(window_days), client)
     except edgar.EdgarError as exc:
-        return {"available": False, "reason": str(exc)}
+        result = {"available": False, "reason": str(exc)}
+    except Exception as exc:  # malformed-but-JSON payloads must degrade, not 500 analyze
+        result = {"available": False, "reason": f"Unexpected EDGAR payload shape: {exc!r}"}
+    with _LOCK:
+        if sym not in _CACHE and len(_CACHE) >= _CACHE_MAX:
+            _CACHE.pop(next(iter(_CACHE)), None)
+        _CACHE[sym] = (time.monotonic(), result)
+    return dict(result)
+
+
+def _build_events(sym: str, window_days: int, client) -> dict[str, Any]:
+    res = client.resolve(sym)
+    submissions = client.get_submissions(res.cik)
     cutoff = datetime.now(timezone.utc) - timedelta(days=int(window_days))
     rows = _recent_rows(submissions)
 
@@ -219,7 +243,7 @@ def events_for(symbol: str, window_days: int = WINDOW_DAYS, client=None) -> dict
         "net_signal": net_signal,
         "note": note,
     }
-    result = {
+    return {
         "available": True,
         "symbol": sym,
         "window_days": int(window_days),
@@ -229,8 +253,3 @@ def events_for(symbol: str, window_days: int = WINDOW_DAYS, client=None) -> dict
         "insider": insider,
         "source": "sec_edgar",
     }
-    with _LOCK:
-        if len(_CACHE) >= _CACHE_MAX:
-            _CACHE.pop(next(iter(_CACHE)), None)
-        _CACHE[sym] = (time.monotonic(), result)
-    return dict(result)

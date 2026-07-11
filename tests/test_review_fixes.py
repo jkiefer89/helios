@@ -208,6 +208,10 @@ def test_cma_aggregate_uses_book_level_denominator():
 
 
 def test_reit_maps_to_real_estate_anchor():
+    # The live Intrinio shape for SPG/O/PLD/AMT: only industry_group says REIT.
+    assert fundamentals._intrinio_sector(
+        {"industry_category": "Trading", "industry_group": "REIT",
+         "sector": "Finance, Insurance, And Real Estate"}) == "real estate"
     assert fundamentals._intrinio_sector(
         {"industry_category": "Real Estate Investment Trusts"}) == "real estate"
     assert fundamentals._intrinio_sector(
@@ -216,3 +220,22 @@ def test_reit_maps_to_real_estate_anchor():
         {"industry_category": "Banking"}) == "financials"
     assert fundamentals._intrinio_sector(
         {"sector": "Finance, Insurance, And Real Estate"}) == "financials"
+
+
+def test_analytics_cache_generation_drops_stale_puts():
+    """A slow computation that started before invalidate() must not publish
+    its stale result after it (in-flight /api/model/forward vs model edit)."""
+    from engine import analytics_cache
+    analytics_cache.invalidate()
+    gen = analytics_cache.generation()
+    analytics_cache.put("t", ("k",), {"v": 1}, if_generation=gen)
+    assert analytics_cache.get("t", ("k",)) == {"v": 1}
+    # Simulate the race: capture gen, invalidate mid-flight, then try to publish.
+    gen = analytics_cache.generation()
+    analytics_cache.invalidate()
+    analytics_cache.put("t", ("k",), {"v": "stale"}, if_generation=gen)
+    assert analytics_cache.get("t", ("k",)) is None
+    # A put without the token keeps the old unconditional behavior.
+    analytics_cache.put("t", ("k",), {"v": 2})
+    assert analytics_cache.get("t", ("k",)) == {"v": 2}
+    analytics_cache.invalidate()

@@ -23,6 +23,12 @@ MAX_ENTRIES = 256
 
 _LOCK = threading.RLock()
 _STORE: "OrderedDict[tuple, Any]" = OrderedDict()
+# Bumped on every invalidate(). A slow computation that began BEFORE an
+# invalidation must not publish its (now stale) result AFTER it — callers
+# capture generation() up front and pass it to put(..., if_generation=...)
+# (review finding: an in-flight /api/model/forward re-published an anchor
+# computed from pre-edit holdings after a model edit invalidated the cache).
+_GENERATION = 0
 
 
 def series_key(target_id: str, close: pd.Series | None) -> tuple | None:
@@ -53,11 +59,23 @@ def get(namespace: str, key: tuple | None) -> Any:
         return copy.deepcopy(value)
 
 
-def put(namespace: str, key: tuple | None, value: Any) -> None:
-    """Store a value under (namespace, key). None keys and values are ignored."""
+def generation() -> int:
+    """Capture before a slow computation; pass to put(if_generation=...)."""
+    with _LOCK:
+        return _GENERATION
+
+
+def put(namespace: str, key: tuple | None, value: Any, if_generation: int | None = None) -> None:
+    """Store a value under (namespace, key). None keys and values are ignored.
+
+    With ``if_generation``, the put is dropped when an invalidate() happened
+    since that generation was captured — the value was computed from inputs
+    that no longer exist."""
     if key is None or value is None:
         return
     with _LOCK:
+        if if_generation is not None and if_generation != _GENERATION:
+            return
         _STORE[(namespace, key)] = copy.deepcopy(value)
         _STORE.move_to_end((namespace, key))
         while len(_STORE) > MAX_ENTRIES:
@@ -66,8 +84,10 @@ def put(namespace: str, key: tuple | None, value: Any) -> None:
 
 def invalidate() -> None:
     """Drop every cached result (called on data refresh/upload/model edits)."""
+    global _GENERATION
     with _LOCK:
         _STORE.clear()
+        _GENERATION += 1
 
 
 def size() -> int:

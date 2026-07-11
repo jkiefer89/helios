@@ -500,6 +500,11 @@ def model_forward():
     mdl = portfolio.get(request.args.get("id", ""))
     if mdl is None:
         return err("Unknown model.", 404)
+    # Captured BEFORE the slow look-through/fundamentals fan-out: if a model
+    # edit or data refresh invalidates the analytics cache while this request
+    # is in flight, the anchor publish below is dropped instead of landing a
+    # stale value under the same key after the invalidation (review finding).
+    cache_gen = analytics_cache.generation()
     roll = holdings.model_lookthrough(mdl)
     underlyings = roll["exposure"].get("underlyings", [])
     fmap = _fundamentals_map_for(underlyings)
@@ -522,7 +527,7 @@ def model_forward():
         "anchor": blended,
         "coverage_pct": forward_return["coverage_pct"],
         "basis": "lookthrough_cma_blend",
-    })
+    }, if_generation=cache_gen)
     return ok({
         "id": mdl.id,
         "name": mdl.name,
@@ -551,7 +556,12 @@ def _holdings_with_signals(ps: portfolio.PortfolioSeries, mdl: portfolio.Model) 
     out = []
     for h in ps.holdings:
         try:
-            psr = data.resolve_series(h["ticker"])
+            # allow_live=False: build_series already resolved every holding
+            # under its fetch/time budget; re-resolving live here retried each
+            # budget-simulated ticker sequentially (8s timeout apiece) on the
+            # request thread, and could compute the chip from a fresher series
+            # than the one the analysis reported (review finding).
+            psr = data.resolve_series(h["ticker"], allow_live=False)
             sc = signals.latest_signal_score(psr.close)
             action = "BUY" if sc > 0.15 else "SELL" if sc < -0.05 else "HOLD"
         except Exception:
