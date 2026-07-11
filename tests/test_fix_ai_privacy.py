@@ -327,3 +327,89 @@ def test_nested_data_provenance_data_mode_still_detected():
 
     assert result["data_mode"] == "demo"
     assert "not real market evidence" in result["data_quality_statement"].lower()
+
+
+# ---------------------------------------------------------------- PASS 3
+
+
+def test_series_shaped_maps_and_variant_keys_are_blocked():
+    dates = {f"2025-{m:02d}-{d:02d}": 100.0 + m + d for m in range(1, 13) for d in (3, 17)}
+    payload = {"price_history_daily": dates, "close_series": [1.0] * 30,
+               "ci90_high": 112.4, "history_days": 252}
+    sanitized = ai_copilot.sanitize_payload(payload, _config())
+
+    assert sanitized["price_history_daily"]["omitted"] is True   # token block
+    assert sanitized["close_series"]["omitted"] is True
+    assert sanitized["ci90_high"] == 112.4                       # scalar context survives
+    assert sanitized["history_days"] == 252                      # exempted row count
+    assert sanitized["_sanitization"]["full_price_history_sent"] is False
+
+
+def test_full_price_history_flag_is_observed_not_asserted():
+    # A raw date->price map that (hypothetically) survived sanitization must
+    # flip the audit flag — the old hardcoded False lied about what was sent.
+    surviving = {"x": {f"2025-01-{d:02d}": float(d) for d in range(1, 20)}}
+    assert ai_copilot._contains_series(surviving) is True
+    assert ai_copilot._contains_series({"x": {"a": 1.0, "b": 2.0}}) is False
+
+
+def test_anonymous_series_shaped_dict_is_structurally_capped():
+    # No blocked key name at all: a >16-entry scalar-valued map is a series
+    # regardless of what it is called.
+    payload = {"levels": {f"k{i}": float(i) for i in range(40)}}
+    sanitized = ai_copilot.sanitize_payload(payload, _config())
+    assert sanitized["levels"] == {"omitted": True, "count": 40, "reason": "long map omitted"}
+
+
+def test_mandate_context_free_text_is_blocked():
+    payload = {"name": "Balanced Core 60/40",
+               "context": "Sleeve for the Smith Family Trust household",
+               "mandate_context": "Prepared for the Smith Family Trust"}
+    sanitized = ai_copilot.sanitize_payload(payload, _config())
+    assert "smith family trust" not in json.dumps(sanitized).lower()
+    assert sanitized["context"]["omitted"] is True
+
+
+def test_identity_bearing_keys_redacted_and_pattern_scrubbed():
+    payload = {"client": "Smith Family Trust",
+               "note": "Rebalance for Smith Family Trust next week"}
+    sanitized = ai_copilot.sanitize_payload(payload, _config())
+    text = json.dumps(sanitized).lower()
+    assert "smith family trust" not in text
+    assert sanitized["client"] == "[redacted]"
+    assert "[redacted]" in sanitized["note"]
+
+
+def test_redacted_map_keys_do_not_collide_and_lose_entries():
+    payload = {"models": [{"model_name": "Alpha Fund"}, {"model_name": "Beta Fund"}],
+               "sleeves": {"Alpha Fund": {"cagr_pct": 10.0}, "Beta Fund": {"cagr_pct": 2.0}}}
+    sanitized = ai_copilot.sanitize_payload(payload, _config())
+    sleeves = sanitized["sleeves"]
+    assert len(sleeves) == 2                       # nothing silently overwritten
+    cagrs = sorted(v["cagr_pct"] for v in sleeves.values())
+    assert cagrs == [2.0, 10.0]
+    assert "alpha fund" not in json.dumps(sanitized).lower()
+
+
+def test_comma_grouped_numbers_validate_as_single_values():
+    assert ai_copilot._number_values_in("$2,000,000") == {2000000.0}
+    assert ai_copilot._number_values_in("grew to $4,750,000.50") == {4750000.5}
+    assert ai_copilot._number_values_in("1e5 shares") == {100000.0}
+
+
+def test_year_exemption_is_context_aware():
+    # Plain year mentions still pass unvalidated...
+    assert ai_copilot._number_values_in("in 2026 and FY2027 guidance") == set()
+    # ...but money and unit-bearing quantities in the year range are claims.
+    assert 1950.0 in ai_copilot._number_values_in("gold at $1950")
+    assert 2050.0 in ai_copilot._number_values_in("spread of 2050 bps")
+
+
+def test_fabricated_comma_dollar_figure_is_flagged():
+    result = ai_copilot.validate_ai_output(
+        {"summary": "The position would grow to $2,000,000 within a year."},
+        {"score": 42.5, "data_mode": "real"},
+        "fake", "fake-model", "opportunity_explain",
+    )
+    assert any("2000000" in n for n in result.get("unsupported_numbers", []))
+    assert result["needs_review"] is True

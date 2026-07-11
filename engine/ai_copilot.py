@@ -67,8 +67,28 @@ BLOCKED_KEYS = {
     "benchmark_curve",
     "drawdown_curve",
     "rolling_sharpe_curve",
+    # Advisor free prose (mandate notes) cannot be reliably scrubbed by
+    # pattern matching — verified leak of a client name through
+    # /api/model/analyze -> dialogue context (review finding).
+    "context",
+    "mandate_context",
+    "prices",
+    "closes",
 }
-NAME_KEYS = {"name", "display_name", "client_name", "model_name", "title"}
+# Series-indicative tokens: block any key CONTAINING one of these as an
+# underscore token ("price_history_daily", "close_series"), which exact-match
+# blocking missed (review finding). Deliberately narrower than BLOCKED_KEYS:
+# scalar keys like "ci90_high" or "close_price" carry legitimate analyst
+# context, and the structural list/map caps below are the hard guarantee that
+# no long series passes regardless of key name.
+BLOCKED_TOKENS = {"history", "series", "curve", "prices", "closes", "ohlc", "candles"}
+# Innocuous scalars whose tokens collide with a blocked word ("history_days"
+# is a row count, not a series).
+BLOCKED_TOKEN_EXEMPT = {"history_days", "institutional_history_rows"}
+# "owner" stays OUT of NAME_KEYS: it names public SEC insiders (sec_events),
+# not clients — redacting it is a functional regression with no privacy gain.
+NAME_KEYS = {"name", "display_name", "client_name", "model_name", "title",
+             "client", "household", "account", "prepared_for"}
 # Keys whose ticker->number dict values carry portfolio composition (holdings-equivalent).
 COMPOSITION_WEIGHT_KEYS = {"weights", "allocations", "composition", "target_weights", "holdings"}
 _TICKER_KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9.\-]{0,9}$")
@@ -82,7 +102,13 @@ DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_LOCAL_MODEL = ""
 MAX_LIST_ITEMS = 16
 MAX_STRING_LEN = 800
-_NUMBER_RE = re.compile(r"(?<![A-Za-z0-9])-?\d+(?:\.\d+)?%?")
+# Comma-grouped and scientific-notation numbers must match as SINGLE tokens:
+# splitting "$4,750,000" into {4, 750, 0} let fabricated dollar figures pass
+# validation unflagged (review finding).
+_NUMBER_RE = re.compile(
+    r"(?<![A-Za-z0-9])-?\d{1,3}(?:,\d{3})+(?:\.\d+)?%?"
+    r"|(?<![A-Za-z0-9])-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?%?"
+)
 _CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
@@ -666,8 +692,12 @@ def sanitize_payload(payload: dict[str, Any], config: AIConfig | None = None) ->
         "client_model_names_redacted": cfg.redact_client_names,
         # True only when ticker->weight composition data actually remains after sanitization.
         "holdings_sent": bool(cfg.send_holdings and _contains_composition(sanitized)),
+        # Policy-derived: MAX_STRING_LEN truncation makes raw file bodies unsendable.
         "raw_files_sent": False,
-        "full_price_history_sent": False,
+        # OBSERVED on the sanitized output, not asserted — the old hardcoded
+        # False was a lie whenever a series slipped past the key blocklist
+        # (review finding).
+        "full_price_history_sent": _contains_series(sanitized),
     }
     sanitized.setdefault("analysis_only_disclaimer", "Analysis only; Helios does not provide investment advice, order execution, or return guarantees.")
     return sanitized
@@ -858,7 +888,11 @@ def _sanitize_value(
     name_patterns: tuple[re.Pattern, ...] = (),
 ) -> Any:
     key = path[-1].lower() if path else ""
-    if key in BLOCKED_KEYS:
+    # Token-aware blocking: "price_history_daily", "close_series" etc. must hit
+    # the blocklist through their underscore tokens — exact-match-only let a
+    # date-keyed price map ride to the cloud provider in full (review finding).
+    if key in BLOCKED_KEYS or (
+            key not in BLOCKED_TOKEN_EXEMPT and BLOCKED_TOKENS & set(key.split("_"))):
         return _blocked_marker(key)
     if key == "holdings" and not cfg.send_holdings:
         if isinstance(value, list):
@@ -871,6 +905,14 @@ def _sanitize_value(
     if cfg.redact_client_names and (key in NAME_KEYS or key.endswith("_name")):
         return "[redacted]"
     if isinstance(value, dict):
+        # Series-shaped maps get the same structural cap as long lists: a
+        # >16-entry scalar-valued dict (e.g. date->price) is a data series no
+        # matter what its key is called, and dicts had NO size cap (review
+        # finding — a full year of daily closes passed keyed by date).
+        if len(value) > MAX_LIST_ITEMS and all(
+                isinstance(v, (int, float, str, type(None))) and not isinstance(v, bool)
+                for v in value.values()):
+            return {"omitted": True, "count": len(value), "reason": "long map omitted"}
         out = {}
         for k, v in value.items():
             skey = str(k)[:80]
@@ -880,6 +922,14 @@ def _sanitize_value(
             display_key = redact_secrets(skey)
             for pattern in name_patterns:
                 display_key = pattern.sub("[redacted]", display_key)
+            if display_key in out:
+                # Truncation/redaction collision: keep every entry with a stable
+                # suffix instead of silently overwriting the earlier one (data
+                # loss + cache-key aliasing between distinct payloads).
+                n = 2
+                while f"{display_key} ({n})" in out:
+                    n += 1
+                display_key = f"{display_key} ({n})"
             out[display_key] = _sanitize_value(v, cfg, path + (skey,), name_patterns)
         return out
     if isinstance(value, list):
@@ -934,6 +984,32 @@ def _contains_composition(value: Any, key: str = "") -> bool:
         if _is_composition_value(key, value):
             return True
         return any(_contains_composition(item, key) for item in value)
+    return False
+
+
+_DATE_KEY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
+
+
+def _contains_series(value: Any) -> bool:
+    """Audit walker: does any node still look like a price/return series?
+
+    True for a numeric list longer than the cap or a date-keyed numeric map
+    longer than the cap. The sanitizer's structural caps make both shapes
+    unreachable, so this SHOULD always be False — computing it keeps the
+    ``full_price_history_sent`` audit flag honest by observation.
+    """
+    if isinstance(value, list):
+        if len(value) > MAX_LIST_ITEMS and all(
+                isinstance(v, (int, float)) and not isinstance(v, bool) for v in value):
+            return True
+        return any(_contains_series(v) for v in value)
+    if isinstance(value, dict):
+        date_numeric = [v for k, v in value.items()
+                        if _DATE_KEY_RE.match(str(k))
+                        and isinstance(v, (int, float)) and not isinstance(v, bool)]
+        if len(date_numeric) > MAX_LIST_ITEMS:
+            return True
+        return any(_contains_series(v) for v in value.values())
     return False
 
 
@@ -1042,16 +1118,24 @@ def _number_claim_content(result: dict[str, Any]) -> dict[str, Any]:
 def _number_values_in(value: Any) -> set[float]:
     text = json.dumps(value, sort_keys=True) if not isinstance(value, str) else value
     out = set()
-    for raw in _NUMBER_RE.findall(text):
-        norm = raw.strip().rstrip("%")
+    for m in _NUMBER_RE.finditer(text):
+        raw = m.group(0)
+        norm = raw.strip().rstrip("%").replace(",", "")
         if not norm:
             continue
         try:
             num = float(norm)
         except ValueError:
             continue
-        if 1900 <= abs(num) <= 2100 and num.is_integer():
-            continue
+        if 1900 <= abs(num) <= 2100 and num.is_integer() \
+                and "," not in raw and "." not in raw and not raw.endswith("%"):
+            # Year-like mentions ("in 2026") stay exempt from validation — but
+            # money ("$1950") and unit-bearing quantities ("2050 bps") are
+            # claims, not dates (review finding: fabricated bps passed).
+            before = text[max(0, m.start() - 1):m.start()]
+            after = text[m.end():m.end() + 8].lstrip().lower()
+            if before != "$" and not after.startswith(("bps", "bp", "basis", "point", "pts")):
+                continue
         out.add(num)
     return out
 
