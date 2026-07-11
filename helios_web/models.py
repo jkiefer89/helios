@@ -355,6 +355,10 @@ def model_analyze():
         "signal_journal_entry": journal_entry,
         "backtest": bt,
         "insights": ins,
+        # Structured verdicts for the mandate-fit panel — computed from the
+        # SAME variables the insights use, so the UI never infers pass/fail
+        # from insight-id absence (review finding: mismatched trigger bands).
+        "mandate_checks": insights.mandate_checks(mdl, metrics, fc_long_1y),
         "warnings": ps.warnings,
     })
 

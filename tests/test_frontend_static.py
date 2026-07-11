@@ -164,11 +164,15 @@ def test_analysis_view_prefers_engine_data_provenance_verdict():
     assert "data_provenance: verdict" in analysis_source
     assert "data_provenance?: DataQuality" in type_source
 
-    # Mandate-fit pass/fail mirrors engine insight verdicts instead of
-    # re-implemented client-side methodology thresholds.
+    # Mandate-fit pass/fail comes from the engine's STRUCTURED mandate_checks
+    # block, not client-side thresholds and not insight-id absence (whose
+    # trigger bands mismatched the displayed metrics — review finding).
     assert "targetVol * 1.15" not in analysis_source
-    assert '"vol_above_mandate"' in analysis_source
-    assert '"drawdown_breaches_tolerance"' in analysis_source
+    assert "payload.mandate_checks" in analysis_source
+    assert "checks.vol_ok" in analysis_source
+    assert "checks.dd_hist_ok" in analysis_source
+    assert '"vol_above_mandate"' not in analysis_source   # id-absence inference removed
+    assert "mandate_checks?:" in type_source
     assert "illustrative fit indication" in analysis_source
 
 

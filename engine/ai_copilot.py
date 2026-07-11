@@ -432,6 +432,23 @@ class AnthropicProvider(AIProvider):
         }
         if blocked:
             out["blocked_phrases"] = blocked
+        # The numeric-claim check is the honesty control that protects real
+        # trades — the dialogue path skipped it entirely (review finding). The
+        # allowed set includes the CONVERSATION: the dialogue prompt permits
+        # numbers "from the provided context or the conversation", so the
+        # PM's own hypotheticals must not false-positive.
+        allowed = (_payload_number_keys(sanitized)
+                   | _payload_number_keys([m["content"] for m in history])
+                   | _allowed_common_numbers())
+        unsupported = sorted(_numbers_in(reply) - allowed)
+        if unsupported:
+            out["unsupported_numbers"] = unsupported[:20]
+            out["needs_review"] = True
+            out["reply"] = (reply + "\n\n[Helios validator: "
+                            f"{len(unsupported)} number(s) in this reply do not appear in the "
+                            "provided context or conversation — verify before acting: "
+                            + ", ".join(unsupported[:8]) + "]")
+            reply = out["reply"]
         data_mode = _data_mode(sanitized)
         if data_mode in {"demo", "blocked", "invalid_for_research", "mixed"}:
             out["data_mode"] = data_mode

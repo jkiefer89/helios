@@ -235,6 +235,12 @@ class EdgarClient:
         with self._lock:
             hit = self._cache.get(url)
             if hit and _time.monotonic() - hit[0] < self._CACHE_TTL_S:
+                # LRU, not FIFO: the multi-MB ticker maps are touched by every
+                # resolve() and must never be evicted mid-pass by a burst of
+                # Form-4 fetches (each re-download is another chance at the
+                # transient failure the resolver now refuses to guess through).
+                self._cache.pop(url, None)
+                self._cache[url] = hit
                 return hit[1]
         headers = {"User-Agent": self.user_agent, "Accept": "application/json, text/xml, */*"}
         try:
@@ -268,9 +274,17 @@ class EdgarClient:
         try:
             mf = self.get_json(MF_TICKERS_URL)
             for row in (mf.get("data") if isinstance(mf, dict) else None) or []:
-                # row = [cik, seriesId, classId, symbol]
-                if len(row) >= 4 and str(row[3]).strip().upper() == sym:
-                    return Resolution(symbol=sym, cik=str(int(row[0])), kind="fund",
+                # row = [cik, seriesId, classId, symbol]. Shape-guarded: a
+                # malformed row raised ValueError/TypeError past the
+                # EdgarError-only handlers in every caller (review finding).
+                if not isinstance(row, (list, tuple)) or len(row) < 4:
+                    continue
+                if str(row[3]).strip().upper() == sym:
+                    try:
+                        cik = str(int(row[0]))
+                    except (TypeError, ValueError):
+                        continue
+                    return Resolution(symbol=sym, cik=cik, kind="fund",
                                       series_id=str(row[1] or ""), class_id=str(row[2] or ""))
         except EdgarError as exc:
             # Without the fund map we cannot tell fund from stock, and tickers
@@ -286,8 +300,14 @@ class EdgarClient:
         stocks = self.get_json(STOCK_TICKERS_URL)
         values = stocks.values() if isinstance(stocks, dict) else []
         for entry in values:
+            if not isinstance(entry, dict):
+                continue
             if str(entry.get("ticker", "")).strip().upper() == sym:
-                return Resolution(symbol=sym, cik=str(int(entry["cik_str"])), kind="stock",
+                try:
+                    cik = str(int(entry["cik_str"]))
+                except (KeyError, TypeError, ValueError):
+                    continue
+                return Resolution(symbol=sym, cik=cik, kind="stock",
                                   name=str(entry.get("title", "")))
         raise EdgarError(f"Could not resolve {sym!r} to a SEC registrant (not a registered fund or filer).")
 

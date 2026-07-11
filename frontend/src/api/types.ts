@@ -1409,6 +1409,15 @@ export interface AnalysisResponse {
   sentiment?: SentimentPayload;
   backtest: BacktestPayload;
   insights?: ModelInsight[];
+  // Structured mandate-fit verdicts computed server-side from the same
+  // variables the insights use (never inferred from insight-id absence).
+  mandate_checks?: {
+    vol_ok: boolean;
+    vol_band_pct: number;
+    dd_hist_ok: boolean;
+    dd_sim_breach_prob: number | null;
+    dd_sim_ok: boolean | null;
+  };
   holdings?: AnalysisHolding[];
   concentration?: { hhi: number; n_eff: number; corr_mean: number };
   context?: string;

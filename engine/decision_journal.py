@@ -262,6 +262,23 @@ def _bucket_stats(entries: list[dict[str, Any]]) -> dict[str, Any]:
     scored = [(e, _primary_outcome(e)) for e in entries]
     measured = [(e, o) for e, o in scored if o is not None]
     hits = [o["hit"] for _, o in measured]
+    # Per-horizon breakdown: the primary-outcome headline mixes 21-day returns
+    # (young decisions) with 252-day returns (old ones) in one average —
+    # incomparable windows (review finding). Each horizon row aggregates only
+    # its own window; the headline stays as the labeled mixed-window view.
+    by_horizon: dict[str, Any] = {}
+    for horizon in OUTCOME_HORIZONS_D:
+        rows = [o for o in ((e.get("outcomes") or {}).get(str(horizon)) for e in entries)
+                if o and o.get("hit") is not None]
+        if not rows:
+            continue
+        by_horizon[str(horizon)] = {
+            "measured_count": len(rows),
+            "hit_count": sum(1 for o in rows if o.get("hit")),
+            "hit_rate_pct": _pct(sum(1 for o in rows if o.get("hit")), len(rows)),
+            "avg_target_return_pct": _avg(o.get("target_return_pct") for o in rows),
+            "avg_alpha_pct": _avg(o.get("alpha_pct") for o in rows),
+        }
     return {
         "count": len(entries),
         "measured_count": len(measured),
@@ -269,6 +286,9 @@ def _bucket_stats(entries: list[dict[str, Any]]) -> dict[str, Any]:
         "hit_rate_pct": _pct(sum(1 for h in hits if h), len(hits)),
         "avg_target_return_pct": _avg(o.get("target_return_pct") for _, o in measured),
         "avg_alpha_pct": _avg(o.get("alpha_pct") for _, o in measured),
+        "headline_basis": "longest measured horizon per decision (mixed windows) — "
+                          "use by_horizon for like-for-like comparisons",
+        "by_horizon": by_horizon,
     }
 
 

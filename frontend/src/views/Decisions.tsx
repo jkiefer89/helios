@@ -77,8 +77,11 @@ export function Decisions() {
         </p>
       </div>
 
-      {board && (
-        <section className="dashboard-grid">
+      {/* The form must not depend on the list GET: recording is a POST and
+          stayed usable through /api/decisions hiccups only the Scoreboard
+          panel actually needs (review finding). */}
+      <section className="dashboard-grid">
+        {board && (
           <Panel title="Scoreboard" className="span-2">
             <div className="stat-grid">
               <StatTile label="Decisions" value={board.total.count} />
@@ -116,8 +119,9 @@ export function Decisions() {
             )}
             {board.disclaimer && <p className="forecast-note">{board.disclaimer}</p>}
           </Panel>
+        )}
 
-          <Panel title="Log a decision">
+        <Panel title="Log a decision">
             <div className="decision-form">
               <div className="decision-form__row">
                 <select value={targetKind} onChange={(e) => setTargetKind(e.target.value)}>
@@ -148,8 +152,7 @@ export function Decisions() {
               </p>
             </div>
           </Panel>
-        </section>
-      )}
+      </section>
 
       <Panel title="Decisions" meta={`${decisions.length} recorded`}>
         {error && <div className="notice danger" role="alert">{error}</div>}

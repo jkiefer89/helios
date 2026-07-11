@@ -108,6 +108,7 @@ def score_candidate(candidate: dict, regime: dict | None = None) -> dict:
         "tactical": candidate.get("tactical"),
         "strategic": candidate.get("strategic"),
         "insider_signal": candidate.get("insider_signal"),
+        "insider_signal_note": candidate.get("insider_signal_note"),
         "forecast_quality": round(forecast_quality, 1),
         "backtest_quality": round(backtest_quality, 1),
         "data_quality": round(data_quality, 1),
@@ -252,6 +253,15 @@ def instrument_candidate(inst: data.Instrument) -> dict | None:
         insider = events.get("insider") or {}
         if insider.get("net_signal") in {"buying", "selling"}:
             candidate["insider_signal"] = insider["net_signal"]
+            # Carry the coverage caveat with the signal: net_signal may come
+            # from a 5-filing parse budget over a much larger window, and
+            # dropping the "Parsed N of M" context presented a thin sample as
+            # the full insider picture (review finding).
+            in_window = int(insider.get("filings_in_window") or 0)
+            parsed_n = len(insider.get("parsed") or [])
+            if in_window > parsed_n:
+                candidate["insider_signal_note"] = (
+                    f"Based on {parsed_n} of {in_window} Form 4 filings in the window.")
     analytics_cache.put("opportunity_candidate", cache_key, candidate)
     return candidate
 

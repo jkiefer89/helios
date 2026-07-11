@@ -113,6 +113,7 @@ def _parse_form4_xml(xml_text: str) -> dict[str, Any] | None:
     is_officer = (root.findtext(".//reportingOwner/reportingOwnerRelationship/isOfficer") or "").strip()
     buys = sells = 0
     buy_shares = sell_shares = 0.0
+    unquantified = 0
     # Both tables count: derivative-only Form 4s (options/warrants bought or
     # sold on the open market, codes P/S) previously read as "no signal"
     # (review finding).
@@ -120,9 +121,17 @@ def _parse_form4_xml(xml_text: str) -> dict[str, Any] | None:
                     + root.findall(".//derivativeTransaction"))
     for txn in transactions:
         code = (txn.findtext(".//transactionCoding/transactionCode") or "").strip().upper()
+        raw_shares = (txn.findtext(".//transactionAmounts/transactionShares/value") or "").strip()
         try:
-            shares = float(txn.findtext(".//transactionAmounts/transactionShares/value") or 0)
+            shares = float(raw_shares) if raw_shares else None
         except ValueError:
+            shares = None
+        if code in {"P", "S"} and shares is None:
+            # Footnote-only/formatted share counts: coercing to 0.0 let one
+            # tiny parsed buy outvote an unparseable large sale in the
+            # share-volume vote (review finding). Count the trade, flag the
+            # missing quantity.
+            unquantified += 1
             shares = 0.0
         if code == "P":
             buys += 1
@@ -137,6 +146,10 @@ def _parse_form4_xml(xml_text: str) -> dict[str, Any] | None:
         "is_officer": is_officer in {"1", "true", "True"},
         "buys": buys, "sells": sells,
         "buy_shares": round(buy_shares), "sell_shares": round(sell_shares),
+        "unquantified": unquantified,
+        # Supersede key: a 4/A amendment replaces the original it corrects.
+        "owner_key": (root.findtext(".//reportingOwner/reportingOwnerId/rptOwnerCik") or owner).strip(),
+        "original_date": (root.findtext(".//dateOfOriginalSubmission") or "").strip(),
     }
 
 
@@ -203,11 +216,15 @@ def _build_events(sym: str, window_days: int, client) -> dict[str, Any]:
         if len(eight_ks) >= _MAX_8KS:
             break
 
-    form4_rows = [r for r in rows if r["form"] == "4" and _within_window(r["filing_date"], cutoff)]
+    # 4/A amendments included: aggregating only the uncorrected original when
+    # a correction exists reported the misfiled numbers (review finding).
+    form4_rows = [r for r in rows if r["form"] in {"4", "4/A"}
+                  and _within_window(r["filing_date"], cutoff)]
     parsed, purchases, sales = [], 0, 0
     buy_shares = sell_shares = 0.0
-    parsed_ok = 0
+    parsed_ok = unquantified = 0
     attempted = fetch_failures = parse_failures = 0
+    superseded: set[tuple[str, str]] = set()
     for row in form4_rows[:_FORM4_PARSE_BUDGET]:
         doc = row["primary_document"].split("/")[-1]  # strip the xsl viewer prefix
         if not doc.lower().endswith(".xml"):
@@ -225,15 +242,25 @@ def _build_events(sym: str, window_days: int, client) -> dict[str, Any]:
             continue             # grants-only would fabricate calm (review finding)
         parsed_ok += 1
         if detail:
+            # Rows are newest-first, so an amendment is seen BEFORE the
+            # original it corrects; skip the superseded original.
+            key = (detail.get("owner_key", ""), detail.get("original_date", ""))
+            if row["form"] == "4/A" and all(key):
+                superseded.add(key)
+            elif (detail.get("owner_key", ""), row["filing_date"]) in superseded:
+                continue
             parsed.append({"filing_date": row["filing_date"], **detail})
             purchases += detail["buys"]
             sales += detail["sells"]
             buy_shares += detail["buy_shares"]
             sell_shares += detail["sell_shares"]
+            unquantified += detail.get("unquantified", 0)
 
     # Direction by SHARE volume when known (a 50,000-share sale must outvote
     # three 100-share buys — review finding), transaction counts as fallback.
-    if buy_shares or sell_shares:
+    # When any P/S trade lacks a parseable share count, the share vote would
+    # silently exclude it — fall back to transaction counts, which include it.
+    if (buy_shares or sell_shares) and not unquantified:
         net_signal = ("buying" if buy_shares > sell_shares else
                       "selling" if sell_shares > buy_shares else "mixed")
     else:
@@ -244,6 +271,9 @@ def _build_events(sym: str, window_days: int, client) -> dict[str, Any]:
             f"{parse_failures} unusable documents); direction is "
             "share-volume weighted; grants/exercises excluded — only open-market "
             "trades (codes P/S) count.")
+    if unquantified:
+        note += (f" {unquantified} trade(s) had no parseable share count — direction "
+                 "falls back to transaction counts.")
     if (fetch_failures or parse_failures) and not parsed_ok:
         net_signal = "unknown"
         note += " No filings could be parsed — insider direction is UNKNOWN, not calm."

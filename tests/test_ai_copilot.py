@@ -359,12 +359,19 @@ def test_dialogue_must_end_with_user_turn():
 
 
 def test_dialogue_requires_anthropic_provider(monkeypatch):
+    # The provider must be genuinely AVAILABLE so this exercises the dialogue
+    # gate itself — the old version set wrong env names, the provider was
+    # simply unavailable, and AIUnavailableError vacuously satisfied
+    # pytest.raises(AIError) without touching the gate (review finding).
     monkeypatch.setenv("HELIOS_AI_ENABLED", "1")
     monkeypatch.setenv("HELIOS_AI_PROVIDER", "local")
-    monkeypatch.setenv("HELIOS_LOCAL_AI_URL", "http://127.0.0.1:11434")
-    monkeypatch.setenv("HELIOS_AI_MODEL_LOCAL", "llama3")
+    monkeypatch.setenv("HELIOS_LOCAL_AI_BASE_URL", "http://127.0.0.1:11434")
+    monkeypatch.setenv("HELIOS_LOCAL_AI_MODEL", "llama3")
+    monkeypatch.setattr(ai_copilot, "_get_json",
+                        lambda url, timeout=None: {"models": [{"name": "llama3"}]})
     provider = ai_copilot.get_provider()
-    with pytest.raises(ai_copilot.AIError):
+    assert provider.status().get("available") is True
+    with pytest.raises(ai_copilot.AIProviderError, match="Anthropic"):
         provider.chat([{"role": "user", "content": "hi"}], {})
 
 

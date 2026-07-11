@@ -254,7 +254,10 @@ function DecisionQuickLog({ payload }: { payload: AnalysisResponse }) {
   const agreement = bucketOf(myAction) === engineBucket ? "agree" : "override";
 
   const log = async () => {
-    if (!targetId || state === "saving") return;
+    // "saved" is terminal until an input changes (both onChange handlers reset
+    // to "idle"): re-clicking after a save posted a duplicate decision with a
+    // fresh id and double-counted the journal (review finding).
+    if (!targetId || state === "saving" || state === "saved") return;
     setState("saving");
     try {
       await api.recordDecision({
@@ -296,8 +299,9 @@ function DecisionQuickLog({ payload }: { payload: AnalysisResponse }) {
         onChange={(e) => { setRationale(e.target.value); setState("idle"); }}
         placeholder="Why? (recorded for the scoreboard)"
       />
-      <button type="button" onClick={() => void log()} disabled={state === "saving" || !targetId}>
-        {state === "saving" ? "Logging…" : "Log decision"}
+      <button type="button" onClick={() => void log()}
+              disabled={state === "saving" || state === "saved" || !targetId}>
+        {state === "saving" ? "Logging…" : state === "saved" ? "Logged" : "Log decision"}
       </button>
       {state === "saved" && <span className="decision-quicklog__ok">{message}</span>}
       {state === "error" && <span className="decision-quicklog__err">{message}</span>}
@@ -329,7 +333,10 @@ function SecEventsPanel({ events }: { events: NonNullable<AnalysisResponse["sec_
             {insider.open_market_sales} sale{insider.open_market_sales === 1 ? "" : "s"} across {insider.filings_in_window} Form 4 filings.
             {insider.parsed.slice(0, 3).map((p) => (
               <span key={`${p.filing_date}-${p.owner}`} className="sec-events__detail">
-                {p.filing_date} {p.owner}{p.is_officer ? " (officer)" : ""}: {p.buys ? `bought ${p.buy_shares.toLocaleString()} sh` : `sold ${p.sell_shares.toLocaleString()} sh`}
+                {p.filing_date} {p.owner}{p.is_officer ? " (officer)" : ""}: {[
+                  p.buys ? `bought ${p.buy_shares.toLocaleString()} sh` : "",
+                  p.sells ? `sold ${p.sell_shares.toLocaleString()} sh` : "",
+                ].filter(Boolean).join(", ")}
               </span>
             ))}
           </>
@@ -574,22 +581,28 @@ function MandateFit({ payload }: { payload: AnalysisResponse }) {
   if (!mandate || typeof targetVol !== "number" || typeof tolerance !== "number") {
     return <EmptyState title="No mandate context" body="Mandate-fit bars appear for model analyses with a configured mandate." />;
   }
-  // Pass/fail comes from the engine's mandate-fit insight verdicts, not from
-  // re-implemented client-side thresholds. Rows without an engine verdict
-  // (including any payload lacking insights) render as illustrative only.
-  const insightIds = Array.isArray(payload.insights) ? payload.insights.map((insight) => insight.id) : null;
-  const rows: Array<{ label: string; value: string; pct: number; verdict: boolean | null }> = [
+  // Pass/fail comes from the engine's structured mandate_checks block —
+  // computed server-side from the same variables the insights use. Inferring
+  // verdicts from insight-id ABSENCE mismatched the displayed metrics: vol
+  // 15% over target rendered green, and a simulated-breach trigger turned the
+  // historical-drawdown row red while its own numbers passed (review finding).
+  const checks = payload.mandate_checks;
+  const rows: Array<{ label: string; value: string; pct: number; verdict: boolean | null; note?: string }> = [
     {
       label: "Volatility vs target",
       value: `${fmtNumber(vol, 1)}% / ${fmtNumber(targetVol, 0)}%`,
       pct: (vol / (targetVol * 2)) * 100,
-      verdict: insightIds ? !insightIds.includes("vol_above_mandate") : null,
+      verdict: checks ? checks.vol_ok : null,
+      note: checks && !checks.vol_ok ? `Beyond the ${checks.vol_band_pct}% tolerance band.` : undefined,
     },
     {
       label: "Max drawdown vs tolerance",
       value: `−${fmtNumber(dd, 1)}% / −${fmtNumber(tolerance, 0)}%`,
       pct: (dd / (tolerance * 2)) * 100,
-      verdict: insightIds ? !insightIds.includes("drawdown_breaches_tolerance") : null,
+      verdict: checks ? checks.dd_hist_ok : null,
+      note: checks && checks.dd_sim_ok === false && checks.dd_sim_breach_prob != null
+        ? `Simulated 1Y breach odds ${fmtNumber(checks.dd_sim_breach_prob * 100, 0)}% — see Model Insights.`
+        : undefined,
     },
     ...(typeof targetReturn === "number"
       ? [{
@@ -615,6 +628,7 @@ function MandateFit({ payload }: { payload: AnalysisResponse }) {
               style={row.verdict === null ? { width: `${Math.min(row.pct, 100)}%`, background: "var(--gray)" } : { width: `${Math.min(row.pct, 100)}%` }}
             />
           </div>
+          {row.note && <p className="forecast-note">{row.note}</p>}
         </div>
       ))}
       {typeof payload.signal.mandate_fit === "number" && (

@@ -36,7 +36,11 @@ export function useViewFetch<T>({ failureMessage, keepPayloadWhileLoading = fals
       onSuccess?.(result);
     } catch (err) {
       if (requestId !== requestSeq.current) return;
-      setPayload(null);
+      // keepPayloadWhileLoading views keep their last good data on a FAILED
+      // refresh too: nulling it made a transient network error render as the
+      // data-provenance "Locked" gate — a misdiagnosis (review finding). The
+      // role=alert error banner still reports the failure.
+      if (!optionsRef.current.keepPayloadWhileLoading) setPayload(null);
       setError(err instanceof Error ? err.message : optionsRef.current.failureMessage);
     } finally {
       if (requestId === requestSeq.current) setIsLoading(false);

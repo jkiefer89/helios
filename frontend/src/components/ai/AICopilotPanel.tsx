@@ -46,12 +46,13 @@ export function AICopilotPanel({
     void refreshStatus();
   }, [refreshStatus]);
 
-  // A narrative generated for one target must never stay rendered under a
-  // different target's header (review finding) — clear on context switch.
+  // A narrative generated for one target OR one data vintage must never stay
+  // rendered next to different data (review finding): a Refresh re-scoring the
+  // same symbol keeps the same contextLabel, so the payload must clear too.
   useEffect(() => {
     setResult(null);
     setError("");
-  }, [contextLabel]);
+  }, [contextLabel, payload]);
 
   const computedDataMode = useMemo(() => {
     const explicit = dataMode || readDataMode(payload);

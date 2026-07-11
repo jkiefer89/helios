@@ -10,6 +10,31 @@ from __future__ import annotations
 from . import mandate as mnd
 
 
+def mandate_checks(model, metrics: dict, fc_long_1y: dict | None = None) -> dict:
+    """Structured pass/fail per displayed mandate-fit metric.
+
+    Computed from the SAME variables the insights use — one source of truth.
+    The UI previously inferred verdicts from the ABSENCE of insight ids, whose
+    trigger bands (vol > 1.15x target; simulated breach odds folded into the
+    drawdown insight) do not match the displayed numbers, so vol 15% over
+    target showed a green pass and an in-tolerance historical drawdown could
+    show a red fail (review finding).
+    """
+    m = mnd.get(mnd.key_or_default(model.mandate_key))
+    vol = metrics["annual_vol_pct"] / 100.0
+    tgt_vol = m["target_vol_pct"] / 100.0
+    maxdd = metrics["max_drawdown_pct"] / 100.0           # negative
+    tol = m["max_drawdown_tolerance_pct"] / 100.0
+    breach_1y = fc_long_1y.get("prob_breach_maxdd") if fc_long_1y else None
+    return {
+        "vol_ok": vol <= tgt_vol * 1.15,
+        "vol_band_pct": 15,   # the insight's tolerance band, disclosed not hidden
+        "dd_hist_ok": maxdd >= -tol,
+        "dd_sim_breach_prob": breach_1y,
+        "dd_sim_ok": (breach_1y <= 0.20) if breach_1y is not None else None,
+    }
+
+
 def generate(model, ps, metrics: dict, sig: dict,
              fc_short: dict, fc_long_1y: dict | None = None) -> list[dict]:
     key = mnd.key_or_default(model.mandate_key)
