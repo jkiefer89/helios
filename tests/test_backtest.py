@@ -13,9 +13,15 @@ from tests.conftest import price_series
 
 
 def _reversal_series(up_days: int = 150, down_days: int = 150) -> pd.Series:
-    """Uptrend followed by a downtrend, forcing at least one entry and exit."""
+    """Uptrend followed by a downtrend, forcing at least one entry and exit.
+
+    Trending WITH pullbacks: a perfectly monotonic leg pins the (correct)
+    Wilder RSI at 100/0 and the contrarian momentum component then rightly
+    suppresses entries — real trends wiggle."""
     idx = pd.bdate_range("2023-01-02", periods=up_days + down_days)
-    rets = np.concatenate([np.full(up_days, 0.004), np.full(down_days, -0.005)])
+    up = np.tile([0.009, -0.003, 0.007, -0.002], up_days // 4 + 1)[:up_days]
+    down = np.tile([-0.010, 0.003, -0.008, 0.002], down_days // 4 + 1)[:down_days]
+    rets = np.concatenate([up, down])
     return pd.Series(100.0 * np.cumprod(1.0 + rets), index=idx, name="close")
 
 

@@ -73,8 +73,22 @@ def holding_expected_return(ticker, weight_pct, asset_class, fundamentals,
                 "reason": ("yield-only fundamentals — no earnings evidence (P/E or "
                            "growth); refusing to apply an equity growth anchor")})
         dy = _clip(fundamentals.dividend_yield or 0.0, *_DY_CAP)
-        g = _clip(fundamentals.earnings_growth if fundamentals.earnings_growth is not None else
-                  _macro.sector_anchor(fundamentals.sector)["growth"], *_GROWTH_CAP)
+        raw_g = fundamentals.earnings_growth
+        growth_basis = getattr(fundamentals, "growth_basis", "") or ""
+        g_sector = _macro.sector_anchor(fundamentals.sector)["growth"]
+        if raw_g is None:
+            g_in, growth_basis = g_sector, "sector_anchor"   # substituted — flagged
+        elif growth_basis == "trailing_quarter_yoy":
+            # yfinance's figure is ONE quarter's YoY comp. Used raw as a
+            # perpetual growth rate, a cyclical rebound quarter (+80% off a
+            # weak comp) capped g at +25%/yr and saturated the strategic
+            # track at maximal BUY (review finding). Shrink 70% toward the
+            # sector anchor instead of pretending one comp is a CAGR.
+            g_in = g_sector + 0.3 * (_clip(raw_g, -0.5, 0.8) - g_sector)
+            growth_basis = "trailing_quarter_yoy_shrunk"
+        else:
+            g_in = raw_g
+        g = _clip(g_in, *_GROWTH_CAP)
         rev = 0.0
         if pe and pe > 0:
             fair = _macro.sector_anchor(fundamentals.sector)["fair_pe"]
@@ -85,8 +99,8 @@ def holding_expected_return(ticker, weight_pct, asset_class, fundamentals,
             "earnings_growth": round(g, 4),
             "valuation_reversion": round(rev, 4),
         }
-        if fundamentals.earnings_growth is None:
-            blocks["growth_basis"] = "sector_anchor"  # substituted, not reported — flagged
+        if growth_basis:
+            blocks["growth_basis"] = growth_basis
         return HoldingReturn(ticker, weight_pct, er, "fundamentals", True, blocks)
 
     # Equity name with no usable fundamentals: defer to the generic anchor.
@@ -179,7 +193,11 @@ def aggregate(underlyings, fundamentals_map, mandate_key="balanced",
 
     per, usable_w = [], 0.0
     mu_usable = 0.0
-    agg_blocks = {"dividend_yield": 0.0, "earnings_growth": 0.0, "valuation_reversion": 0.0}
+    # asset_class_anchor included: bond/cash sleeves add to usable_w, so a
+    # breakdown missing their block could not reconcile with the covered E[r]
+    # it claims to explain (review finding: blocks summed 6.82% vs 8.07%).
+    agg_blocks = {"dividend_yield": 0.0, "earnings_growth": 0.0,
+                  "valuation_reversion": 0.0, "asset_class_anchor": 0.0}
     for u in underlyings:
         w = max(0.0, float(u.get("weight_pct") or 0.0))
         if w <= 0:
@@ -211,8 +229,12 @@ def aggregate(underlyings, fundamentals_map, mandate_key="balanced",
         "n_underlyings": len(per),
         "n_usable": sum(1 for h in per if h.usable),
         "top_contributions": [
+            # Explicit None check: `or generic` displayed a holding whose
+            # blocks genuinely sum to 0.0% as the anchor (review finding —
+            # the truly worst name then dodged the trim hypothesis).
             {"ticker": h.ticker, "weight_pct": round(h.weight_pct, 2),
-             "expected_return_pct": round((h.expected_return or generic) * 100.0, 2),
+             "expected_return_pct": round(
+                 (h.expected_return if h.expected_return is not None else generic) * 100.0, 2),
              "basis": h.basis}
             for h in sorted(per, key=lambda h: h.weight_pct, reverse=True)[:15]
         ],

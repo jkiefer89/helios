@@ -31,13 +31,20 @@ def test_asset_class_return_by_sleeve():
 # fundamentals
 # --------------------------------------------------------------------------- #
 def test_fundamentals_coercion_and_usability():
+    # All wired providers deliver dividend_yield as a TRUE FRACTION; the old
+    # >1.5 percent heuristic double-divided legitimate covered-call yields
+    # (2.77 = 277%, verified live) into fake 2.77% figures. Values pass
+    # through numerically; the CMA's DY cap clips extremes at scoring time.
     f = fundamentals.fetch("AAPL", provider=lambda t: {
-        "dividend_yield": 1.8, "forward_pe": 28.0, "trailing_pe": -5.0,
+        "dividend_yield": 0.018, "forward_pe": 28.0, "trailing_pe": -5.0,
         "earnings_growth": 0.11, "sector": "Technology"})
-    assert f.dividend_yield == pytest.approx(0.018)   # 1.8% normalized to a fraction
+    assert f.dividend_yield == pytest.approx(0.018)
     assert f.forward_pe == 28.0
     assert f.trailing_pe is None                       # negative P/E rejected
     assert f.usable
+    high = fundamentals.fetch("MSTY", provider=lambda t: {
+        "dividend_yield": 2.77, "sector": "Technology", "trailing_pe": 8.0})
+    assert high.dividend_yield == pytest.approx(2.77)  # 277%, NOT re-divided
 
 
 def test_fundamentals_offline_returns_empty():

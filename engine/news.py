@@ -65,7 +65,11 @@ def headlines_for(symbol: str, company_name: str = "", max_records: int = 12) ->
     # quote multi-word names so GDELT treats them as a phrase.
     name = re.sub(r"[^A-Za-z0-9 .&'-]", " ", company_name or "").strip()
     term = f'"{name}"' if len(name.split()) > 1 else (name or sym)
-    query = f"{term} (stock OR shares OR earnings OR market)"
+    # Language filtering is a QUERY OPERATOR in the GDELT DOC 2.0 API; the
+    # standalone "sourcelang" URL parameter is ignored (verified live: 30/50
+    # non-English results with the parameter, 50/50 English with the operator)
+    # and non-English text fed the English-lexicon sentiment scorer.
+    query = f"{term} (stock OR shares OR earnings OR market) sourcelang:english"
 
     # Cache key includes the query inputs — a symbol-only key served one
     # (name, max_records) variant's results to every caller (review finding).
@@ -81,7 +85,6 @@ def headlines_for(symbol: str, company_name: str = "", max_records: int = 12) ->
         "format": "json",
         "maxrecords": str(max(1, min(int(max_records), 50))),
         "timespan": "3d",
-        "sourcelang": "english",
     })
     fn = _HTTP or _urllib_json
     try:

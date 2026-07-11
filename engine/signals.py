@@ -42,11 +42,15 @@ def _momentum_score(f: pd.DataFrame, i: int) -> float:
     rsi = f.iloc[i]["rsi"]
     if not np.isfinite(rsi):
         return 0.0
-    # Oversold -> bullish, overbought -> bearish, with a mild pro-trend tilt mid-range.
+    # Oversold -> bullish, overbought -> bearish, with a mild pro-trend tilt
+    # mid-range. The extreme legs anchor to the mid-range endpoints (±0.16 at
+    # RSI 30/70) so the score is CONTINUOUS at the bands — the old piecewise
+    # jumped +0.159 -> -0.003 crossing 70, letting a 0.2-point RSI move flip a
+    # borderline rating and whipsaw backtest positions (review finding).
     if rsi < 30:
-        return float((30 - rsi) / 30)
+        return float(-0.16 + (30 - rsi) / 30 * 1.16)   # -0.16 at 30 -> +1.0 at 0
     if rsi > 70:
-        return float(-(rsi - 70) / 30)
+        return float(0.16 - (rsi - 70) / 30 * 1.16)    # +0.16 at 70 -> -1.0 at 100
     return float((rsi - 50) / 50 * 0.4)
 
 
@@ -404,9 +408,10 @@ def historical_signals(close: pd.Series) -> pd.Series:
     momentum = np.zeros(n)
     has_rsi = np.isfinite(rsi)
     r = rsi[has_rsi]
+    # Mirrors _momentum_score exactly — continuous at the 30/70 bands.
     momentum[has_rsi] = np.where(
-        r < 30, (30 - r) / 30,
-        np.where(r > 70, -(r - 70) / 30, (r - 50) / 50 * 0.4),
+        r < 30, -0.16 + (30 - r) / 30 * 1.16,
+        np.where(r > 70, 0.16 - (r - 70) / 30 * 1.16, (r - 50) / 50 * 0.4),
     )
     return pd.Series(0.6 * trend + 0.4 * momentum, index=close.index)
 

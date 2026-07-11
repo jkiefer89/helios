@@ -49,9 +49,13 @@ FED_MONETARY_FEED = "https://www.federalreserve.gov/feeds/press_monetary.xml"
 FED_SPEECHES_FEED = "https://www.federalreserve.gov/feeds/speeches.xml"
 WH_ACTIONS_FEED = "https://www.whitehouse.gov/presidential-actions/feed/"
 GDELT_DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
+# sourcelang is a QUERY OPERATOR in the GDELT DOC 2.0 API — the standalone URL
+# parameter is ignored and let non-English articles into the English-lexicon
+# scorer (review finding, verified live).
 GDELT_GEOPOLITICS_QUERY = (
     '(sanctions OR tariff OR tariffs OR war OR invasion OR missile OR ceasefire '
-    'OR blockade OR "export controls" OR escalation OR "nuclear test")'
+    'OR blockade OR "export controls" OR escalation OR "nuclear test") '
+    'sourcelang:english'
 )
 
 # --------------------------------------------------------------------------- #
@@ -316,7 +320,6 @@ def _geopolitics_component() -> dict:
         "query": GDELT_GEOPOLITICS_QUERY,
         "mode": "artlist", "format": "json",
         "maxrecords": str(_GDELT_MAX_RECORDS), "timespan": "3d",
-        "sourcelang": "english",
     })
     try:
         payload = _fetch_json(url) or {}

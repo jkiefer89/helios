@@ -2,6 +2,8 @@
 validation, portfolio clinic, and risk analytics."""
 from __future__ import annotations
 
+import time
+
 from flask import Blueprint, Response, request
 
 from engine import (
@@ -461,6 +463,10 @@ def model_lookthrough():
 # Bound how many per-holding fundamentals one forward analysis may fetch, so a
 # wide model can't trigger an unbounded fan-out of (network) provider calls.
 _FORWARD_FUNDAMENTALS_BUDGET = 60
+# ...and how LONG the whole fan-out may run: 60 tickers x sequential provider
+# chains had no aggregate deadline (review finding). Tickers beyond the
+# deadline get cache-only reads; misses just lower reported coverage honestly.
+_FORWARD_FUNDAMENTALS_TIME_BUDGET_S = 45.0
 
 
 def _fundamentals_map_for(underlyings: list) -> dict:
@@ -478,6 +484,7 @@ def _fundamentals_map_for(underlyings: list) -> dict:
     cusip_to_ticker = figi.map_cusips(need) if need else {}
 
     fmap: dict = {}
+    deadline = time.monotonic() + _FORWARD_FUNDAMENTALS_TIME_BUDGET_S
     for u in top:
         ticker = (u.get("ticker") or "").upper()
         if not ticker:
@@ -485,6 +492,11 @@ def _fundamentals_map_for(underlyings: list) -> dict:
             if ticker:
                 u["ticker"] = ticker  # so cma.aggregate can join the fundamentals
         if ticker and ticker not in fmap:
+            if time.monotonic() > deadline:
+                cached = fundamentals.fetch_cached(ticker)
+                if cached is not None:
+                    fmap[ticker] = cached
+                continue
             fmap[ticker] = fundamentals.fetch(ticker)
     return fmap
 

@@ -277,7 +277,11 @@ def forecast_long(close: pd.Series, horizon_days: int, mandate_key: str = "balan
     cagr = lambda v: (np.asarray(v) / base) ** (1 / years) - 1  # noqa: E731
 
     # Worst intra-path drawdown distribution + mandate breach probability.
-    run_max = np.maximum.accumulate(inner, axis=1)
+    # The BASE value is the t=0 peak: without it, a path that declines from
+    # week 1 lowered its own reference peak and the initial drop was never
+    # counted as drawdown — optimistic bias in exactly the mandate-breach
+    # numbers (review finding).
+    run_max = np.maximum(np.maximum.accumulate(inner, axis=1), base)
     path_dd = ((inner - run_max) / run_max).min(axis=1)  # most-negative per path
     tol = -mnd.get(mandate_key)["max_drawdown_tolerance_pct"] / 100.0
 

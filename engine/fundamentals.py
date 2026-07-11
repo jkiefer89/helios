@@ -30,6 +30,21 @@ from . import data  # reuse the existing yfinance guard (_yf / HAS_YF)
 _DEFAULT_PROVIDER = None
 _PROVIDER_LOCK = threading.RLock()
 
+# Per-ticker wall-clock budget for the whole provider chain. The auto chain
+# can issue up to ~16 sequential HTTP calls at 12s timeout each; one uncovered
+# name against black-holed providers pinned a request thread for minutes
+# (review finding). Thread-local so concurrent fetches don't share a deadline.
+PER_TICKER_BUDGET_S = 20.0
+_TICKER_DEADLINE = threading.local()
+
+
+def _deadline_remaining() -> float | None:
+    deadline = getattr(_TICKER_DEADLINE, "value", None)
+    if deadline is None:
+        return None
+    import time
+    return deadline - time.monotonic()
+
 # FMP HTTP seam (tests inject canned JSON; production uses urllib).
 _FMP_HTTP = None
 _FMP_MAX_BYTES = 8 * 1024 * 1024
@@ -58,6 +73,11 @@ class Fundamentals:
     forward_pe: float | None = None
     trailing_pe: float | None = None
     earnings_growth: float | None = None  # fraction, e.g. 0.11
+    # WHAT KIND of growth figure that is — the three providers measure three
+    # different things and the CMA must not treat them alike (review finding):
+    # "forward_consensus_cagr" (FMP), "trailing_annual" (Intrinio),
+    # "trailing_quarter_yoy" (yfinance — one noisy comp, shrunk in the CMA).
+    growth_basis: str = ""
     sector: str = ""
     source: str = "none"                  # "yfinance" | "<provider>" | "none"
     # Quality / analyst extras (all optional; None = provider had no value).
@@ -136,7 +156,7 @@ def _yfinance_provider(ticker: str) -> dict:
     dte = _num(info.get("debtToEquity"))
     if dte is not None:
         dte = dte / 100.0
-    return {
+    out = {
         "dividend_yield": dy,
         "forward_pe": info.get("forwardPE"),
         "trailing_pe": info.get("trailingPE"),
@@ -152,18 +172,30 @@ def _yfinance_provider(ticker: str) -> dict:
         "analyst_rating": info.get("recommendationMean"),  # 1 buy .. 5 sell
         "n_analysts": info.get("numberOfAnalystOpinions"),
     }
+    if out["earnings_growth"] is not None:
+        # yfinance earningsGrowth is the LATEST QUARTER'S YoY — one noisy comp.
+        out["growth_basis"] = "trailing_quarter_yoy"
+    return out
 
 
 # --------------------------------------------------------------------------- #
 # Financial Modeling Prep (cleaner forward/consensus estimates)
 # --------------------------------------------------------------------------- #
 def _urllib_json(url: str):
+    # The last in-flight call may not overshoot the per-ticker deadline.
+    timeout = 12.0
+    remaining = _deadline_remaining()
+    if remaining is not None:
+        timeout = max(0.5, min(timeout, remaining))
     req = urllib.request.Request(url, headers={"User-Agent": "Helios Research Terminal"})
-    with urllib.request.urlopen(req, timeout=12) as resp:  # noqa: S310 (fixed https host)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 (fixed https host)
         return json.loads(resp.read(_FMP_MAX_BYTES + 1).decode("utf-8", errors="replace"))
 
 
 def _fmp_http_json(url: str):
+    remaining = _deadline_remaining()
+    if remaining is not None and remaining <= 0:
+        return None   # per-ticker budget exhausted — degrade, don't queue more calls
     fn = _FMP_HTTP or _urllib_json
     try:
         return fn(url)
@@ -180,9 +212,10 @@ def _fmp_forward(estimates, price):
             continue
         # v3 legacy: estimatedEpsAvg; stable API: epsAvg.
         eps = _num(e.get("estimatedEpsAvg")) or _num(e.get("epsAvg"))
+        n = _num(e.get("numAnalystsEps")) or _num(e.get("numberAnalystsEstimatedEps"))
         date = str(e.get("date") or "")[:10]
         if eps is not None and len(date) == 10 and date[:4].isdigit():
-            rows.append((date, eps))
+            rows.append((date, eps, n))
     if not rows:
         return None, None
     rows.sort()
@@ -194,7 +227,15 @@ def _fmp_forward(estimates, price):
     future = [r for r in rows if r[0] > today]
     if not future:
         return None, None
-    near, far = future[0], future[-1]
+    near = future[0]
+    # FY+4/FY+5 rows often carry 1-2 analysts or placeholder values, and the
+    # farthest row single-handedly sets the growth CAGR (review finding). Use
+    # the farthest future row whose analyst coverage is at least a third of
+    # the near row's; rows with missing counts pass (legacy v3 payloads).
+    near_n = near[2]
+    deep_enough = [r for r in future
+                   if r[2] is None or near_n is None or r[2] >= max(2.0, near_n / 3.0)]
+    far = deep_enough[-1] if deep_enough else near
     near_year, far_year = int(near[0][:4]), int(far[0][:4])
     growth = None
     if near[1] and far[1] and near[1] > 0 and far[1] > 0 and far_year > near_year:
@@ -276,6 +317,8 @@ def _fmp_provider(ticker: str) -> dict:
         "debt_to_equity": _num(ratios.get("debtToEquityRatioTTM")) or _num(ratios.get("debtEquityRatioTTM")),
         "current_price": price,
     }
+    if growth is not None:
+        out["growth_basis"] = "forward_consensus_cagr"
     next_earnings = _fmp_next_earnings(earnings)
     if next_earnings:
         out["next_earnings_date"] = next_earnings
@@ -342,6 +385,9 @@ def set_intrinio_http(fn) -> None:
 
 
 def _intrinio_http_json(url: str):
+    remaining = _deadline_remaining()
+    if remaining is not None and remaining <= 0:
+        return None   # per-ticker budget exhausted — degrade, don't queue more calls
     fn = _INTRINIO_HTTP or _urllib_json
     try:
         return fn(url)
@@ -384,6 +430,8 @@ def _intrinio_provider(ticker: str) -> dict:
             out[field] = num
     if not out and not company:
         return {}
+    if out.get("earnings_growth") is not None:
+        out["growth_basis"] = "trailing_annual"   # Intrinio epsgrowth is trailing
     out["sector"] = _intrinio_sector(company)
     out["source"] = "intrinio"
     return out
@@ -415,13 +463,18 @@ def _auto_provider(ticker: str) -> dict:
     """Provider chain, best-first with field-level gap filling:
     FMP consensus (if keyed) > Intrinio standardized (if keyed) > yfinance.
     Later providers only fill fields the earlier ones did not supply."""
-    merged: dict = {}
-    if os.environ.get("HELIOS_FMP_KEY", "").strip():
-        merged = _merge_raw(merged, _fmp_provider(ticker))
-    if os.environ.get("HELIOS_INTRINIO_KEY", "").strip():
-        merged = _merge_raw(merged, _intrinio_provider(ticker))
-    merged = _merge_raw(merged, _yfinance_provider(ticker))
-    return merged
+    import time
+    _TICKER_DEADLINE.value = time.monotonic() + PER_TICKER_BUDGET_S
+    try:
+        merged: dict = {}
+        if os.environ.get("HELIOS_FMP_KEY", "").strip():
+            merged = _merge_raw(merged, _fmp_provider(ticker))
+        if os.environ.get("HELIOS_INTRINIO_KEY", "").strip():
+            merged = _merge_raw(merged, _intrinio_provider(ticker))
+        merged = _merge_raw(merged, _yfinance_provider(ticker))
+        return merged
+    finally:
+        _TICKER_DEADLINE.value = None
 
 
 # Default-provider results are cached for a few hours: fundamentals move on
@@ -488,13 +541,20 @@ def fetch(ticker: str, provider=None) -> Fundamentals:
     else:
         result = Fundamentals(
             ticker=sym,
-            dividend_yield=_coerce_fraction(raw.get("dividend_yield")),
+            # All wired providers deliver dividend_yield as a TRUE FRACTION
+            # (yfinance pre-divides, FMP TTM ratio and lastDividend/price are
+            # fractions — MSTY 2.77 = 277% verified live, Intrinio is a
+            # fraction). The percent heuristic double-divided legitimate
+            # covered-call yields >150% into fake 2.5% yields and passed 0.9
+            # through as 90% (review finding). The CMA's _DY_CAP clips extremes.
+            dividend_yield=_num(raw.get("dividend_yield")),
             forward_pe=_coerce_pe(raw.get("forward_pe")),
             trailing_pe=_coerce_pe(raw.get("trailing_pe")),
             # All providers deliver growth as a true fraction and legitimate
             # values exceed 150% (recovery years); the percent heuristic would
             # corrupt 5.8 -> 0.058. The CMA's _GROWTH_CAP clips extremes.
             earnings_growth=_num(raw.get("earnings_growth")),
+            growth_basis=str(raw.get("growth_basis") or ""),
             sector=str(raw.get("sector") or ""),
             source=str(raw.get("source") or ("yfinance" if use_default else "provider")),
             # roe/margins/revenue growth are true fractions from both providers and

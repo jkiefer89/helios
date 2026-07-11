@@ -97,11 +97,18 @@ def _within_window(date_text: str, cutoff: datetime) -> bool:
 
 
 def _parse_form4_xml(xml_text: str) -> dict[str, Any] | None:
-    """Open-market purchase/sale totals from one Form 4 (codes P and S only)."""
+    """Open-market purchase/sale totals from one Form 4 (codes P and S only).
+
+    Returns ``None`` for UNUSABLE documents (bad XML, wrong document type) and
+    ``{}`` for genuinely parsed grants-only filings — callers must count the
+    two differently, or all-failed parsing reads as benign calm (review
+    finding)."""
     try:
         root = ET.fromstring(xml_text)
     except ET.ParseError:
         return None
+    if root.tag.split("}")[-1] != "ownershipDocument":
+        return None  # well-formed XHTML error page / wrong document — NOT parsed
     owner = (root.findtext(".//reportingOwner/reportingOwnerId/rptOwnerName") or "").strip()
     is_officer = (root.findtext(".//reportingOwner/reportingOwnerRelationship/isOfficer") or "").strip()
     buys = sells = 0
@@ -124,7 +131,7 @@ def _parse_form4_xml(xml_text: str) -> dict[str, Any] | None:
             sells += 1
             sell_shares += shares
     if not buys and not sells:
-        return None  # grants/exercises/gifts only — not an open-market signal
+        return {}  # grants/exercises/gifts only — parsed fine, just no open-market signal
     return {
         "owner": owner[:80],
         "is_officer": is_officer in {"1", "true", "True"},
@@ -199,10 +206,12 @@ def _build_events(sym: str, window_days: int, client) -> dict[str, Any]:
     form4_rows = [r for r in rows if r["form"] == "4" and _within_window(r["filing_date"], cutoff)]
     parsed, purchases, sales = [], 0, 0
     buy_shares = sell_shares = 0.0
-    attempted = fetch_failures = 0
+    parsed_ok = 0
+    attempted = fetch_failures = parse_failures = 0
     for row in form4_rows[:_FORM4_PARSE_BUDGET]:
         doc = row["primary_document"].split("/")[-1]  # strip the xsl viewer prefix
         if not doc.lower().endswith(".xml"):
+            parse_failures += 1  # no structured doc to read — not a benign grant
             continue
         attempted += 1
         try:
@@ -211,6 +220,10 @@ def _build_events(sym: str, window_days: int, client) -> dict[str, Any]:
             fetch_failures += 1  # counted honestly — never claimed as parsed
             continue
         detail = _parse_form4_xml(xml_text)
+        if detail is None:
+            parse_failures += 1  # unusable document — indistinguishable from
+            continue             # grants-only would fabricate calm (review finding)
+        parsed_ok += 1
         if detail:
             parsed.append({"filing_date": row["filing_date"], **detail})
             purchases += detail["buys"]
@@ -226,11 +239,12 @@ def _build_events(sym: str, window_days: int, client) -> dict[str, Any]:
     else:
         net_signal = ("buying" if purchases > sales else "selling" if sales > purchases
                       else "mixed" if purchases else "none")
-    note = (f"Parsed {len(parsed)} of {len(form4_rows)} Form 4 filings "
-            f"({attempted} attempted, {fetch_failures} fetch failures); direction is "
+    note = (f"Parsed {parsed_ok} of {len(form4_rows)} Form 4 filings "
+            f"({attempted} attempted, {fetch_failures} fetch failures, "
+            f"{parse_failures} unusable documents); direction is "
             "share-volume weighted; grants/exercises excluded — only open-market "
             "trades (codes P/S) count.")
-    if fetch_failures and not parsed:
+    if (fetch_failures or parse_failures) and not parsed_ok:
         net_signal = "unknown"
         note += " No filings could be parsed — insider direction is UNKNOWN, not calm."
     insider = {

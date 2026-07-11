@@ -26,7 +26,12 @@ def rsi(s: pd.Series, period: int = 14) -> pd.Series:
     loss = -delta.clip(upper=0.0)
     avg_gain = gain.ewm(alpha=1 / period, adjust=False).mean()
     avg_loss = loss.ewm(alpha=1 / period, adjust=False).mean()
-    rs = avg_gain / avg_loss.replace(0.0, np.nan)
+    # No zero->NaN replacement: numpy division yields the correct Wilder
+    # limits directly. avg_loss==0 with gains -> rs=inf -> RSI 100 (the old
+    # fillna fabricated a neutral 50 for monotonically rising bill/cash funds
+    # forever — review finding); all-loss stays 0; flat (0/0=NaN) keeps the
+    # neutral-50 convention.
+    rs = avg_gain / avg_loss
     return (100 - 100 / (1 + rs)).fillna(50.0)
 
 
