@@ -79,14 +79,59 @@ silently truncates at 800 chars; derivative-table Form 4s ignored; radar
 error-state and >200-decision count polish. Plus 19 findings whose verifiers
 hit the session limit — re-verify next session.
 
-**Review dimensions still owed a deep pass** (subagent capacity hit the 4am
-session limit): signal-math internals, web-layer threading, frontend state,
-ai-copilot sanitization, decision-journal edge cases, test-gap analysis.
-Spot-checked inline tonight (loop-closure in sec_events `_recent_rows` is safe;
-chat send has a loading guard against double-submit; quick-log guards
-duplicates; model-analyze macro path is cached-only so it adds no latency) —
-but each deserves the full adversarial treatment. **Re-run the review workflow
-on these six dimensions next session.**
+**Third review pass (2026-07-10/11) — 56 findings confirmed, ~53 fixed
+(commits 83d4ab7…916d60e), all regression-locked.** The six previously-owed
+dimensions got their full adversarial treatment. Highlights:
+
+*Return math & CMA:* annualized return is geometric CAGR (arithmetic-mean
+compounding reported +34.8%/yr on a flat round trip); CMA coverage measures
+against the whole book (40% visibility no longer extrapolates to 100%);
+building-block breakdown includes the asset-class anchor and reconciles with
+the covered E[r]; genuine 0.0% forward returns display honestly; growth
+provenance (forward CAGR / trailing annual / single-quarter YoY) is stamped
+per provider and single-quarter comps shrink 70% toward the sector anchor;
+FMP far-year estimates with 1-2 analysts can't set the growth block;
+dividend yields pass through as true fractions (covered-call ETF 277% no
+longer double-divided to 2.77%); forecast drawdowns count the t=0 base peak.
+
+*Signals:* RSI reads 100/0 at the monotonic extremes (was fabricated neutral
+50 forever on bill/cash funds); momentum score continuous at the 30/70 bands
+(was a rating-flipping cliff); REIT sector anchor via industry_group.
+
+*SEC/EDGAR:* stock-map hits classified via registrant submissions (SPY-style
+N-PORT filers get real look-throughs, GLD/USO get honest ETP labels); fund
+ticker-map outages refuse to guess fund-vs-stock (QQQ-as-permanent-stock-leaf
+poisoning); N-PORT truncation keeps the top 10k BY WEIGHT; negative pctVal
+rows accumulate signed; process-wide EDGAR throttle; Form 4/A supersedes;
+unquantified share counts fall back to transaction-count direction;
+malformed EDGAR payloads degrade instead of 500ing analyze.
+
+*Copilot:* series structurally cannot reach the provider (token blocking +
+size caps on lists AND dicts, observed audit flags); advisor free prose
+blocked; identity keys redacted; colliding redacted keys keep every entry;
+comma/e-notation numbers validate as single tokens with a context-aware year
+exemption; the CHAT path runs the same number validation as tasks;
+negation-aware, direction-aware dissent detection.
+
+*Journals:* model decisions measurable (data_mode derived properly); pending
+forward results can't starve (oldest-first pending queue); 7-day settlement
+guards on both journals; outcomes score from the record date (no intraday
+hindsight); benchmark alpha over the target's realized calendar window;
+guarded merge on outcome writes; uploads trigger forward refresh; scoreboard
+per-horizon breakdowns.
+
+*Web/frontend:* analyze's provider fan-out bounded by the live semaphore with
+honest cached-only degradation; fundamentals per-ticker (20s) and per-model
+(45s) deadlines; single-flight macro snapshot; anchor cache generation token;
+unchanged auto-live re-registration preserves memoized analytics; model
+uploads reject blank weights and silent truncation; GDELT language filter
+actually filters (query operator, verified 40/40 English); MandateFit
+verdicts from a structured server block; stale AI narratives clear on data
+change; no duplicate decision submits; failed refreshes don't render as
+provenance lockouts.
+
+**Not yet fixed from pass 3:** 3 findings whose verifiers hit the session
+limit remain unverified; radar >200-decision count polish.
 
 ## Shipped this week (all pushed to main)
 
