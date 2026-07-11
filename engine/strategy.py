@@ -107,7 +107,9 @@ def _metrics(rets: pd.Series, curve: pd.Series) -> dict:
     cagr = float(curve.iloc[-1] ** (1.0 / years) - 1.0) if curve.iloc[-1] > 0 else -1.0
     vol = float(rets.std() * np.sqrt(TRADING_DAYS))
     downside = float(rets[rets < 0].std() * np.sqrt(TRADING_DAYS)) if (rets < 0).any() else 0.0
-    ann_ret = float((1.0 + rets.mean()) ** TRADING_DAYS - 1.0)
+    # Geometric, not arithmetic-mean compounding (volatility-drag bug — same
+    # review finding as indicators.annualized_return); cagr is 3 lines up.
+    ann_ret = cagr
     sharpe = (rets.mean() * TRADING_DAYS - mandate.RF) / vol if vol > 1e-9 else 0.0
     sortino = (rets.mean() * TRADING_DAYS - mandate.RF) / downside if downside > 1e-9 else 0.0
     max_dd = float(_drawdown(curve).min())

@@ -170,3 +170,49 @@ def test_yield_only_fund_refuses_equity_building_block():
         ticker="JPM", dividend_yield=0.02, trailing_pe=14.0,
         sector="financials", source="fmp")
     assert cma.instrument_forward("JPM", equity)["usable"] is True
+
+
+# --------------------------------------------------------------------------- #
+# Pass-3 findings
+# --------------------------------------------------------------------------- #
+def test_annualized_return_is_geometric_cagr():
+    """A flat-but-volatile round trip must read ~0%, not +34.8% (arithmetic
+    mean compounding ignored volatility drag)."""
+    import pandas as pd
+    from engine import indicators
+    idx = pd.bdate_range("2024-01-02", periods=253)
+    prices = [100.0]
+    for i in range(252):
+        prices.append(prices[-1] * (1.05 if i % 2 == 0 else 1 / 1.05))
+    close = pd.Series(prices, index=idx)
+    result = indicators.annualized_return(close)
+    assert abs(result) < 0.01  # true CAGR ~0, was +0.348
+
+
+def test_cma_aggregate_uses_book_level_denominator():
+    """40% look-through visibility must report ~40% coverage, blending the
+    unseen 60% to the mandate anchor — not extrapolate the thin slice."""
+    fnd = fundamentals.Fundamentals(ticker="AAA", dividend_yield=0.02,
+                                    forward_pe=12.0, earnings_growth=0.10,
+                                    sector="financials", source="fake")
+    underlyings = [{"ticker": "AAA", "weight_pct": 40.0, "asset_class": "Equity (common)"}]
+    out = cma.aggregate(underlyings, {"AAA": fnd}, "balanced", total_weight_pct=100.0)
+    assert out["coverage_pct"] == pytest.approx(40.0)
+    covered = out["expected_return_covered_pct"]
+    anchor = out["generic_anchor_pct"]
+    expected_blend = 0.4 * covered + 0.6 * anchor
+    assert out["expected_return_pct"] == pytest.approx(expected_blend, abs=0.05)
+    # Without the basis the legacy behavior is preserved (supplied-weight coverage).
+    legacy = cma.aggregate(underlyings, {"AAA": fnd}, "balanced")
+    assert legacy["coverage_pct"] == pytest.approx(100.0)
+
+
+def test_reit_maps_to_real_estate_anchor():
+    assert fundamentals._intrinio_sector(
+        {"industry_category": "Real Estate Investment Trusts"}) == "real estate"
+    assert fundamentals._intrinio_sector(
+        {"industry_category": "Equity Real Estate Investment Trusts (REITs)"}) == "real estate"
+    assert fundamentals._intrinio_sector(
+        {"industry_category": "Banking"}) == "financials"
+    assert fundamentals._intrinio_sector(
+        {"sector": "Finance, Insurance, And Real Estate"}) == "financials"

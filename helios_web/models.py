@@ -504,7 +504,10 @@ def model_forward():
     underlyings = roll["exposure"].get("underlyings", [])
     fmap = _fundamentals_map_for(underlyings)
     fundamentals_sources = sorted({f.source for f in fmap.values() if getattr(f, "usable", False)})
-    forward_return = cma.aggregate(underlyings, fmap, mdl.mandate_key)
+    # model_lookthrough normalizes weights to fractions of the WHOLE book, so
+    # 100.0 is the honest coverage denominator — unresolved/truncated weight
+    # counts as uncovered instead of being extrapolated away (review finding).
+    forward_return = cma.aggregate(underlyings, fmap, mdl.mandate_key, total_weight_pct=100.0)
     forward_return["fundamentals_sources"] = fundamentals_sources
     forward_prov = provenance.forward_research(roll["coverage"])
     blended = mandate.blended_anchor(

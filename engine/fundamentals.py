@@ -303,10 +303,13 @@ _INTRINIO_TAGS = {
 # "real estate"). Map keywords in industry_category first, then sector, to the
 # anchor vocabulary macro.sector_anchor understands; unknown -> "" (market anchor).
 _INTRINIO_SECTOR_KEYWORDS = (
-    # FINANCIAL keywords must be tested BEFORE "real estate": the SIC division
-    # string "Finance, Insurance, And Real Estate" contains both, and testing
-    # real estate first put every bank/insurer on the real-estate anchor when
-    # industry_category was empty (review finding).
+    # ORDER MATTERS, in both directions (review findings):
+    # - "reit"/"real estate" must beat "invest", or "Real Estate Investment
+    #   Trusts" lands on the FINANCIALS anchor;
+    # - financial keywords must beat the bare "real estate" containment in the
+    #   SIC division string "Finance, Insurance, And Real Estate".
+    ("reit", "real estate"),
+    ("real estate investment", "real estate"),
     ("bank", "financials"), ("insur", "financials"), ("financ", "financials"),
     ("invest", "financials"), ("securit", "financials"),
     ("real estate", "real estate"),

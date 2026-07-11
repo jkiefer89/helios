@@ -51,10 +51,17 @@ def daily_returns(close: pd.Series) -> pd.Series:
 
 
 def annualized_return(close: pd.Series) -> float:
-    r = daily_returns(close)
-    if len(r) < 2:
+    """Geometric CAGR. Compounding the ARITHMETIC mean ignored volatility drag
+    and reported +34.8%/yr on a flat-but-volatile round-trip series (review
+    finding, reproduced to the decimal) — flattering exactly the volatile
+    names that made nothing."""
+    if len(close) < 2:
         return 0.0
-    return float((1 + r.mean()) ** TRADING_DAYS - 1)
+    first, last = float(close.iloc[0]), float(close.iloc[-1])
+    if first <= 0 or last <= 0:
+        return 0.0
+    years = (len(close) - 1) / TRADING_DAYS
+    return float((last / first) ** (1.0 / years) - 1.0)
 
 
 def annualized_vol(close: pd.Series) -> float:

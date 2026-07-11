@@ -155,7 +155,8 @@ def instrument_forward(ticker: str, fnd, mandate_key: str = "balanced") -> dict:
     return out
 
 
-def aggregate(underlyings, fundamentals_map, mandate_key="balanced") -> dict:
+def aggregate(underlyings, fundamentals_map, mandate_key="balanced",
+              total_weight_pct: float | None = None) -> dict:
     """Roll per-holding expected returns up to a model forward expected return.
 
     ``underlyings``: list of ``{ticker, weight_pct, asset_class}`` (look-through
@@ -165,7 +166,14 @@ def aggregate(underlyings, fundamentals_map, mandate_key="balanced") -> dict:
     the supplied weight had a real (fundamentals or asset-class) estimate.
     """
     generic = _mnd.anchor_return(mandate_key)
-    total_w = sum(max(0.0, float(u.get("weight_pct") or 0.0)) for u in underlyings)
+    # Denominator honesty: the look-through DROPS unresolved holdings, the
+    # unseen intra-fund remainder, and beyond-cap rows from `underlyings`, so
+    # measuring coverage against the supplied sum extrapolated a thin covered
+    # slice to the whole book (verified: 40% visibility reported coverage 100%
+    # and full-weight E[r]). Callers pass the true basis (100.0 for a whole
+    # model); it can only WIDEN the denominator, never shrink it.
+    supplied_w = sum(max(0.0, float(u.get("weight_pct") or 0.0)) for u in underlyings)
+    total_w = max(supplied_w, float(total_weight_pct or 0.0))
     if total_w <= 0:
         return _empty_result(generic, mandate_key)
 
