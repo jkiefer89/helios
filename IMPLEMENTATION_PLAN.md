@@ -166,9 +166,9 @@ Slices 3.1 A–D and data stages 0–2 are implemented, regression-locked
 roundtrip: fills + two snapshots imported → Modified-Dietz TWR net 1.326% /
 gross 1.329% with a mid-period $50k flow and fees handled exactly; re-import
 proved idempotent; PIT fundamentals snapshots now accrue on every fetch.
-Still open from 3.2: Stage 3 (FMP EOD as primary price source — needs a
-side-by-side reconciliation period before cutover) and the deferred
-survivorship-vendor decision.
+Stage 3 shipped with Phase 4 (opt-in behind HELIOS_PRICE_SOURCE=fmp with a
+live reconciliation gate); only the deferred survivorship-vendor decision
+remains open, by design.
 
 **3.1 Minimum viable ledger** *(review #5 — confirmed; Large, 4 slices)*
 - Slice A (S): three tables — `trade_fills` (idempotent dedupe key, optional link
@@ -200,7 +200,15 @@ survivorship-vendor decision.
   index-membership vendors (Norgate ~$30/mo, Sharadar, EODHD). Do NOT buy
   enterprise lineage tooling.
 
-### Phase 4 — Structural UX + test floor
+### Phase 4 — Structural UX + test floor — ✅ SHIPPED (commit d94eec4, 2026-07-12)
+
+Both items implemented and verified live: the five workspaces render with
+view tabs and a persistent context bar, deep links resolve through the
+unchanged hash routing, and 7 Vitest locks guard the honesty-critical
+provenance rendering. Data stage 3 also shipped alongside: FMP EOD is
+available as an opt-in primary price source behind HELIOS_PRICE_SOURCE=fmp,
+gated by /api/data/price-reconciliation (first live run: JPM mean diff
+0.0008% over 62 days — cutover-safe pending a book-wide check).
 
 **4.1 Workspace consolidation** *(review UX phase 2; Large)*
 - The code already groups nav into exactly the reviewer's five workspaces
