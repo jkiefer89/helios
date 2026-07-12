@@ -6,10 +6,18 @@ analytics, rebalance models, execute trades, or bypass provenance gates.
 """
 from __future__ import annotations
 
+from statistics import NormalDist, stdev
 from typing import Any
 
 from . import evidence_lab, model_governance, portfolio
 from ._common import avg as _avg
+
+# Ranking uses the FIRST ~80% of walk-forward windows (chronological); the
+# last ~20% stays untouched by selection and confirms (or refutes) the
+# champion. Below this many measured holdout windows we report
+# "insufficient_windows" honestly instead of a noise statistic.
+_RANKING_SPLIT = 0.8
+_HOLDOUT_MIN_MEASURED = 8
 
 
 def dashboard(
@@ -43,7 +51,27 @@ def dashboard(
     champion = ordered[0] if ordered and ordered[0]["role"] == "champion" else None
     challengers = [row for row in ordered if row["role"] == "challenger"]
     alerts = _dashboard_alerts(ordered)
+    selection: dict[str, Any] = {
+        "n_trials": len(eligible),
+        "basis": ("Champion is the max ranking score over "
+                  f"{len(eligible)} model(s) evaluated on shared walk-forward history; "
+                  "the winning score is upward-biased by selection. Ranking uses the "
+                  "chronological first ~80% of windows; holdout_confirmation reports "
+                  "the untouched last ~20%."),
+    }
+    if champion:
+        selection["champion_adjusted"] = _selection_adjusted_ci(
+            champion.get("ci_inputs") or {}, max(1, len(eligible)))
+        prospective = champion.get("prospective_validation") or {}
+        selection["prospective_confirmation"] = {
+            "measured_count": prospective.get("measured_count"),
+            "hit_rate_pct": prospective.get("hit_rate_pct"),
+            "avg_alpha_pct": prospective.get("avg_alpha_pct"),
+            "basis": "Out-of-sample Signal Journal record for the champion — "
+                     "untouched by ranking by construction.",
+        }
     return {
+        "selection": selection,
         "models": ordered,
         "champion": champion,
         "challengers": challengers,
@@ -63,7 +91,13 @@ def dashboard(
             "paper_tracking_only": True,
             "no_execution": True,
             "does_not_change_analytics": True,
-            "ranking_basis": "Review ranking combines existing walk-forward hit rate, alpha, false-positive rate, signal decay, and governance state.",
+            "ranking_basis": ("Review ranking combines walk-forward hit rate, alpha, "
+                              "false-positive rate, signal decay, and governance state — "
+                              "computed on the chronological first ~80% of windows so the "
+                              "last ~20% stays untouched for holdout confirmation."),
+            "selection_bias": ("The champion is a max-of-N choice and its raw score is "
+                               "upward-biased; see the selection block for the "
+                               "family-wise-adjusted interval and holdout stats."),
         },
         "disclaimer": "Model validation is analysis-only. It does not execute trades, guarantee outcomes, or override Helios provenance gates.",
     }
@@ -113,9 +147,42 @@ def _validation_row(
     walk = evidence.get("summary") or {}
     false_positives = evidence.get("false_positives") or {}
     decay = evidence.get("decay") or []
-    score = _validation_score(walk, false_positives, decay, governance)
+    # Winner's-curse guard (review finding): the ranking statistic and the
+    # champion's displayed evidence were the SAME number on the SAME sample —
+    # max-of-N noisy estimates is upward-biased. Rank on the chronological
+    # first ~80% of windows; the untouched last ~20% independently confirms.
+    windows = sorted(evidence.get("windows") or [], key=lambda r: str(r.get("signal_date") or ""))
+    split = int(len(windows) * _RANKING_SPLIT)
+    ranking_stats = _segment_stats(windows[:split])
+    holdout_stats = _segment_stats(windows[split:])
+    rank_walk = {
+        "hit_rate_pct": ranking_stats["hit_rate_pct"] if ranking_stats["hit_rate_pct"] is not None
+        else walk.get("hit_rate_pct"),
+        "avg_alpha_pct": ranking_stats["avg_alpha_pct"] if ranking_stats["avg_alpha_pct"] is not None
+        else walk.get("avg_alpha_pct"),
+    }
+    rank_fp = {
+        "rate_pct": ranking_stats["false_positive_rate_pct"]
+        if ranking_stats["false_positive_rate_pct"] is not None
+        else false_positives.get("rate_pct"),
+    }
+    score = _validation_score(rank_walk, rank_fp, decay, governance)
+    if holdout_stats["measured_count"] >= _HOLDOUT_MIN_MEASURED:
+        holdout_confirmation = {**holdout_stats, "status": "ok"}
+    else:
+        holdout_confirmation = {"status": "insufficient_windows",
+                                "measured_count": holdout_stats["measured_count"],
+                                "min_required": _HOLDOUT_MIN_MEASURED}
     alerts = _drift_alerts(walk, false_positives, decay, evidence.get("prospective_validation") or {}, governance)
     return {
+        "ranking_basis": {
+            "basis": ("Score is computed on the chronological first "
+                      f"~{int(_RANKING_SPLIT * 100)}% of walk-forward windows; the last "
+                      f"~{int((1 - _RANKING_SPLIT) * 100)}% is untouched by ranking."),
+            **ranking_stats,
+        },
+        "holdout_confirmation": holdout_confirmation,
+        "ci_inputs": _ci_inputs(windows),
         "model_id": model.id,
         "model_name": model.name,
         "mandate": model.mandate_key,
@@ -137,6 +204,66 @@ def _validation_row(
         "methodology": _row_methodology(),
         "disclaimer": evidence.get("disclaimer") or "",
     }
+
+
+def _segment_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Hit rate / alpha / false-positive rate over one window segment."""
+    hit_flags = [row["paper_hit"] for row in rows if row.get("paper_hit") is not None]
+    alphas = [row["alpha_pct"] for row in rows
+              if isinstance(row.get("alpha_pct"), (int, float))]
+    actionable = [row for row in rows if row.get("action_label") in {"BUY", "SELL"}]
+    fps = sum(1 for row in actionable if row.get("false_positive"))
+    return {
+        "window_count": len(rows),
+        "measured_count": len(hit_flags),
+        "hit_rate_pct": (round(100.0 * sum(1 for f in hit_flags if f) / len(hit_flags), 2)
+                         if hit_flags else None),
+        "avg_alpha_pct": round(sum(alphas) / len(alphas), 4) if alphas else None,
+        "false_positive_rate_pct": (round(100.0 * fps / len(actionable), 2)
+                                    if actionable else None),
+    }
+
+
+def _ci_inputs(windows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Raw inputs for the selection-adjusted champion interval (computed at
+    the dashboard level, where the trial count is known)."""
+    hit_flags = [row["paper_hit"] for row in windows if row.get("paper_hit") is not None]
+    alphas = [float(row["alpha_pct"]) for row in windows
+              if isinstance(row.get("alpha_pct"), (int, float))]
+    out: dict[str, Any] = {"measured_count": len(hit_flags)}
+    if hit_flags:
+        out["hit_rate_p"] = sum(1 for f in hit_flags if f) / len(hit_flags)
+    if len(alphas) > 1:
+        out["alpha_mean"] = sum(alphas) / len(alphas)
+        out["alpha_se"] = stdev(alphas) / (len(alphas) ** 0.5)
+    return out
+
+
+def _selection_adjusted_ci(inputs: dict[str, Any], n_trials: int) -> dict[str, Any]:
+    """Bonferroni-widened 90% band for the CHAMPION's stats.
+
+    The champion is the max over n_trials models scored on shared history, so
+    its naive per-model interval understates uncertainty. A family-wise band
+    (alpha/N) is the honest, proportionate analogue of deflated-Sharpe
+    machinery at this trial count (review finding)."""
+    n = int(inputs.get("measured_count") or 0)
+    p = inputs.get("hit_rate_p")
+    if not n or p is None:
+        return {"status": "insufficient_data"}
+    z = NormalDist().inv_cdf(1 - (0.10 / max(1, n_trials)) / 2)
+    se = (p * (1 - p) / n) ** 0.5
+    out = {
+        "status": "ok",
+        "n_trials": n_trials,
+        "z": round(z, 3),
+        "hit_rate_ci_low_pct": round(max(0.0, p - z * se) * 100, 2),
+        "hit_rate_ci_high_pct": round(min(1.0, p + z * se) * 100, 2),
+        "basis": f"90% family-wise (Bonferroni) band across {n_trials} ranked models.",
+    }
+    if inputs.get("alpha_mean") is not None and inputs.get("alpha_se") is not None:
+        out["alpha_ci_low_pct"] = round(inputs["alpha_mean"] - z * inputs["alpha_se"], 4)
+        out["alpha_ci_high_pct"] = round(inputs["alpha_mean"] + z * inputs["alpha_se"], 4)
+    return out
 
 
 def _validation_score(

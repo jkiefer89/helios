@@ -87,6 +87,15 @@ def _auto_live_worker(config: dict) -> None:
             _macro_ev.macro_snapshot()
         except Exception:
             pass
+        # Daily composite auto-record: the prospective evidence track accrues
+        # for every real-eligible target even when the operator doesn't click
+        # (view-triggered-only recording had a usage bias — review finding).
+        # Cached inputs only; a per-day guard inside makes re-runs no-ops.
+        try:
+            from . import analysis as _analysis
+            _analysis.auto_record_daily_signals()
+        except Exception:
+            pass
         _AUTO_LIVE_STOP.wait(config["interval_seconds"])
 
 

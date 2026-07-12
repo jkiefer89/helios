@@ -970,6 +970,15 @@ export interface ModelValidationRow {
   drift_alerts: ModelValidationAlert[];
   methodology: Record<string, unknown>;
   disclaimer: string;
+  // Winner's-curse guards: score ranks on the first ~80% of windows; the
+  // untouched last ~20% independently confirms (or refutes) the champion.
+  ranking_basis?: { basis: string; window_count: number; measured_count: number;
+    hit_rate_pct: number | null; avg_alpha_pct: number | null;
+    false_positive_rate_pct: number | null };
+  holdout_confirmation?: { status: string; measured_count: number; min_required?: number;
+    window_count?: number; hit_rate_pct?: number | null; avg_alpha_pct?: number | null;
+    false_positive_rate_pct?: number | null };
+  ci_inputs?: Record<string, number>;
 }
 
 export interface ModelValidationResponse {
@@ -977,6 +986,15 @@ export interface ModelValidationResponse {
   champion?: ModelValidationRow | null;
   challengers: ModelValidationRow[];
   alerts: ModelValidationAlert[];
+  selection?: {
+    n_trials: number;
+    basis: string;
+    champion_adjusted?: { status: string; n_trials?: number; z?: number;
+      hit_rate_ci_low_pct?: number; hit_rate_ci_high_pct?: number;
+      alpha_ci_low_pct?: number; alpha_ci_high_pct?: number; basis?: string };
+    prospective_confirmation?: { measured_count?: number | null;
+      hit_rate_pct?: number | null; avg_alpha_pct?: number | null; basis?: string };
+  };
   summary: {
     model_count: number;
     eligible_count: number;

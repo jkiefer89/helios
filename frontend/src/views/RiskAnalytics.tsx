@@ -48,7 +48,7 @@ export function RiskAnalytics({
         <div>
           <div className="section-label">Risk Analytics</div>
           <h1>Risk + portfolio analytics</h1>
-          <p>Portfolio-level factor exposure, concentration, stress, liquidity, and benchmark-relative risk from real model histories.</p>
+          <p>Concentration, stress, liquidity, and benchmark-relative risk from real model histories; factor and sector exposure use a static hand-assigned taxonomy, not history.</p>
         </div>
         <form className="toolbar" onSubmit={(event) => { event.preventDefault(); run(modelId); }}>
           <label>Model<TerminalSelect ariaLabel="Risk Analytics model" value={modelId} onChange={setModelId} options={modelOptions} disabled={models.length === 0} /></label>
@@ -100,7 +100,7 @@ export function RiskAnalytics({
           <ClientGradeRiskPack pack={payload.client_risk_pack} />
 
           <section className="dashboard-grid">
-            <Panel title="Factor Exposure" meta="weighted taxonomy">
+            <Panel title="Factor Exposure" meta="static sector heuristic — not regression betas">
               <MiniBars rows={factorRows} />
             </Panel>
             <Panel title="Sector / Theme Exposure" meta="model weights">

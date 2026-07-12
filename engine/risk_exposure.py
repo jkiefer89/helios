@@ -12,7 +12,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from . import data, indicators, mandate, portfolio, provenance, signal_journal
+from . import assumptions, data, indicators, mandate, portfolio, provenance, signal_journal
 from ._common import dedupe as _dedupe
 
 _SECTOR_MAP = {
@@ -74,38 +74,15 @@ _SECTOR_MAP = {
     "BTC-USD": ("Crypto", "bitcoin"),
 }
 
-_FACTOR_MAP = {
-    "Technology": {"growth": 0.75, "quality": 0.35},
-    "Communication Services": {"growth": 0.55, "quality": 0.25},
-    "Consumer Discretionary": {"growth": 0.55, "cyclical": 0.35},
-    "Industrials": {"cyclical": 0.35, "defensive": 0.20},
-    "Utilities": {"defensive": 0.65, "income": 0.25},
-    "Healthcare": {"defensive": 0.45, "quality": 0.35, "growth": 0.15},
-    "Financials": {"value": 0.45, "cyclical": 0.35},
-    "Energy": {"value": 0.35, "cyclical": 0.35, "real_assets": 0.25},
-    "Commodities": {"real_assets": 0.75, "defensive": 0.15},
-    "Fixed Income": {"income": 0.65, "defensive": 0.45},
-    "Cash": {"defensive": 0.80, "income": 0.35},
-    "Broad Market": {"quality": 0.25, "growth": 0.25, "value": 0.20, "defensive": 0.15},
-    "Crypto": {"growth": 0.55, "cyclical": 0.55, "real_assets": 0.20},
-}
+# Hand-assigned taxonomy loadings and ADV proxies: owned and dated in
+# engine/assumptions.py so every payload labels them instead of presenting
+# them as observed market data (review finding).
+_FACTOR_MAP = assumptions.FACTOR_MAP["values"]
+_FACTOR_MAP_AS_OF = assumptions.FACTOR_MAP["as_of"]
+_FACTOR_MAP_METHODOLOGY = assumptions.FACTOR_MAP["methodology"]
 
-_LIQUIDITY_AVG_DAILY_DOLLAR_VOLUME = {
-    "AAPL": 7_000_000_000,
-    "MSFT": 6_000_000_000,
-    "NVDA": 12_000_000_000,
-    "AMZN": 5_000_000_000,
-    "GOOGL": 3_000_000_000,
-    "META": 4_000_000_000,
-    "SPY": 40_000_000_000,
-    "QQQ": 20_000_000_000,
-    "IWM": 7_000_000_000,
-    "BND": 1_000_000_000,
-    "TLT": 2_000_000_000,
-    "GLD": 1_500_000_000,
-    "SGOV": 700_000_000,
-    "BTC-USD": 20_000_000_000,
-}
+_LIQUIDITY_AVG_DAILY_DOLLAR_VOLUME = assumptions.LIQUIDITY_ADV_PROXIES["values"]
+_ADV_PROXY_AS_OF = assumptions.LIQUIDITY_ADV_PROXIES["as_of"]
 
 
 def analyze_model_risk(model: portfolio.Model) -> dict[str, Any]:
@@ -183,6 +160,11 @@ def analyze_model_risk(model: portfolio.Model) -> dict[str, Any]:
             "no_trade_execution": True,
             "classification_source": "static Helios public ticker taxonomy with unclassified fallback",
             "scenario_basis": "deterministic factor/asset-class shocks, not forecasts",
+            # Factor exposure derives from NO price history at all (review
+            # finding: the UI implied otherwise) — label it at the source.
+            "factor_exposure_basis": (
+                f"{_FACTOR_MAP_METHODOLOGY} (as of {_FACTOR_MAP_AS_OF})"),
+            "assumptions_version": assumptions.ASSUMPTIONS_VERSION,
         },
         "disclaimer": "Analysis only. Risk analytics are estimates from available price history and do not guarantee outcomes.",
     }
@@ -727,7 +709,11 @@ def _scenario_shocks(model: portfolio.Model, factors: dict[str, float]) -> list[
         ("Rates shock +100 bps", {"Fixed Income": -0.06, "Utilities": -0.04, "Technology": -0.03, "Broad Market": -0.025, "Cash": 0.01, "Commodities": 0.01}),
         ("Growth multiple compression", {"Technology": -0.12, "Communication Services": -0.09, "Consumer Discretionary": -0.08, "Crypto": -0.15, "Healthcare": -0.03}),
         ("Defensive rotation", {"Utilities": 0.04, "Healthcare": 0.03, "Fixed Income": 0.02, "Cash": 0.0, "Technology": -0.04, "Consumer Discretionary": -0.04, "Financials": -0.02}),
-        ("Liquidity stress", {ticker: (-0.08 if _liquidity_score(ticker) < 50 else -0.02) for ticker in weights}),
+        # Observed-first, like the flags surface: this scenario used to score
+        # from the static ADV proxy even when 60d observed dollar volume
+        # existed — shocking tickers by stale assumption (review finding).
+        ("Liquidity stress", {ticker: (-0.08 if _effective_liquidity_score(ticker) < 50 else -0.02)
+                              for ticker in weights}),
     ]
     out = []
     for name, shocks in scenarios:
@@ -747,6 +733,13 @@ def _scenario_shocks(model: portfolio.Model, factors: dict[str, float]) -> list[
     return out
 
 
+def _effective_liquidity_score(ticker: str) -> int:
+    """Observed 60-day dollar volume first; the dated static proxy only as a
+    fallback — the same precedence the liquidity flags surface uses."""
+    observed = _observed_liquidity(ticker)
+    return int(observed.get("liquidity_score") or _liquidity_score(ticker))
+
+
 def _liquidity_flags(model: portfolio.Model) -> dict[str, Any]:
     items = []
     for holding in model.holdings:
@@ -763,6 +756,7 @@ def _liquidity_flags(model: portfolio.Model) -> dict[str, Any]:
             "estimated_adv_usd": observed.get("observed_adv_usd") or fallback_adv,
             "observed_adv_usd": observed.get("observed_adv_usd"),
             "adv_source": adv_source,
+            "proxy_as_of": _ADV_PROXY_AS_OF if adv_source == "static_public_proxy" else None,
             "adv_observation_days": observed.get("adv_observation_days") or 0,
         })
     flagged = [item for item in items if item["flag"] != "normal"]

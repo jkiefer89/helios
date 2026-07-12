@@ -266,6 +266,97 @@ def _record_model_signal(mdl: portfolio.Model, ps: portfolio.PortfolioSeries, cl
         return None
 
 
+def auto_record_daily_signals(max_targets: int = 200) -> dict:
+    """Once per UTC day per real-eligible target, record the exact COMPOSITE
+    rating (all components + dampers) in the signal journal.
+
+    Runs from the auto-live loop so prospective evidence accrues even when the
+    operator doesn't click — view-triggered-only recording gave the journal a
+    usage bias toward whatever was being watched (review finding). CACHED
+    inputs only (stored headlines, fundamentals cache, macro snapshot cache):
+    this must never block the background loop on a network call. The journal's
+    own real-eligibility and freshness guards still apply to every entry.
+    """
+    today = datetime.now(timezone.utc).date().isoformat()
+    already: set[tuple[str, str]] = set()
+    for e in signal_journal.list_entries(limit=500):
+        if (str(e.get("created_at") or "")[:10] == today
+                and (e.get("metadata") or {}).get("endpoint") == "auto_snapshot"):
+            already.add((str(e.get("target_kind")), str(e.get("target_id"))))
+    recorded = skipped = 0
+    macro_snap = macro_events.snapshot_cached()
+
+    for inst in data.all_instruments():
+        if recorded >= max_targets:
+            break
+        if ("instrument", inst.symbol) in already or not provenance.is_real_source(inst.source):
+            continue
+        close = inst.df["close"].dropna() if "close" in inst.df else pd.Series(dtype=float)
+        if len(close) < 60:
+            continue
+        try:
+            fc = forecast.forecast(close, horizon=21)
+            sent = sentiment.score_headlines(list(inst.headlines or []))
+            fnd = fundamentals.fetch_cached(inst.symbol) or fundamentals.Fundamentals(
+                ticker=inst.symbol, source="none")
+            fwd = cma.instrument_forward(inst.symbol, fnd)
+            ctx = macro_events.build_macro_context(fwd.get("sector") or "", macro_snap)
+            sig = signals.evaluate(close, fc, sent, history_days=len(close),
+                                   fundamental_result=fwd, macro_context=ctx)
+            p = provenance.instrument(inst.source, len(close))
+            signal_journal.record_signal(
+                target_kind="instrument", target_id=inst.symbol, target_name=inst.name,
+                close=close, input_close=close, signal=sig, horizon_days=21,
+                benchmark="SPY", source_counts={inst.source: 1},
+                eligible_for_real_research=p["eligible_for_real_research"],
+                data_mode=p["data_mode"],
+                metadata=_signal_evidence_metadata(sig, endpoint="auto_snapshot"),
+            )
+            recorded += 1
+        except Exception:
+            skipped += 1  # one bad target never stops the sweep
+
+    for mdl in portfolio.all_models():
+        if recorded >= max_targets:
+            break
+        if ("model", mdl.id) in already:
+            continue
+        try:
+            ps = portfolio.build_series(mdl, allow_sample=False, allow_simulated=False)
+            close = ps.close.dropna()
+            if len(close) < 60:
+                continue
+            headlines = []
+            for h in mdl.holdings:
+                held = data.get(h.ticker)
+                if held and held.headlines:
+                    headlines.extend(held.headlines[:2])
+            sent = sentiment.score_headlines(headlines)
+            fc = forecast.forecast(close, horizon=21)
+            pmeta = {"n_holdings": len(mdl.holdings),
+                     "top_weight": mdl.holdings[0].weight if mdl.holdings else 0,
+                     "top_ticker": mdl.holdings[0].ticker if mdl.holdings else "?"}
+            ctx = macro_events.build_macro_context("", macro_snap)
+            sig = signals.evaluate(close, fc, sent, mandate_key=mdl.mandate_key,
+                                   portfolio_meta=pmeta, history_days=ps.n_days,
+                                   data_honesty=ps.provenance, macro_context=ctx)
+            p = provenance.portfolio(ps.provenance)
+            signal_journal.record_signal(
+                target_kind="model", target_id=mdl.id, target_name=mdl.name,
+                close=close, input_close=close, signal=sig, horizon_days=21,
+                benchmark=signal_journal.benchmark_for_model(mdl),
+                source_counts={str(k): int(v) for k, v in ps.sources.items()},
+                eligible_for_real_research=p["eligible_for_real_research"],
+                data_mode=p["data_mode"],
+                metadata={**_signal_evidence_metadata(sig, endpoint="auto_snapshot"),
+                          "mandate": mdl.mandate_key},
+            )
+            recorded += 1
+        except Exception:
+            skipped += 1
+    return {"recorded": recorded, "skipped": skipped, "date": today}
+
+
 def _strategy_request_args():
     cost_bps, cost_error = _safe_float_arg("cost_bps", 5.0, 0.0, 500.0)
     if cost_error:

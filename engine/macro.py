@@ -13,32 +13,15 @@ live observation; offline it returns the documented defaults and says so.
 """
 from __future__ import annotations
 
+from . import assumptions as _assump
 from . import mandate as _mnd
 
-# Sector valuation/growth anchors (approximate, Damodaran-style long-run values).
-# fair_pe = the multiple a sector mean-reverts toward; growth = nominal long-run
-# earnings growth. These are deliberately conservative round numbers; replace
-# with a dated Damodaran ingest behind sector_anchor() for live precision.
-_SECTOR_ANCHORS = {
-    "technology": {"fair_pe": 24.0, "growth": 0.12},
-    "information technology": {"fair_pe": 24.0, "growth": 0.12},
-    "communication services": {"fair_pe": 18.0, "growth": 0.09},
-    "consumer discretionary": {"fair_pe": 20.0, "growth": 0.09},
-    "consumer cyclical": {"fair_pe": 20.0, "growth": 0.09},
-    "consumer staples": {"fair_pe": 19.0, "growth": 0.05},
-    "consumer defensive": {"fair_pe": 19.0, "growth": 0.05},
-    "health care": {"fair_pe": 18.0, "growth": 0.09},
-    "healthcare": {"fair_pe": 18.0, "growth": 0.09},
-    "financials": {"fair_pe": 13.0, "growth": 0.07},
-    "financial services": {"fair_pe": 13.0, "growth": 0.07},
-    "industrials": {"fair_pe": 18.0, "growth": 0.07},
-    "energy": {"fair_pe": 12.0, "growth": 0.04},
-    "utilities": {"fair_pe": 17.0, "growth": 0.04},
-    "materials": {"fair_pe": 15.0, "growth": 0.05},
-    "basic materials": {"fair_pe": 15.0, "growth": 0.05},
-    "real estate": {"fair_pe": 16.0, "growth": 0.05},
-}
-_MARKET_ANCHOR = {"fair_pe": 17.0, "growth": 0.06}
+# Sector valuation/growth anchors: hand-set long-run approximations, owned and
+# dated in engine/assumptions.py so payloads can label them (review finding).
+_SECTOR_ANCHORS = _assump.SECTOR_ANCHORS["values"]
+_MARKET_ANCHOR = _assump.MARKET_ANCHOR
+SECTOR_ANCHORS_AS_OF = _assump.SECTOR_ANCHORS["as_of"]
+SECTOR_ANCHORS_METHODOLOGY = _assump.SECTOR_ANCHORS["methodology"]
 
 
 def risk_free() -> float:

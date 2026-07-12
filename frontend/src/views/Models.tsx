@@ -550,11 +550,26 @@ function ModelValidationDashboard({
       ) : (
         <div className="model-validation-workspace">
           <div className="metric-grid validation-summary" aria-label="Model validation summary">
-            <div className="stat-tile"><span>Champion</span><strong>{champion?.model_name || "None"}</strong><small>{champion ? `Score ${fmtNumber(champion.validation_score, 1)} / grade ${champion.validation_grade}` : "No eligible model"}</small></div>
+            <div className="stat-tile"><span>Champion</span><strong>{champion?.model_name || "None"}</strong><small>{champion ? `Score ${fmtNumber(champion.validation_score, 1)} / grade ${champion.validation_grade} · best of ${validation.selection?.n_trials ?? "—"} (selection-biased upward)` : "No eligible model"}</small></div>
             <div className="stat-tile"><span>Challengers</span><strong>{validation.summary.challenger_count}</strong><small>{validation.summary.eligible_count} evidence-ready</small></div>
             <div className="stat-tile"><span>Drift Alerts</span><strong className={validation.summary.alert_count ? "tone-warning" : "tone-positive"}>{validation.summary.alert_count}</strong><small>Blocked, high, and medium</small></div>
             <div className="stat-tile"><span>Governance</span><strong>{validation.summary.governance_available ? "Available" : "Unavailable"}</strong><small>Versions and approvals</small></div>
           </div>
+          {champion && (
+            <p className="forecast-note">
+              {(() => {
+                const holdout = champion.holdout_confirmation;
+                const adjusted = validation.selection?.champion_adjusted;
+                const holdoutText = holdout?.status === "ok"
+                  ? `Holdout (untouched last ~20% of windows): ${fmtNumber(holdout.hit_rate_pct, 0)}% hit rate, ${fmtNumber(holdout.avg_alpha_pct, 2)}% avg alpha over ${holdout.measured_count} windows.`
+                  : `Holdout confirmation pending — ${holdout?.measured_count ?? 0} of ${holdout?.min_required ?? 8} measured windows.`;
+                const bandText = adjusted?.status === "ok"
+                  ? ` Selection-adjusted hit-rate band: ${fmtNumber(adjusted.hit_rate_ci_low_pct, 0)}–${fmtNumber(adjusted.hit_rate_ci_high_pct, 0)}%.`
+                  : "";
+                return holdoutText + bandText;
+              })()}
+            </p>
+          )}
           <div className="terminal-table model-validation-table" tabIndex={0} aria-label="Model Validation Dashboard table" onKeyDown={scrollTableByKey}>
             <div className="terminal-table__head">
               <span>Model</span><span>Champion / Challenger</span><span>Walk-Forward Evidence</span><span>False Positives</span><span>Regime Sensitivity</span><span>Signal Decay</span><span>Drift Alerts</span>

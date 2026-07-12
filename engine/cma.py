@@ -90,6 +90,7 @@ def holding_expected_return(ticker, weight_pct, asset_class, fundamentals,
             g_in = raw_g
         g = _clip(g_in, *_GROWTH_CAP)
         rev = 0.0
+        fair = None
         if pe and pe > 0:
             fair = _macro.sector_anchor(fundamentals.sector)["fair_pe"]
             rev = _clip(math.log(fair / pe) / horizon_years, *_REVERSION_CAP)
@@ -101,6 +102,12 @@ def holding_expected_return(ticker, weight_pct, asset_class, fundamentals,
         }
         if growth_basis:
             blocks["growth_basis"] = growth_basis
+        if fair is not None:
+            # The reversion target is a dated static ASSUMPTION, not a market
+            # observation — surface which anchor produced the block (review
+            # finding: the payload never said what fair_pe was used).
+            blocks["fair_pe_anchor"] = fair
+            blocks["anchor_as_of"] = _macro.SECTOR_ANCHORS_AS_OF
         return HoldingReturn(ticker, weight_pct, er, "fundamentals", True, blocks)
 
     # Equity name with no usable fundamentals: defer to the generic anchor.
@@ -125,10 +132,15 @@ def instrument_forward(ticker: str, fnd, mandate_key: str = "balanced") -> dict:
         "anchor_pct": round(anchor * 100.0, 2),
         "mandate": _mnd.key_or_default(mandate_key),
         "blocks_pct": {k: round(v * 100.0, 2) for k, v in hr.blocks.items()
-                       if isinstance(v, (int, float))},
+                       if isinstance(v, (int, float)) and k != "fair_pe_anchor"},
+        # Dated static assumption behind valuation_reversion (a P/E multiple,
+        # NOT a percentage — kept out of blocks_pct's x100 scaling).
+        "fair_pe_anchor": hr.blocks.get("fair_pe_anchor"),
+        "anchor_as_of": hr.blocks.get("anchor_as_of", ""),
         "source": getattr(fnd, "source", "none"),
         "sector": getattr(fnd, "sector", "") or "",
         "method": "building_block_cma",
+        "assumptions_version": _macro.SECTOR_ANCHORS_AS_OF,
         "horizon_basis": "annualized — independent of the chart horizon",
     }
     if out["usable"]:
@@ -240,6 +252,7 @@ def aggregate(underlyings, fundamentals_map, mandate_key="balanced",
         ],
         "mandate_anchor_pct": round(generic * 100.0, 2),
         "method": "building_block_cma",
+        "assumptions_version": _macro.SECTOR_ANCHORS_AS_OF,
         "disclaimer": "Forward expected return from holdings fundamentals + macro anchors, "
                       "not a price forecast or guarantee. Uncovered weight uses the mandate anchor.",
     }
@@ -309,5 +322,6 @@ def _empty_result(generic: float, mandate_key: str) -> dict:
         "top_contributions": [],
         "mandate_anchor_pct": round(generic * 100.0, 2),
         "method": "building_block_cma",
+        "assumptions_version": _macro.SECTOR_ANCHORS_AS_OF,
         "disclaimer": "No look-through composition available; falling back to the mandate anchor.",
     }
