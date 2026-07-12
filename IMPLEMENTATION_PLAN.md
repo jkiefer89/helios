@@ -159,7 +159,16 @@ intake panel.
   `onRevealDataIntake()` callback so CTAs open the view AND expand the intake
   panel; give the Instruments/RealDataCenter empty states action buttons.
 
-### Phase 3 — Real outcomes (the biggest capability gap)
+### Phase 3 — Real outcomes — ✅ CORE SHIPPED (commit 8f29c3b, 2026-07-12)
+
+Slices 3.1 A–D and data stages 0–2 are implemented, regression-locked
+(`tests/test_phase3_ledger.py`), and verified with a live end-to-end
+roundtrip: fills + two snapshots imported → Modified-Dietz TWR net 1.326% /
+gross 1.329% with a mid-period $50k flow and fees handled exactly; re-import
+proved idempotent; PIT fundamentals snapshots now accrue on every fetch.
+Still open from 3.2: Stage 3 (FMP EOD as primary price source — needs a
+side-by-side reconciliation period before cutover) and the deferred
+survivorship-vendor decision.
 
 **3.1 Minimum viable ledger** *(review #5 — confirmed; Large, 4 slices)*
 - Slice A (S): three tables — `trade_fills` (idempotent dedupe key, optional link
