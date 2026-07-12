@@ -133,7 +133,13 @@ Medium)*
 - Optional follow-on behind an env flag: dated FMP sector-PE ingest replacing the
   static fair-PE table when live (falls back to the labeled static table offline).
 
-### Phase 2 — Sizing, capacity, and the UX quick fixes
+### Phase 2 — Sizing, capacity, and the UX quick fixes — ✅ SHIPPED (commit d278d0c, 2026-07-11)
+
+Both items implemented, regression-locked (`tests/test_phase2_capacity.py`),
+and verified live: at $1.1B AUM the capacity engine flagged ARTY at 5.3
+days-to-liquidate @10% ADV (~200bps est. impact, posture "watch"→"elevated"),
+the 13-item nav fits exactly at 1280px, and the fetch/upload CTAs reveal the
+intake panel.
 
 **2.1 Capacity engine** *(review #6 — confirmed; Medium)*
 - `analyze_model_risk(aum_usd=...)` (query param + `HELIOS_MODEL_AUM_USD` default;
