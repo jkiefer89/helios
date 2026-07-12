@@ -133,6 +133,15 @@ provenance lockouts.
 **Not yet fixed from pass 3:** 3 findings whose verifiers hit the session
 limit remain unverified; radar >200-decision count polish.
 
+**External review (2026-07-11):** an independent full-project review arrived;
+all 12 claims were adversarially re-verified against this repo (7 confirmed,
+5 partial, 0 fully refuted — with a live reproduction of future-dated-data
+contamination of the prospective journal). The phased response — integrity
+hotfixes → honest validation → capacity engine → minimum-viable ledger + PIT
+data layer → workspace UX — is the new working roadmap:
+**see [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)**. It supersedes the
+P0/P1 ordering below where they conflict.
+
 ## Shipped this week (all pushed to main)
 
 dc46193 dual-track fundamentals ratings · ea5260a Fable/Opus copilot + dialogue

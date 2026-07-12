@@ -364,7 +364,8 @@ function SecEventsPanel({ events }: { events: NonNullable<AnalysisResponse["sec_
     arrays (the server sanitizer strips price history anyway — this just keeps
     each turn's token cost down). */
 function chatContext(payload: AnalysisResponse): Record<string, unknown> {
-  const { series: _series, ...rest } = payload as unknown as Record<string, unknown>;
+  const rest = { ...(payload as unknown as Record<string, unknown>) };
+  delete rest.series;
   return rest;
 }
 

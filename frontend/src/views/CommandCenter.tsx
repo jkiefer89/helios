@@ -626,12 +626,16 @@ function MacroIntelligencePanel({ macro }: { macro: MacroSummary }) {
     if (briefState === "loading") return;
     setBriefState("loading");
     try {
-      const snap = (await api.macro()) as Record<string, any>;
+      type TitledFeed = { documents?: Array<{ title: string }>; actions?: Array<{ title: string }> } & Record<string, unknown>;
+      const snap = (await api.macro()) as {
+        fed?: TitledFeed; policy?: TitledFeed; geopolitics?: Record<string, unknown>;
+        fomc?: unknown; rates?: unknown;
+      };
       const slim = {
         fed: { ...(snap.fed || {}), documents: undefined },
-        fed_latest: ((snap.fed?.documents as Array<{ title: string }>) || []).slice(0, 5).map((d) => d.title),
+        fed_latest: (snap.fed?.documents || []).slice(0, 5).map((d) => d.title),
         policy: { ...(snap.policy || {}), actions: undefined },
-        policy_latest: ((snap.policy?.actions as Array<{ title: string }>) || []).slice(0, 5).map((d) => d.title),
+        policy_latest: (snap.policy?.actions || []).slice(0, 5).map((d) => d.title),
         geopolitics: { ...(snap.geopolitics || {}), headlines: undefined },
         fomc: snap.fomc,
         rates: snap.rates,
