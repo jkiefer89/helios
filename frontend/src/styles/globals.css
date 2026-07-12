@@ -959,6 +959,93 @@ kbd {
   color: var(--gold);
 }
 
+/* Tier-1 workspace tabs (the five first-class workspaces). */
+.workspace-nav .workspace-tab {
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 0 0.9rem;
+}
+
+/* Tier-2 view tabs for the active workspace. */
+.view-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 0.2rem;
+  padding: 0 1.1rem;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel, transparent);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.view-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.view-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-height: 34px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  padding: 0 0.6rem;
+  font-size: 0.74rem;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: color 120ms ease, border-color 120ms ease;
+}
+
+.view-tabs button:hover {
+  color: var(--text);
+}
+
+.view-tabs button.active {
+  color: var(--text);
+  border-bottom-color: var(--gold);
+}
+
+.view-tabs button.active .nav-icon {
+  color: var(--gold);
+}
+
+.view-tabs .view-tabs__action {
+  margin-left: auto;
+  color: var(--gold);
+  font-weight: 700;
+}
+
+/* Persistent session context: workspace/view, selection, data mode, coverage. */
+.context-bar {
+  display: flex;
+  align-items: center;
+  gap: 1.4rem;
+  padding: 0.3rem 1.15rem;
+  border-bottom: 1px solid var(--line);
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.context-bar::-webkit-scrollbar {
+  display: none;
+}
+
+.context-bar b {
+  color: var(--muted);
+  font-weight: 700;
+}
+
 .nav-icon {
   display: inline-grid;
   width: 13px;

@@ -45,7 +45,9 @@ const views: Array<{ id: ViewId; label: string }> = [
 
 // Workspace navigation grouped the way an advisor works: overview first,
 // then data intake, research surfaces, portfolio work, and client output.
-const navGroups: Array<{ label: string; ids: ViewId[] }> = [
+// These groups ARE the five first-class workspaces (review UX finding: they
+// used to be mere dividers inside one flat, overflowing 13-item bar).
+export const navGroups: Array<{ label: string; ids: ViewId[] }> = [
   { label: "Overview", ids: ["command"] },
   { label: "Data", ids: ["instruments", "data-quality"] },
   { label: "Research", ids: ["opportunities", "analysis", "strategy", "evidence", "journal", "decisions"] },
@@ -102,6 +104,14 @@ export function AppShell(props: ShellProps) {
     }
   });
   const navRef = useRef<HTMLElement | null>(null);
+  // Workspace is DERIVED from the active view (never stored separately, so
+  // deep links, the search palette, and every onOpenView call keep working);
+  // clicking a workspace returns to its last-visited view.
+  const activeGroup = navGroups.find((group) => group.ids.includes(props.activeView));
+  const lastViewByGroup = useRef<Record<string, ViewId>>({});
+  useEffect(() => {
+    if (activeGroup) lastViewByGroup.current[activeGroup.label] = props.activeView;
+  }, [activeGroup, props.activeView]);
   // The active view must never sit scrolled out of the (scrollbar-less) nav:
   // clipped at 1280px, navigating right hid Command Center entirely.
   useEffect(() => {
@@ -347,25 +357,50 @@ export function AppShell(props: ShellProps) {
           </div>
         </div>
         <nav className="workspace-nav" aria-label="Primary workspace" ref={navRef}>
-          {navGroups.map((group) => (
-            <div className="nav-group" key={group.label}>
-              <span className="nav-group__label" aria-hidden="true">{group.label}</span>
-              {group.ids.map((id) => (
-                <button
-                  key={id}
-                  className={props.activeView === id ? "active" : ""}
-                  type="button"
-                  aria-current={props.activeView === id ? "page" : undefined}
-                  title={`${group.label} · ${viewLabel(id)}`}
-                  onClick={() => props.onViewChange(id)}
-                >
-                  <ShellIcon id={id} />
-                  <span>{viewLabel(id)}</span>
-                </button>
-              ))}
-            </div>
-          ))}
+          {navGroups.map((group) => {
+            const isActiveGroup = group.ids.includes(props.activeView);
+            return (
+              <button
+                key={group.label}
+                className={`workspace-tab ${isActiveGroup ? "active" : ""}`}
+                type="button"
+                aria-current={isActiveGroup ? "page" : undefined}
+                title={group.ids.map(viewLabel).join(" · ")}
+                onClick={() => props.onViewChange(lastViewByGroup.current[group.label] ?? group.ids[0])}
+              >
+                {group.label}
+              </button>
+            );
+          })}
         </nav>
+      {activeGroup && activeGroup.ids.length > 1 && (
+        <div className="view-tabs" role="tablist" aria-label={`${activeGroup.label} views`}>
+          {activeGroup.ids.map((id) => (
+            <button
+              key={id}
+              role="tab"
+              type="button"
+              aria-selected={props.activeView === id}
+              className={props.activeView === id ? "active" : ""}
+              onClick={() => props.onViewChange(id)}
+            >
+              <ShellIcon id={id} />
+              <span>{viewLabel(id)}</span>
+            </button>
+          ))}
+          {activeGroup.label === "Data" && (
+            <button type="button" className="view-tabs__action" onClick={revealDataIntake}>
+              + Add data
+            </button>
+          )}
+        </div>
+      )}
+      <div className="context-bar" aria-label="Session context">
+        <span><b>{activeGroup?.label || "Workspace"}</b> · {activeViewLabel}</span>
+        <span>{selectedContext ? <>Selected <b>{selectedContext}</b></> : "No selection"}</span>
+        <span title={dataModeFullLabel}>{dataModeShortLabel}</span>
+        <span>{props.dataStatus?.real_instrument_count ?? 0} real histories</span>
+      </div>
       </header>
       <div className={`workspace ${props.activeView === "command" ? "workspace-command" : ""} ${sidebarCollapsed ? "workspace-docked" : ""}`}>
         {sidebarCollapsed ? (
