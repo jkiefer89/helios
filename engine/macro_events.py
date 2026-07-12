@@ -23,6 +23,7 @@ labeled — they never fabricate a return forecast.
 """
 from __future__ import annotations
 
+import calendar
 import re
 import threading
 import time
@@ -376,6 +377,60 @@ def next_fomc(today: date | None = None) -> dict:
             "imminent": False, "source": "schedule exhausted — update FOMC_MEETINGS list"}
 
 
+def rate_odds() -> dict:
+    """Market-implied odds of a policy move at the next FOMC meeting.
+
+    Read from CME 30-day Fed funds futures (the same day-weighted arithmetic
+    behind CME FedWatch): the meeting-month contract prices the average of
+    pre- and post-meeting rates; the following month (no meeting) prices the
+    post-meeting rate outright. This is OBSERVATION of what the market has
+    already priced — never a Helios prediction. Offline -> available False.
+    """
+    from . import macro as _macro
+    meeting = next_fomc()
+    start = meeting.get("start") or ""
+    if len(start) != 10:
+        return {"available": False, "reason": "No upcoming FOMC meeting on the calendar."}
+    m_year, m_month, m_day = int(start[:4]), int(start[5:7]), int(start[8:10])
+    # Rate change takes effect the day after the meeting ends (start day + 1
+    # for a two-day meeting is close enough for monthly averaging).
+    effective_day = min(m_day + 2, calendar.monthrange(m_year, m_month)[1])
+    next_month = m_month + 1 if m_month < 12 else 1
+    next_year = m_year if m_month < 12 else m_year + 1
+    meeting_avg = _macro.fed_funds_implied(m_year, m_month)
+    post_rate = _macro.fed_funds_implied(next_year, next_month)
+    if meeting_avg is None or post_rate is None:
+        return {"available": False,
+                "reason": "Fed funds futures unavailable (offline or contract not served)."}
+    days_in_month = calendar.monthrange(m_year, m_month)[1]
+    pre_days = effective_day - 1
+    post_days = days_in_month - pre_days
+    if pre_days <= 0 or post_days <= 0:
+        return {"available": False, "reason": "Meeting timing degenerate for day-weighting."}
+    # meeting_avg = (pre_days/N)*pre_rate + (post_days/N)*post_rate  ->  pre_rate:
+    pre_rate = (meeting_avg - (post_days / days_in_month) * post_rate) / (pre_days / days_in_month)
+    change_bps = (post_rate - pre_rate) * 10_000
+    # Two-outcome FedWatch simplification: hold vs the nearest 25bp move.
+    prob_move = max(0.0, min(1.0, abs(change_bps) / 25.0))
+    direction = "hike" if change_bps > 0 else "cut" if change_bps < 0 else "hold"
+    return {
+        "available": True,
+        "as_of": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "meeting": start,
+        "days_until": meeting.get("days_until"),
+        "implied_rate_before_pct": round(pre_rate * 100, 3),
+        "implied_rate_after_pct": round(post_rate * 100, 3),
+        "implied_change_bps": round(change_bps, 1),
+        "prob_25bp_move_pct": round(prob_move * 100, 1),
+        "direction": direction,
+        "strip": _macro.fed_funds_strip(6),
+        "source": "cme_fed_funds_futures_via_yfinance",
+        "basis": ("Day-weighted decomposition of the meeting-month contract vs the "
+                  "following month (CME FedWatch arithmetic, two-outcome hold-vs-25bp "
+                  "simplification). Market-implied pricing, not a Helios forecast."),
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Snapshot (cached) + the transparent event-risk summary consumed by signals
 # --------------------------------------------------------------------------- #
@@ -399,12 +454,17 @@ def macro_snapshot(force: bool = False) -> dict:
         policy = _policy_component()
         geo = _geopolitics_component()
         fomc = next_fomc()
+        try:
+            odds = rate_odds()
+        except Exception:
+            odds = {"available": False, "reason": "rate-odds computation failed"}
     snapshot = {
         "as_of": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "fed": fed,
         "policy": policy,
         "geopolitics": geo,
         "fomc": fomc,
+        "rate_odds": odds,
         "event_risk": _event_risk(fed, geo, fomc),
         "disclaimer": ("Deterministic lexicon scores over primary-source feeds — context and "
                        "conviction dampers, not return forecasts. Sources that failed to load "
@@ -492,8 +552,16 @@ def compact_summary(snapshot: dict | None) -> dict | None:
     geo = snapshot.get("geopolitics") or {}
     policy = snapshot.get("policy") or {}
     fomc = snapshot.get("fomc") or {}
+    odds = snapshot.get("rate_odds") or {}
     return {
         "as_of": snapshot.get("as_of"),
+        "rate_odds": ({
+            "meeting": odds.get("meeting"),
+            "direction": odds.get("direction"),
+            "prob_25bp_move_pct": odds.get("prob_25bp_move_pct"),
+            "implied_change_bps": odds.get("implied_change_bps"),
+            "basis": "market-implied (Fed funds futures), not a forecast",
+        } if odds.get("available") else {"available": False}),
         "fed_available": bool(fed.get("available")),
         "fed_stance_label": fed.get("stance_label"),
         "fed_stance_score": fed.get("stance_score"),
@@ -518,6 +586,18 @@ def build_macro_context(sector: str = "", snapshot: dict | None = None) -> dict 
     pressure = sector_policy_pressure(sector, snap)
     if pressure:
         ctx["sector_policy"] = pressure
+    # Earnings-season breadth (cached-only read — this path never fetches):
+    # broadly deteriorating reported results are event risk the same way FOMC
+    # proximity is. Absent/insufficient data adds NOTHING (never fake calm).
+    try:
+        from . import earnings_breadth as _eb
+        breadth = _eb.snapshot_cached()
+        if breadth and breadth.get("sufficient"):
+            ctx["earnings_breadth_pct"] = breadth.get("breadth_pct")
+            ctx["earnings_breadth_deteriorating"] = bool(breadth.get("deteriorating"))
+            ctx["earnings_reports"] = breadth.get("reports")
+    except Exception:
+        pass
     return ctx
 
 

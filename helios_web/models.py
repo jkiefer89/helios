@@ -346,6 +346,11 @@ def model_analyze():
         "provenance": ps.provenance,
         "series_basis": ps.provenance.get("series_basis", ""),
         "series_basis_note": ps.provenance.get("series_basis_note", ""),
+        # The operator's stated purpose for this model — evaluation context for
+        # the copilot and the reader (deliberately shared with the AI provider;
+        # keep client identities out of it).
+        "thesis": mdl.thesis,
+        "thesis_params": dict(mdl.thesis_params or {}),
         "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
         # Server-side provenance verdict (same shape as /api/live); the raw
         # "provenance" block above is kept unchanged for backward compatibility.
@@ -561,6 +566,30 @@ def model_forward():
         "forward": forward_prov,
         "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
     })
+
+
+@bp.route("/api/model/thesis", methods=["POST"])
+def model_thesis():
+    """Set the operator's thesis for a model: free-text purpose + optional
+    structured knobs (income_monthly_draw_usd and bucket band) that unlock
+    deterministic thesis checks like months-of-income coverage."""
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return err("Request body must be a JSON object.", 400)
+    model_id = str(body.get("id") or "").strip()
+    if portfolio.get(model_id) is None:
+        return err("Unknown model.", 404)
+    params = body.get("thesis_params")
+    try:
+        mdl = portfolio.set_thesis(
+            model_id,
+            str(body.get("thesis") or ""),
+            thesis_params=params if isinstance(params, dict) else None,
+        )
+    except ValueError as exc:
+        return err(str(exc), 400)
+    return ok({"id": mdl.id, "thesis": mdl.thesis,
+               "thesis_params": dict(mdl.thesis_params or {})})
 
 
 @bp.route("/api/model/risk")

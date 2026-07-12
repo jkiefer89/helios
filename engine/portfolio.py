@@ -49,6 +49,14 @@ class Model:
     mandate_key: str               # e.g. "growth" (see engine.mandate)
     mandate_context: str           # free-text purpose/notes
     holdings: list                 # list[Holding]
+    # The operator's stated PURPOSE for this model, in his own words — how he
+    # actually uses it (e.g. "upside capture matters more than downside
+    # protection" or "12-24 months of income needs held in the low-vol
+    # bucket"). Sent to the AI copilot so evaluation is thesis-aware; keep
+    # client identities out of it. Optional structured knobs live alongside
+    # in thesis_params (e.g. income_monthly_draw_usd for the bucket check).
+    thesis: str = ""
+    thesis_params: dict = field(default_factory=dict)
 
 
 _MODELS: dict[str, Model] = {}
@@ -246,6 +254,8 @@ def load_persisted_models() -> None:
                 mandate_key=item.mandate_key,
                 mandate_context=item.mandate_context,
                 holdings=holdings,
+                thesis=str((item.metadata or {}).get("thesis") or ""),
+                thesis_params=dict((item.metadata or {}).get("thesis_params") or {}),
             ))
     except Exception:
         return
@@ -265,10 +275,43 @@ def _persist_model(model: Model, source_filename: str = "") -> dict:
                 {"ticker": h.ticker, "weight": h.weight, "source_state": h.source or "pending"}
                 for h in model.holdings
             ],
-            metadata={"imported_via": "model_upload"},
+            metadata={"imported_via": "model_upload",
+                      "thesis": model.thesis,
+                      "thesis_params": dict(model.thesis_params or {})},
         )
     except Exception as exc:
         return {"persisted": False, "warning": str(exc)}
+
+
+def set_thesis(model_id: str, thesis: str,
+               thesis_params: dict | None = None) -> Model:
+    """Update a model's operator thesis (in-memory + persisted)."""
+    model = get(model_id)
+    if model is None:
+        raise ValueError(f"Unknown model '{model_id}'.")
+    model.thesis = re.sub(r"[\x00-\x1f\x7f]", "", (thesis or "").strip())[:2000]
+    if thesis_params is not None:
+        clean: dict = {}
+        draw = thesis_params.get("income_monthly_draw_usd")
+        if draw is not None:
+            try:
+                draw = float(draw)
+                if 0 < draw < 1e10:
+                    clean["income_monthly_draw_usd"] = draw
+            except (TypeError, ValueError):
+                pass
+        for key in ("income_bucket_min_months", "income_bucket_max_months"):
+            value = thesis_params.get(key)
+            if value is not None:
+                try:
+                    value = float(value)
+                    if 0 < value <= 120:
+                        clean[key] = value
+                except (TypeError, ValueError):
+                    pass
+        model.thesis_params = clean
+    _persist_model(model)
+    return model
 
 
 # --------------------------------------------------------------------------- #

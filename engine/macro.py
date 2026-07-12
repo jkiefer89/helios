@@ -107,6 +107,64 @@ def rf_drift() -> dict:
     return out
 
 
+# CME 30-day Fed funds futures: the market's OWN pricing of the policy path.
+# Reading implied odds off the strip is observation, not prediction — the same
+# arithmetic behind CME FedWatch (100 - price = implied average monthly rate).
+_ZQ_MONTH_CODES = {1: "F", 2: "G", 3: "H", 4: "J", 5: "K", 6: "M",
+                   7: "N", 8: "Q", 9: "U", 10: "V", 11: "X", 12: "Z"}
+_ZQ_CACHE: dict[str, tuple[float, float]] = {}   # contract -> (monotonic_ts, implied_rate)
+_ZQ_TTL_S = 3600.0
+
+
+def _zq_ticker(year: int, month: int) -> str:
+    return f"ZQ{_ZQ_MONTH_CODES[month]}{str(year)[-2:]}.CBT"
+
+
+def fed_funds_implied(year: int, month: int) -> float | None:
+    """Implied average Fed funds rate (fraction) for one contract month, or
+    None offline/unavailable — never a fabricated rate."""
+    import time
+
+    from . import data as _data
+    ticker = _zq_ticker(year, month)
+    now = time.monotonic()
+    hit = _ZQ_CACHE.get(ticker)
+    if hit and now - hit[0] < _ZQ_TTL_S:
+        return hit[1]
+    if not _data.HAS_YF:
+        return None
+    try:
+        with _data._YF_SEMAPHORE:
+            hist = _data._yf.Ticker(ticker).history(period="5d", timeout=10)
+        if hist is None or hist.empty:
+            return None
+        price = float(hist["Close"].dropna().iloc[-1])
+    except Exception:
+        return None
+    if not (80.0 < price < 100.0):   # sanity: quotes are 100 - rate
+        return None
+    implied = (100.0 - price) / 100.0
+    _ZQ_CACHE[ticker] = (now, implied)
+    return implied
+
+
+def fed_funds_strip(months: int = 5) -> list[dict]:
+    """Implied-rate strip for the next `months` contract months (front first)."""
+    from datetime import date as _date
+    today = _date.today()
+    out = []
+    year, month = today.year, today.month
+    for _ in range(max(1, min(months, 8))):
+        implied = fed_funds_implied(year, month)
+        if implied is not None:
+            out.append({"month": f"{year}-{month:02d}",
+                        "implied_rate_pct": round(implied * 100, 3)})
+        month += 1
+        if month > 12:
+            month, year = 1, year + 1
+    return out
+
+
 def rate_context() -> dict:
     """Configured-vs-market rate snapshot for payload provenance."""
     curve = {}

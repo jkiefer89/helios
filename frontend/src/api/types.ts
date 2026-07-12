@@ -1520,6 +1520,10 @@ export interface AnalysisResponse {
   // Model NAV is a weight-rescaled research construction, never a track record.
   series_basis?: string;
   series_basis_note?: string;
+  // Operator thesis: how this model is actually used (sent to the copilot).
+  thesis?: string;
+  thesis_params?: { income_monthly_draw_usd?: number;
+    income_bucket_min_months?: number; income_bucket_max_months?: number };
   context?: string;
   signal_journal_entry?: Record<string, unknown> | null;
   warnings?: string[];

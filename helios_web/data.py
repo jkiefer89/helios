@@ -87,6 +87,14 @@ def _auto_live_worker(config: dict) -> None:
             _macro_ev.macro_snapshot()
         except Exception:
             pass
+        # Warm the earnings-breadth snapshot (6h TTL — a no-op most cycles) so
+        # the damper and Command Center read cached-only, never paying FMP
+        # latency inside a request.
+        try:
+            from engine import earnings_breadth as _eb
+            _eb.breadth_snapshot()
+        except Exception:
+            pass
         # Daily composite auto-record: the prospective evidence track accrues
         # for every real-eligible target even when the operator doesn't click
         # (view-triggered-only recording had a usage bias — review finding).

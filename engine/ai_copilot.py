@@ -384,7 +384,7 @@ class AnthropicProvider(AIProvider):
         body = {
             "model": self.model,
             "max_tokens": 8000,
-            "system": DIALOGUE_SYSTEM,
+            "system": DIALOGUE_SYSTEM + _playbook_block(),
             "messages": convo,
         }
         headers = {
@@ -749,6 +749,53 @@ DIALOGUE_SYSTEM = (
     "paragraphs or tight bullets), not JSON."
 )
 
+# --------------------------------------------------------------------------- #
+# Operator playbook: the operator's OWN frameworks, loaded into every dialogue
+# and task prompt. The deterministic engine never reads this (its assumptions
+# stay versioned and owner-approved in engine/assumptions.py); the copilot
+# argues FROM these frameworks — and is explicitly told to flag conflicts
+# between the playbook and the evidence, because the operator welcomes pushback.
+# --------------------------------------------------------------------------- #
+_PLAYBOOK_MAX_CHARS = 6000
+_PLAYBOOK_CACHE: dict[str, Any] = {"mtime": None, "path": "", "text": ""}
+
+
+def operator_playbook() -> str:
+    """Bounded contents of the operator's playbook file, or "" when absent."""
+    path = os.environ.get("HELIOS_PLAYBOOK_PATH", "PLAYBOOK.md")
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return ""
+    if _PLAYBOOK_CACHE["mtime"] == mtime and _PLAYBOOK_CACHE["path"] == path:
+        return _PLAYBOOK_CACHE["text"]
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            text = fh.read(_PLAYBOOK_MAX_CHARS * 4)
+    except OSError:
+        return ""
+    # redact_secrets caps at 800 chars internally — apply it per line so the
+    # secret scrub covers the whole document without truncating it.
+    text = "\n".join(redact_secrets(line) for line in text.splitlines())[:_PLAYBOOK_MAX_CHARS]
+    _PLAYBOOK_CACHE.update({"mtime": mtime, "path": path, "text": text})
+    return text
+
+
+def _playbook_block() -> str:
+    playbook = operator_playbook()
+    if not playbook:
+        return ""
+    return (
+        "\n\nOPERATOR PLAYBOOK — the operator's own trading philosophy and per-mandate "
+        "frameworks, in his words. Evaluate everything through these frameworks FIRST "
+        "(an ultra-growth model and an income model are judged by different yardsticks). "
+        "But the operator is explicit that he is not infallible: when the evidence "
+        "conflicts with the playbook, or the playbook itself looks wrong for the "
+        "situation, SAY SO DIRECTLY — flagging that conflict is part of your job, "
+        "not a breach of it.\n---\n" + playbook + "\n---"
+    )
+
+
 DIALOGUE_MAX_MESSAGES = 24
 DIALOGUE_MAX_CHARS = 6000
 
@@ -793,8 +840,11 @@ def build_prompt(task: str, sanitized_payload: dict[str, Any], question: str = "
         "or analyst opinions; never promise outcomes; call out weak, thin, stale, demo, or blocked data "
         "bluntly rather than smoothing over it; if a number in the payload looks suspect (e.g. a growth "
         "estimate at a cap, a valuation block pinned at a clamp), flag it as suspect. "
+        "When the payload carries a `thesis` field, that is the operator's stated purpose for the "
+        "model — judge fit against THAT thesis, not a generic standard, and flag conflicts between "
+        "the thesis and the evidence explicitly. "
         "Return only valid JSON matching the requested schema."
-    )
+    ) + _playbook_block()
     request = {
         "task": task,
         "question": question,

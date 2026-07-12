@@ -77,6 +77,7 @@ _FUNDAMENTALS_GAP_SATURATION_PP = 6.0
 # it never flips a direction, it shrinks confidence ahead of known event risk).
 _FOMC_DAMPER = 0.90            # decision within FOMC_IMMINENT_DAYS of a meeting
 _GPR_MAX_DAMPER = 0.25         # up to -25% conviction at geopolitical index 1.0
+_EARNINGS_BREADTH_DAMPER = 0.92   # <40% of a real report sample beating consensus
 _EVENT_DAMPER_FLOOR = 0.70
 
 
@@ -98,6 +99,15 @@ def _event_risk_damper(macro_context: dict | None) -> tuple[float, list[str]]:
         damper *= (1.0 - cut)
         reasons.append(f"Geopolitical risk index {gpr:.2f} (elevated) — "
                        f"conviction ×{1.0 - cut:.2f}")
+    if macro_context.get("earnings_breadth_deteriorating"):
+        # Reported beats/misses across the real book, not a forecast: when the
+        # season is broadly missing (<40% beats on a sufficient sample), every
+        # rating carries a little less conviction.
+        damper *= _EARNINGS_BREADTH_DAMPER
+        breadth = macro_context.get("earnings_breadth_pct")
+        reasons.append(
+            f"Earnings breadth weak ({breadth}% of {macro_context.get('earnings_reports')} "
+            f"reports beat) — conviction ×{_EARNINGS_BREADTH_DAMPER:.2f}")
     return max(damper, _EVENT_DAMPER_FLOOR), reasons
 
 

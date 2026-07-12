@@ -103,6 +103,7 @@ def analyze_model_risk(model: portfolio.Model, aum_usd: float | None = None) -> 
     vol_budget = _volatility_budget(metrics, model)
     liquidity = _liquidity_flags(model)
     capacity = _capacity_analysis(model, liquidity.get("items") or [], aum_usd)
+    income_bucket = _income_bucket(model, aum_usd)
     concentration = _concentration(model, ps)
     drawdown = _drawdown_stress(ps.close)
     scenario_shocks = _scenario_shocks(model, factor_exposure)
@@ -138,9 +139,11 @@ def analyze_model_risk(model: portfolio.Model, aum_usd: float | None = None) -> 
         "scenario_shocks": scenario_shocks,
         "liquidity_flags": liquidity,
         "capacity": capacity,
+        "income_bucket": income_bucket,
         "benchmark_relative": benchmark_relative,
         "client_risk_pack": _client_risk_pack(
             capacity=capacity,
+            income_bucket=income_bucket,
             model=model,
             close=ps.close,
             data_provenance=p,
@@ -257,6 +260,7 @@ def _blocked_client_risk_pack(model: portfolio.Model, reason: str, missing_ticke
 def _client_risk_pack(
     *,
     capacity: dict[str, Any],
+    income_bucket: dict[str, Any] | None,
     model: portfolio.Model,
     close: pd.Series,
     data_provenance: dict[str, Any],
@@ -278,6 +282,7 @@ def _client_risk_pack(
     clusters = _cluster_pack_rows(correlation_clusters)
     breakpoints = _break_model_language(
         model=model,
+        income_bucket=income_bucket,
         stress_scenarios=stress,
         concentration_warnings=concentration_warnings,
         liquidity_watchlist=liquidity_watchlist,
@@ -290,6 +295,7 @@ def _client_risk_pack(
     return {
         "available": True,
         "capacity": capacity,
+        "income_bucket": income_bucket,
         "summary": {
             "model_id": model.id,
             "model_name": model.name,
@@ -490,6 +496,7 @@ def _cluster_pack_rows(clusters: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _break_model_language(
     *,
     model: portfolio.Model,
+    income_bucket: dict[str, Any] | None = None,
     stress_scenarios: list[dict[str, Any]],
     concentration_warnings: list[dict[str, Any]],
     liquidity_watchlist: list[dict[str, Any]],
@@ -498,6 +505,18 @@ def _break_model_language(
     capacity: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
+    if income_bucket and income_bucket.get("status") == "below_thesis_floor":
+        rows.append({
+            "driver": "Income bucket below thesis floor",
+            "severity": "high",
+            "trigger": "Low-vol bucket covers fewer months than the operator's stated band",
+            "evidence": (f"{income_bucket.get('months_of_coverage')} months of the stated "
+                         f"${income_bucket.get('monthly_draw_usd'):,.0f}/mo draw vs a "
+                         f"{income_bucket.get('thesis_band_months')} month thesis band."),
+            "language": ("An extended downturn would force selling volatile holdings for income "
+                         "— the exact scenario this model's thesis exists to avoid. Rebuild the "
+                         "low-vol bucket toward the stated band."),
+        })
     if capacity and capacity.get("status") == "capacity_constrained":
         worst_days = capacity.get("max_days_to_liquidate_10pct")
         rows.append({
@@ -735,6 +754,14 @@ def _scenario_shocks(model: portfolio.Model, factors: dict[str, float]) -> list[
         # Observed-first, like the flags surface: this scenario used to score
         # from the static ADV proxy even when 60d observed dollar volume
         # existed — shocking tickers by stale assumption (review finding).
+        # Broadly missed earnings -> multiple compression across equities:
+        # deterministic exposure shock (the earnings-breadth monitor supplies
+        # the OBSERVATION of whether the season is actually deteriorating).
+        ("Broad earnings de-rating", {"Technology": -0.08, "Communication Services": -0.07,
+                                      "Consumer Discretionary": -0.07, "Broad Market": -0.06,
+                                      "Financials": -0.05, "Industrials": -0.05,
+                                      "Healthcare": -0.04, "Utilities": -0.02, "Energy": -0.04,
+                                      "Crypto": -0.10, "Fixed Income": 0.01, "Cash": 0.0}),
         ("Liquidity stress", {ticker: (-0.08 if _effective_liquidity_score(ticker) < 50 else -0.02)
                               for ticker in weights}),
     ]
@@ -852,6 +879,70 @@ def _capacity_analysis(model: portfolio.Model, liquidity_items: list[dict[str, A
         "basis": ("Position $ vs average daily dollar volume; days-to-liquidate at 10%/20% "
                   "participation caps; square-root impact scaled by observed daily vol. "
                   "Order-of-magnitude estimates from available data — not execution advice."),
+    }
+
+
+_LOW_VOL_ANNUAL = 0.08   # <8% annualized: cash/bill/short-duration territory
+
+
+def _income_bucket(model: portfolio.Model, aum_usd: float | None) -> dict[str, Any] | None:
+    """The operator's income-model thesis, operationalized: how many months of
+    the stated draw does the low-volatility bucket actually cover?
+
+    Thesis: extended downturns are ridden out by drawing from 12-24 months of
+    income needs held in cash / money market / very-low-vol holdings. This
+    check measures the bucket against the STATED draw — it only exists when
+    the model carries thesis_params.income_monthly_draw_usd (absence of a
+    thesis adds nothing), and it needs AUM to convert weights to dollars.
+    """
+    params = getattr(model, "thesis_params", None) or {}
+    draw = params.get("income_monthly_draw_usd")
+    if not draw:
+        return None
+    min_months = float(params.get("income_bucket_min_months") or 12.0)
+    max_months = float(params.get("income_bucket_max_months") or 24.0)
+    if aum_usd is None or aum_usd <= 0:
+        return {"status": "aum_not_set",
+                "note": "Set the model AUM to size the income bucket against the stated draw."}
+    bucket_weight = 0.0
+    rows: list[dict[str, Any]] = []
+    unclassified: list[str] = []
+    for holding in model.holdings:
+        sector = _SECTOR_MAP.get(holding.ticker, (None, None))[0]
+        vol = None
+        inst = data.get(holding.ticker)
+        if inst is not None and provenance.is_real_source(inst.source) and "close" in inst.df:
+            rets = inst.df["close"].dropna().pct_change().tail(180).dropna()
+            if len(rets) >= 40:
+                vol = float(rets.std() * np.sqrt(252))
+        low_vol = (sector in {"Cash", "Fixed Income"}
+                   or (vol is not None and vol < _LOW_VOL_ANNUAL))
+        if sector is None and vol is None:
+            unclassified.append(holding.ticker)
+            continue
+        if low_vol:
+            bucket_weight += float(holding.weight)
+            rows.append({"ticker": holding.ticker,
+                         "weight_pct": round(float(holding.weight) * 100, 2),
+                         "observed_vol_pct": round(vol * 100, 1) if vol is not None else None,
+                         "sector": sector or "unclassified"})
+    bucket_usd = bucket_weight * float(aum_usd)
+    months = bucket_usd / float(draw) if draw else 0.0
+    status = ("below_thesis_floor" if months < min_months
+              else "above_thesis_band" if months > max_months else "within_thesis_band")
+    return {
+        "status": status,
+        "months_of_coverage": round(months, 1),
+        "thesis_band_months": [min_months, max_months],
+        "monthly_draw_usd": float(draw),
+        "bucket_usd": round(bucket_usd, 0),
+        "bucket_weight_pct": round(bucket_weight * 100, 2),
+        "bucket_holdings": rows,
+        "unclassified": unclassified,
+        "basis": ("Low-vol bucket = Cash/Fixed Income taxonomy or observed annualized "
+                  f"vol < {_LOW_VOL_ANNUAL:.0%} on real history; coverage = bucket $ / "
+                  "stated monthly draw. Measures the model against the OPERATOR'S "
+                  "thesis, not a generic standard."),
     }
 
 

@@ -152,6 +152,7 @@ function AnalysisPayload({ payload }: { payload: AnalysisResponse }) {
               "Weight-rescaled research series at target weights — not a performance track record."}
           </p>
         )}
+        {isModel && <ThesisEditor payload={payload} />}
         {isModel && payload.warnings?.length ? (
           <div className="warning-list">{payload.warnings.map((w) => <span key={w}>{w}</span>)}</div>
         ) : null}
@@ -368,6 +369,86 @@ function SecEventsPanel({ events }: { events: NonNullable<AnalysisResponse["sec_
     </div>
   );
 }
+
+/**
+ * Operator thesis: how this model is actually USED — the copilot judges fit
+ * against this, and the structured draw unlocks the income-bucket check.
+ * Deliberately shared with the AI provider; keep client identities out.
+ */
+function ThesisEditor({ payload }: { payload: AnalysisResponse }) {
+  const modelId = String(payload.id || "");
+  const [editing, setEditing] = useState(false);
+  const [thesis, setThesis] = useState(payload.thesis || "");
+  const [draw, setDraw] = useState(
+    payload.thesis_params?.income_monthly_draw_usd ? String(payload.thesis_params.income_monthly_draw_usd) : "");
+  const [state, setState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [message, setMessage] = useState("");
+
+  useEffect(() => {
+    setThesis(payload.thesis || "");
+    setDraw(payload.thesis_params?.income_monthly_draw_usd
+      ? String(payload.thesis_params.income_monthly_draw_usd) : "");
+    setEditing(false);
+    setState("idle");
+  }, [payload.id, payload.thesis, payload.thesis_params]);
+
+  const save = async () => {
+    if (state === "saving") return;
+    setState("saving");
+    try {
+      const parsed = Number(draw.replace(/[$,\s]/g, ""));
+      await api.setModelThesis({
+        id: modelId,
+        thesis: thesis.trim(),
+        thesis_params: Number.isFinite(parsed) && parsed > 0
+          ? { income_monthly_draw_usd: parsed } : {},
+      });
+      setState("saved");
+      setMessage("Thesis saved — analyses and copilot dialogue now carry it.");
+      setEditing(false);
+    } catch (err) {
+      setState("error");
+      setMessage(err instanceof Error ? err.message : "Could not save the thesis.");
+    }
+  };
+
+  if (!editing) {
+    return (
+      <div className="thesis-block">
+        <p className="forecast-note">
+          <b>Thesis:</b>{" "}
+          {payload.thesis || thesis
+            ? (thesis || payload.thesis)
+            : "None set — tell Helios how you actually use this model (upside-capture, income bucket, …) and the copilot judges fit against it."}
+          {" "}
+          <button type="button" className="linklike" onClick={() => setEditing(true)}>Edit</button>
+        </p>
+        {state === "saved" && <p className="forecast-note">{message}</p>}
+      </div>
+    );
+  }
+  return (
+    <div className="thesis-block decision-form">
+      <textarea
+        value={thesis}
+        rows={3}
+        onChange={(e) => setThesis(e.target.value)}
+        placeholder="How is this model used? e.g. 'Ultra growth: missing upside is riskier than absorbing drawdowns' or 'Income: 12-24 months of draw in the low-vol bucket.' Sent to the AI copilot — keep client identities out."
+      />
+      <div className="decision-form__row">
+        <input value={draw} onChange={(e) => setDraw(e.target.value)}
+          placeholder="Income draw $/month (optional — unlocks the bucket check)"
+          inputMode="numeric" aria-label="Monthly income draw in dollars" />
+        <button type="button" onClick={() => void save()} disabled={state === "saving"}>
+          {state === "saving" ? "Saving…" : "Save thesis"}
+        </button>
+        <button type="button" onClick={() => setEditing(false)}>Cancel</button>
+      </div>
+      {state === "error" && <div className="notice danger" role="alert">{message}</div>}
+    </div>
+  );
+}
+
 
 /** Compact dialogue context: the engine's conclusions without the bulky series
     arrays (the server sanitizer strips price history anyway — this just keeps

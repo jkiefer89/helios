@@ -212,6 +212,12 @@ export const api = {
   aiMacroBrief: (payload: Record<string, unknown>, regenerate = false) =>
     aiPost("/api/ai/macro/brief", payload, undefined, regenerate),
   listDecisions: (limit = 200) => request<DecisionsResponse>(`/api/decisions?limit=${limit}`),
+  setModelThesis: (body: { id: string; thesis: string; thesis_params?: Record<string, number> }) =>
+    request<{ id: string; thesis: string; thesis_params: Record<string, number> }>("/api/model/thesis", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
   ledgerAccounts: () => request<{ accounts: LedgerAccount[] }>("/api/ledger/accounts"),
   ledgerPerformance: (account: string) =>
     request<LedgerPerformanceResponse>(`/api/ledger/performance?account=${encodeURIComponent(account)}`),
