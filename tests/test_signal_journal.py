@@ -109,7 +109,10 @@ def test_signal_journal_endpoint_summarizes_paper_performance_evidence(monkeypat
     data.register(data.Instrument("BENCHX", "Benchmark X", benchmark.to_frame("close"), "live", []))
     buy_close = price_series(days=95, start=100.0, daily=0.003, future_days=25)
     model_close = price_series(days=95, start=100.0, daily=0.002, future_days=25)
-    pending_close = price_series(days=70, start=100.0, daily=0.001)
+    # Ends 3 business days before the measured MODEL-A entry's window: evidence
+    # aggregation now counts each (target, input_end, horizon) window ONCE, so
+    # the pending entry must occupy a DISTINCT forward window to be counted.
+    pending_close = price_series(days=70, start=100.0, daily=0.001).iloc[:-3]
 
     signal_journal.record_signal(
         target_kind="instrument",

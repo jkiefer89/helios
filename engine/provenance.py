@@ -215,5 +215,8 @@ def portfolio(prov: dict, min_real_weight_pct: float = 99.9) -> dict:
         "non_real_weight_pct": round(non_real, 1),
         "missing_tickers": missing,
         "warnings": warnings,
+        # Qualifies even "Real Research Mode": real DATA, constructed SERIES.
+        "series_basis": prov.get("series_basis", ""),
+        "series_basis_note": prov.get("series_basis_note", ""),
     }
 

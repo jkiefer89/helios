@@ -109,6 +109,15 @@ def dashboard_payload() -> dict:
                 f"{row['symbol']} latest data is {row['days_stale']} calendar days old.",
                 "Refresh live data or verify the uploaded date range before current research use.",
             ))
+        if row.get("future_dated"):
+            issues.append(quality_issue(
+                "future_dated_history",
+                "blocker",
+                row["symbol"],
+                f"{row['symbol']} price history extends {-row['days_stale']} day(s) into the "
+                "future — fabricated bars contaminate backtests and journal measurements.",
+                "Delete and re-import this history; check the source file's date column/format.",
+            ))
         if row["source"] != "sample" and row["row_count"] < active_thresholds["institutional_history_rows"]:
             severity = "blocker" if row["row_count"] < active_thresholds["min_research_rows"] else "warning"
             issues.append(quality_issue(
@@ -270,8 +279,15 @@ def symbol_row(inst: data.Instrument, last_refresh: dict | None, active_threshol
         "days_stale": days_stale,
         "freshness_basis": "price_history_last_date" if last_date else "missing_price_history",
         "is_stale": bool(is_real_source and days_stale is not None and days_stale > active_thresholds["stale_days"]),
+        # Negative age = bars dated in the future. Ingestion now rejects/clamps
+        # these, but anything persisted BEFORE the guard (or arriving by another
+        # path) must read as contaminated, not maximally fresh (review finding:
+        # a future-dated upload passed every check and settled journal entries
+        # against fabricated bars). >1 day past today allows non-UTC same-day bars.
+        "future_dated": bool(days_stale is not None and days_stale < -1),
         "is_short": bool(is_real_source and len(close) < active_thresholds["institutional_history_rows"]),
-        "research_ready": bool(is_real_source and len(close) >= active_thresholds["min_research_rows"]),
+        "research_ready": bool(is_real_source and len(close) >= active_thresholds["min_research_rows"]
+                               and not (days_stale is not None and days_stale < -1)),
         "last_refresh": last_refresh,
         "refresh_evidence": {
             "requires_refresh_log": requires_refresh_log,

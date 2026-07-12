@@ -3,6 +3,12 @@
 The journal records deterministic Helios signal outputs with the exact input
 window used at the time. It never stores raw price histories; it stores compact
 audit facts plus a pending/measured forward result when later data exists.
+
+Recording is VIEW-TRIGGERED and idempotent per (target, input_end, horizon,
+action, score): every signal the engine emits is captured, re-views upsert the
+same row, and measured results are immutable. The deliberate-act channel is
+the decision journal (POST /api/decisions). Evidence aggregation counts each
+forward window once (see _dedupe_forward_windows); raw rows are the audit trail.
 """
 from __future__ import annotations
 
@@ -67,7 +73,11 @@ def record_signal(
     # sentiment/macro with stale prices, then scores a forward window whose
     # bars were already knowable at record time (review finding).
     lag_days = (datetime.now(timezone.utc).date() - clean_input.index.max().date()).days
-    fresh_enough = lag_days <= 7
+    # Bounded on BOTH sides: negative lag means the input window ends in the
+    # FUTURE (fabricated bars — review finding, reproduced settling +2%
+    # against prices that don't exist). -1 tolerates same-day bars from
+    # markets ahead of UTC, mirroring the ingestion cutoff.
+    fresh_enough = -1 <= lag_days <= 7
     measurable = real_eligible and fresh_enough
     event = {
         "dedupe_key": _dedupe_key(target_kind, target_id, input_end, horizon_days, action, score),
@@ -90,6 +100,9 @@ def record_signal(
     }
     if real_eligible and not fresh_enough:
         event["metadata"]["not_measurable_reason"] = (
+            f"Input window ends {-lag_days} days in the FUTURE — fabricated bars "
+            "cannot anchor a forward measurement."
+            if lag_days < -1 else
             f"Price history ends {lag_days} days before the signal was recorded; "
             "scoring a forward window that was already observable grants hindsight.")
     if measurable:
@@ -111,13 +124,40 @@ def list_entries(limit: int = 100) -> list[dict[str, Any]]:
     return persistence.get_store().signal_journal(limit=limit)
 
 
+def _dedupe_forward_windows(entries: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """One observation per forward window for EVIDENCE aggregation.
+
+    Re-viewing a ticker intraday drifts the score (sentiment/macro/price move)
+    just enough to mint a new dedupe key over the IDENTICAL forward window, so
+    frequently-viewed names accrued pseudo-replicated weight in hit-rate/alpha
+    statistics (review finding). Collapse by (target, input_end, horizon)
+    keeping the latest created_at; raw rows stay in the store as the audit
+    trail. Returns (collapsed entries, superseded count)."""
+    latest: dict[tuple, dict[str, Any]] = {}
+    for entry in entries:
+        key = (entry.get("target_kind"), entry.get("target_id"),
+               entry.get("input_end_date"), entry.get("horizon_days"))
+        held = latest.get(key)
+        if held is None or str(entry.get("created_at") or "") >= str(held.get("created_at") or ""):
+            latest[key] = entry
+    collapsed = list(latest.values())
+    return collapsed, len(entries) - len(collapsed)
+
+
 def dashboard_payload(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    unique, superseded = _dedupe_forward_windows(entries)
     return {
-        "summary": summarize_entries(entries),
-        "benchmark_comparison": benchmark_comparison(entries),
-        "model_evidence": model_evidence(entries),
-        "track_evidence": track_evidence(entries),
-        "drift": drift_series(entries),
+        "summary": summarize_entries(unique),
+        "benchmark_comparison": benchmark_comparison(unique),
+        "model_evidence": model_evidence(unique),
+        "track_evidence": track_evidence(unique),
+        "drift": drift_series(unique),
+        # Visible, never silent: how many near-duplicate window observations
+        # were collapsed out of the evidence statistics.
+        "superseded_count": superseded,
+        "dedupe_basis": ("Evidence statistics count each (target, input-end, horizon) "
+                         "forward window once — latest recording wins; raw journal rows "
+                         "are preserved as the audit trail."),
     }
 
 
@@ -432,6 +472,9 @@ def _forward_result(close: pd.Series, input_end_date: str, horizon_days: int) ->
 
 
 def _dedupe_key(target_kind: str, target_id: str, input_end: str, horizon_days: int, action: str, score: float) -> str:
+    # `+ 0.0` normalizes negative zero: -0.00004 and +0.00004 both format as
+    # "0.0000" instead of minting two keys via "-0.0000" vs "0.0000".
+    score = round(float(score), 4) + 0.0
     raw = f"{target_kind}|{target_id}|{input_end}|{horizon_days}|{action}|{score:.4f}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:40]
 

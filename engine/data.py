@@ -1,7 +1,8 @@
 """Price-history data layer.
 
 Holds an in-memory store of per-instrument OHLCV DataFrames. Data can come from:
-  1. Bundled synthetic sample series (always available, fully offline).
+  1. Bundled synthetic sample series — OPT-IN only (HELIOS_LOAD_SAMPLES=1;
+     a fresh production start shows the honest empty state instead).
   2. A CSV uploaded by the user (client investment-model export).
   3. A live pull via yfinance, if the package is installed and the network is up.
 
@@ -111,6 +112,15 @@ _STORE: dict[str, Instrument] = {}
 # The store is shared across all dashboard users (a shared advisor view, by
 # design). The lock keeps concurrent waitress threads from corrupting it.
 _STORE_LOCK = threading.RLock()
+
+
+def _future_cutoff() -> pd.Timestamp:
+    """Latest bar date accepted from ingestion: today (UTC) + 1 calendar day.
+
+    The tolerance is load-bearing — same-day bars from markets ahead of UTC
+    (ASX, Tokyo) are legitimately dated one day past a UTC clock."""
+    from datetime import timezone
+    return pd.Timestamp(datetime.now(timezone.utc).date()) + pd.Timedelta(days=1)
 
 
 def get(symbol: str) -> Instrument | None:
@@ -310,6 +320,20 @@ def parse_csv(
     # skew analytics.
     out = out[np.isfinite(out["close"]) & (out["close"] > 0)]
     out = out[~out.index.duplicated(keep="last")].sort_index()
+    # Future-dated prices cannot be analyzed — they contaminate backtests and
+    # let "prospective" journal entries settle against fabricated bars (review
+    # finding, reproduced: a future CSV read as maximally fresh and a signal
+    # measured +2% against bars that don't exist). Reject loudly rather than
+    # trim: future dates almost always mean a broken export or DD/MM-vs-MM/DD
+    # misparse that corrupted the past rows too. The +1 calendar-day tolerance
+    # keeps legitimate same-day bars from markets ahead of UTC (ASX/Tokyo).
+    cutoff = _future_cutoff()
+    n_future = int((out.index > cutoff).sum())
+    if n_future:
+        raise ValueError(
+            f"CSV contains {n_future} future-dated row(s) (latest "
+            f"{out.index.max().date()}) — future prices cannot be analyzed; "
+            "check the date column/format and re-export.")
     if len(out) < 30:
         raise ValueError("Need at least 30 valid rows of price history to analyze.")
 
@@ -351,6 +375,10 @@ def fetch_live(symbol: str, period: str = "2y", persist: bool = True) -> Instrum
     df["close"] = pd.to_numeric(df["close"], errors="coerce")
     df = df[np.isfinite(df["close"]) & (df["close"] > 0)]
     df = df[~df.index.duplicated(keep="last")].sort_index()
+    # Clamp (not reject) future bars from providers: a provider/clock anomaly
+    # must not inject unanalyzable future prices, but the rest of a live
+    # series is still good (unlike a corrupted CSV export).
+    df = df[df.index <= _future_cutoff()]
     if df.empty:
         raise RuntimeError(f"No live data returned for '{symbol}'.")
 

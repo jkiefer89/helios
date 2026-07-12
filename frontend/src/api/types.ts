@@ -1420,6 +1420,9 @@ export interface AnalysisResponse {
   };
   holdings?: AnalysisHolding[];
   concentration?: { hhi: number; n_eff: number; corr_mean: number };
+  // Model NAV is a weight-rescaled research construction, never a track record.
+  series_basis?: string;
+  series_basis_note?: string;
   context?: string;
   signal_journal_entry?: Record<string, unknown> | null;
   warnings?: string[];

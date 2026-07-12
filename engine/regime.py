@@ -9,6 +9,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from . import provenance
+
 
 def classify_regime(close: pd.Series, symbol: str = "SPY", source: str = "sample") -> dict:
     """Classify a price series as risk-on, neutral, or risk-off.
@@ -109,6 +111,12 @@ def market_regime(instruments) -> dict:
     if proxy is None:
         proxy = max(insts, key=lambda inst: len(inst.df["close"].dropna()))
         warnings.append(f"SPY was not available; using {proxy.symbol} as the broad-market proxy.")
+    if not provenance.is_real_source(proxy.source):
+        # A synthetic proxy silently classified the whole market's regime on
+        # offline starts (review finding) — say so where dashboards surface it.
+        warnings.append(
+            f"Regime proxy {proxy.symbol} uses bundled {proxy.source} data — "
+            "not real market evidence.")
 
     result = classify_regime(proxy.df["close"], symbol=proxy.symbol, source=proxy.source)
     result["warnings"] = warnings + result.get("warnings", [])

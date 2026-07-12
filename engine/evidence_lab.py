@@ -191,6 +191,11 @@ def analyze_series(
             "no_lookahead": True,
             "evidence_layers": "Historical walk-forward windows plus prospective Signal Journal measurements when available.",
             "signal_basis": "Existing causal Helios historical signal: trend and momentum only.",
+            # Short machine label the UI puts NEXT TO the headline stats, not
+            # buried in this footer (review finding: the walk-forward proxy is
+            # 2 of the live rating's 5 components; sentiment and fundamentals
+            # cannot be backtested without look-ahead fabrication).
+            "signal_basis_short": "trend+momentum proxy — not the live composite rating",
             "forward_measurement": "Signal is frozen at the close; forward return is measured over later sessions.",
             "alpha_basis": f"Forward return minus {benchmark_symbol} return when benchmark history is available.",
             "confidence_bands": "Percentiles and normal-approximation 90% mean confidence interval over measured walk-forward windows.",

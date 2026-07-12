@@ -449,6 +449,14 @@ def build_series(
             + source_weight.get("missing", 0.0)
         ) * 100, 1),
         "honesty": "real" if sim_weight == 0 else "simulated" if sim_weight >= 0.999 else "mixed",
+        # UNCONDITIONAL basis label: this NAV is a construction, and even a
+        # 100%-real-data model must never present it as a track record
+        # (review finding — the caveat lived only in code comments).
+        "series_basis": "weight_rescaled_research_series",
+        "series_basis_note": (
+            "Model NAV is a daily weight-rescaled construction at target "
+            "weights (daily-rebalanced, cost-free, no trade history) — a "
+            "forward-analysis research basis, not a performance track record."),
     }
 
     return PortfolioSeries(close=nav, holdings=holdings_out, n_days=len(nav),

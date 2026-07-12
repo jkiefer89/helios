@@ -76,7 +76,13 @@ def score_candidate(candidate: dict, regime: dict | None = None) -> dict:
     if risk_score >= 65:
         warnings.append("Risk is elevated; volatility or drawdown could invalidate the setup.")
         score -= 10
-    if regime.get("label") == "risk-off" and evidence_score < 70:
+    # The regime penalty only applies when the regime itself was classified
+    # from REAL data: a bundled sample SPY once became the broad-market proxy
+    # on offline starts and its synthetic risk-off label docked every real
+    # candidate 8 points (review finding).
+    regime_source = str(regime.get("source") or "")
+    regime_is_real = not regime_source or provenance.is_real_source(regime_source)
+    if regime.get("label") == "risk-off" and evidence_score < 70 and regime_is_real:
         warnings.append("Risk-off regime requires stronger evidence before a constructive review.")
         score -= 8
 

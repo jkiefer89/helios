@@ -146,6 +146,15 @@ function AnalysisPayload({ payload }: { payload: AnalysisResponse }) {
         {eligible && <DecisionQuickLog payload={payload} />}
         {!eligible && <div className="warning-list"><span>{quality.required_action || "Replace demo or mixed inputs before treating this as research evidence."}</span></div>}
         {payload.signal.caveats?.length ? <div className="warning-list">{payload.signal.caveats.map((caveat) => <span key={caveat}>{caveat}</span>)}</div> : null}
+        {isModel && (
+          <p className="forecast-note">
+            {payload.series_basis_note ||
+              "Weight-rescaled research series at target weights — not a performance track record."}
+          </p>
+        )}
+        {isModel && payload.warnings?.length ? (
+          <div className="warning-list">{payload.warnings.map((w) => <span key={w}>{w}</span>)}</div>
+        ) : null}
       </Panel>
       <section className="dashboard-grid">
         <Panel title={`Price, Trend and Signal Markers${panelSuffix}`} className="span-2">

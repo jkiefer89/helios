@@ -108,7 +108,10 @@ export function EvidenceLab({
       {payload && !payload.evidence_unavailable && (
         <>
           <section className="dashboard-grid three">
-            <Panel title="Hit Rate" meta={`${fmtNumber(payload.summary.measured_count, 0)} windows`}>
+            <Panel
+              title="Hit Rate"
+              meta={`${fmtNumber(payload.summary.measured_count, 0)} windows · ${payload.methodology?.signal_basis_short || "trend+momentum proxy — not the live composite rating"}`}
+            >
               <div className="metric-grid compact-metrics">
                 <StatTile label="Paper hit rate" value={fmtPct(payload.summary.hit_rate_pct)} tone={toneForHit(payload.summary.hit_rate_pct)} />
                 <StatTile label="Hit count" value={`${fmtNumber(payload.summary.hit_count, 0)} / ${fmtNumber(payload.summary.window_count, 0)}`} />
@@ -250,6 +253,10 @@ function ProspectiveValidationPanel({ payload }: { payload: EvidenceLabResponse 
             <StatTile label="Avg alpha" value={fmtPct(prospective.avg_alpha_pct)} tone={toneForSigned(prospective.avg_alpha_pct)} />
           </div>
           <p className="muted">{prospective.basis}</p>
+          <p className="forecast-note">
+            These entries record the exact composite rating (all components and dampers) at
+            signal time — the out-of-sample record of what the terminal actually said.
+          </p>
           <div className="terminal-table evidence-prospective-table" tabIndex={0} aria-label="Prospective Signal Journal evidence">
             <div className="terminal-table__head"><span>Input End</span><span>Action</span><span>Score</span><span>Status</span><span>Forward</span><span>Alpha</span><span>Hit</span></div>
             {prospective.latest_entries.slice(0, 8).map((entry) => (

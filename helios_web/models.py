@@ -344,6 +344,9 @@ def model_analyze():
         "holdings": holdings,
         "concentration": {"hhi": ps.hhi, "n_eff": ps.n_eff, "corr_mean": ps.corr_mean},
         "provenance": ps.provenance,
+        "series_basis": ps.provenance.get("series_basis", ""),
+        "series_basis_note": ps.provenance.get("series_basis_note", ""),
+        "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
         # Server-side provenance verdict (same shape as /api/live); the raw
         # "provenance" block above is kept unchanged for backward compatibility.
         "data_provenance": provenance.portfolio(ps.provenance),
