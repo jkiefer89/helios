@@ -88,7 +88,13 @@ partial; the composite genuinely cannot be backtested without look-ahead fabrica
   proxy — not the live composite rating") and label the prospective panel as the
   exact-composite record. No math changes.
 
-### Phase 1 — Honest validation (the review's strongest point)
+### Phase 1 — Honest validation — ✅ SHIPPED (commit a448fa1, 2026-07-11)
+
+All three items below are implemented, regression-locked
+(`tests/test_phase1_validation.py`), and verified live: the champion now
+reports "best of 2, selection-biased upward" with an honest
+insufficient-holdout status and a Bonferroni-adjusted band, and the auto-live
+loop recorded 57 composite snapshots on its first cycle.
 
 **1.1 Champion selection stops flattering itself** *(review #4 — confirmed; Medium)*
 - `engine/model_validation.py` crowns the max validation_score and reports that same
