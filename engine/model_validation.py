@@ -58,6 +58,13 @@ def dashboard(
                   "the winning score is upward-biased by selection. Ranking uses the "
                   "chronological first ~80% of windows; holdout_confirmation reports "
                   "the untouched last ~20%."),
+        # n_trials undercounts real selection pressure by construction: it
+        # cannot see horizon/train-window/step sweeps, the decay horizons that
+        # feed each score, or models tried and deleted (review finding).
+        "n_trials_not_counted": (
+            "alternative horizon/train_window/step parameterizations, the decay "
+            "horizons inside each score, and previously deleted models — treat "
+            "the adjusted band as a LOWER bound on selection uncertainty"),
     }
     if champion:
         selection["champion_adjusted"] = _selection_adjusted_ci(
@@ -251,14 +258,19 @@ def _selection_adjusted_ci(inputs: dict[str, Any], n_trials: int) -> dict[str, A
     if not n or p is None:
         return {"status": "insufficient_data"}
     z = NormalDist().inv_cdf(1 - (0.10 / max(1, n_trials)) / 2)
-    se = (p * (1 - p) / n) ** 0.5
+    # Wilson score interval at the family-wise z: the Wald form collapsed to
+    # zero width at p=0 or p=1 (review finding — the live champion showed a
+    # 100–100 band on 12 windows; Wilson gives ~[73, 100]).
+    denom = 1 + z * z / n
+    center = (p + z * z / (2 * n)) / denom
+    half = (z / denom) * ((p * (1 - p) / n + z * z / (4 * n * n)) ** 0.5)
     out = {
         "status": "ok",
         "n_trials": n_trials,
         "z": round(z, 3),
-        "hit_rate_ci_low_pct": round(max(0.0, p - z * se) * 100, 2),
-        "hit_rate_ci_high_pct": round(min(1.0, p + z * se) * 100, 2),
-        "basis": f"90% family-wise (Bonferroni) band across {n_trials} ranked models.",
+        "hit_rate_ci_low_pct": round(max(0.0, center - half) * 100, 2),
+        "hit_rate_ci_high_pct": round(min(1.0, center + half) * 100, 2),
+        "basis": f"90% family-wise (Bonferroni) Wilson band across {n_trials} ranked models.",
     }
     if inputs.get("alpha_mean") is not None and inputs.get("alpha_se") is not None:
         out["alpha_ci_low_pct"] = round(inputs["alpha_mean"] - z * inputs["alpha_se"], 4)

@@ -59,6 +59,10 @@ def test_instrument_forward_analyst_context_is_optional():
 def test_legacy_output_unchanged_without_fundamentals():
     close = _close()
     fc = forecast.forecast(close, horizon=21, n_paths=200)
+    # Pin measured-edge quality: this asserts the legacy weight layout, and
+    # the synthetic series' real walk-forward accuracy would otherwise gate
+    # the forecast weight (covered in tests/test_phase1_validation.py).
+    fc = {**fc, "quality": {"directional_accuracy": 0.60, "n_test": 100}}
     sig = signals.evaluate(close, fc, _SENT)
     names = [c["name"] for c in sig["components"]]
     assert names == ["trend", "momentum", "forecast", "sentiment"]
@@ -72,6 +76,10 @@ def test_legacy_output_unchanged_without_fundamentals():
 def test_fundamentals_component_joins_blend_and_weights_renormalize():
     close = _close()
     fc = forecast.forecast(close, horizon=21, n_paths=200)
+    # Pin measured-edge quality: this test asserts the UNGATED weight algebra;
+    # the edge gate (below-chance forecasts earn zero weight) is covered in
+    # tests/test_phase1_validation.py.
+    fc = {**fc, "quality": {"directional_accuracy": 0.60, "n_test": 100}}
     fwd = cma.instrument_forward("TEST", _fnd())
     sig = signals.evaluate(close, fc, _SENT, fundamental_result=fwd)
     weights = {c["name"]: c["effective_weight"] for c in sig["components"]}

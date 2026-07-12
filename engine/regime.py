@@ -23,6 +23,7 @@ def classify_regime(close: pd.Series, symbol: str = "SPY", source: str = "sample
     px = close.dropna().astype(float)
     if len(px) < 60:
         return {
+            "status": "ok",
             "label": "neutral",
             "score": 50,
             "symbol": symbol,
@@ -90,6 +91,7 @@ def classify_regime(close: pd.Series, symbol: str = "SPY", source: str = "sample
     final_score = int(round(float(np.clip(score, 0, 100))))
     label = "risk-on" if final_score >= 65 else "risk-off" if final_score <= 35 else "neutral"
     return {
+        "status": "ok",
         "label": label,
         "score": final_score,
         "symbol": symbol,
@@ -100,17 +102,35 @@ def classify_regime(close: pd.Series, symbol: str = "SPY", source: str = "sample
     }
 
 
+def _unavailable_regime() -> dict:
+    """No benchmark data means NO regime number — a hard-coded neutral 50/100
+    rendered as numeric state with zero data loaded (review finding)."""
+    return {
+        "status": "unavailable",
+        "label": "unavailable",
+        "score": None,
+        "symbol": None,
+        "source": "none",
+        "drivers": [],
+        "summary": "No benchmark price history loaded — regime unavailable.",
+        "warnings": ["Fetch live or upload benchmark history (SPY preferred) "
+                     "to classify the market regime."],
+    }
+
+
 def market_regime(instruments) -> dict:
     """Choose the broad-market proxy and classify its current regime."""
     insts = list(instruments)
     if not insts:
-        return classify_regime(pd.Series(dtype=float), symbol="NONE", source="none")
+        return _unavailable_regime()
 
     proxy = next((inst for inst in insts if inst.symbol.upper() == "SPY"), None)
     warnings: list[str] = []
     if proxy is None:
         proxy = max(insts, key=lambda inst: len(inst.df["close"].dropna()))
         warnings.append(f"SPY was not available; using {proxy.symbol} as the broad-market proxy.")
+    if proxy.df.get("close") is None or proxy.df["close"].dropna().empty:
+        return _unavailable_regime()
     if not provenance.is_real_source(proxy.source):
         # A synthetic proxy silently classified the whole market's regime on
         # offline starts (review finding) — say so where dashboards surface it.

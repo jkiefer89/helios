@@ -252,3 +252,83 @@ gated by /api/data/price-reconciliation (first live run: JPM mean diff
 Standing invariants (unchanged): never fabricate; degrade gracefully; label every
 source; a wrong number is worse than a missing number; "Unavailable" is an
 acceptable answer.
+
+---
+
+# Deep Review 2 — Economic Edge & Product OS (2026-07-12)
+
+A second, deeper external review (verdict: NOT CAPITAL-READY — engineering
+7/10, economic proof 2/10) landed after all five phases above shipped. All 12
+of its checkable claim clusters were adversarially re-verified against this
+repo: **10 confirmed, 2 partial, 0 refuted** — including two live
+reproductions (a 42%-accuracy forecast flipping HOLD→BUY at full weight; the
+champion CI collapsing to 100–100). Notable bounded sub-claims: Strategy Lab
+DOES net costs, the ledger DOES label gross/net, and the Node-23.7 claim was
+stale. The review's core verdict is accepted: Helios organizes research
+honestly but has not proven repeatable net alpha — that proof can only come
+from the prospective track now accruing.
+
+## Batch 1 — evidence honesty — ✅ SHIPPED (2026-07-12)
+
+- **Forecast edge gate** (D2, reproduced): the forecast component's weight is
+  now EARNED — zero at ≤50% measured out-of-sample directional accuracy, full
+  only at ≥55% (n_test ≥ 40; unmeasured keeps weight with a caveat). Gated
+  weight is never redistributed. Live: JPM gated to 34%.
+- **Gross-of-costs labeling + shared cost constant** (D1): every alpha surface
+  says "gross of trading costs"; `engine/costs.py` holds the single 5 bps/side
+  default (Strategy Lab semantics) and evidence summaries carry a
+  presentation-level `avg_alpha_after_default_costs_pct` — stored journal rows
+  stay raw.
+- **Wilson champion band + honest trial disclosure** (D4): no more zero-width
+  CIs at p=0/1; `n_trials_not_counted` names what the correction cannot see.
+- **Overlap-adjusted confidence bands** (D5): CI uses effective
+  N = windows/(horizon/step); the 63-day decay row at step 21 now widens by √3.
+- **Span-aligned evidence benchmark** (D6): both endpoints last-bar-at/before
+  the target's exact window dates; uncovered windows stay unresolved.
+- **Exact composite made exact** (D3): journal metadata persists the full
+  component breakdown, weights, vol/mandate/event dampers, and records a
+  missing strategic leg explicitly; UI copy is date-honest about older rows.
+- **Empty-state regime is unavailable, not NEUTRAL 50** (D7): no benchmark
+  data → status "unavailable", score null, locked panel with one recovery
+  action — never a fabricated meter.
+- **Cloud narrative default-off** (D10b): report saves invoke the provider
+  only on an explicit, persisted opt-in labeled with its consequence.
+- **CI hardening** (D12): frontend lint + Vitest in CI, coverage floor 80,
+  Node pinned (`.nvmrc` 22, engines ≥22.13); context-bar grammar fixed.
+
+## Batch 2 — staged next (verified prescriptions ready)
+
+- **Ledger v2 honesty** (D8, M): persist non-trade activity as typed rows with
+  disclosed dollar impact; cash-based reconciliation check per period
+  (ok/mismatch/uncheckable); label Dietz estimates as estimates in the UI;
+  freeze the shortfall anchor at the journaled decision_price; optional
+  exec-id in fill dedupe; fills cap warning.
+- **PIT first+last-of-day slots** (D9, M): schema v9 — (symbol, as_of, slot)
+  with retrieved_at + persisted reconciliation warnings; migration must copy
+  existing rows (they are evidence). Same-day REPLACE currently loses the
+  morning observation.
+- **GET purity where it matters** (D11, M): decisions outcome-refresh moves to
+  the data-refresh hooks; data-quality alert sync becomes idempotent with an
+  explicit ack; macro ?refresh=1 becomes POST. View-triggered idempotent
+  journal capture stays — it is the design.
+- **UX remainder** (D10, M): palette aliases for ledger/actual surfaces;
+  "Fetch missing" recovery action on blocked model rows; "Auto-selected"
+  labeling in the context bar.
+- **Route tests** (D12, M): ledger 26% / decisions 38% coverage → HTTP-level
+  tests for all 8 routes.
+
+## Rescoped or rejected from Deep Review 2 (same single-operator logic)
+
+Accepted in principle, deferred pending scale: security master + raw vendor
+vault + corporate-action ledger (buy, don't build — revisit with
+cross-sectional mining); experiment registry (MLflow) before adding model
+variants; PBO/DSR as validation outputs; custodian API adapters (IBKR Flex
+pattern) replacing CSV as the primary actuals path; constrained optimizer
+(CVXPY) for current-to-target proposals. Rejected for one operator: SSO/RBAC/
+MFA, Postgres/Alembic, Dagster/Celery, OpenTelemetry, hash-chained audit —
+the intent (named actors, durable audit, tested restore) is already served at
+this scale by the encrypted store, append-only journals, immutable measured
+results, and git history. The review's own standard is adopted as the north
+star: another qualified reviewer should be able to reproduce every input,
+calculation, and decision as-of the time it occurred.
+

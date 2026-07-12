@@ -12,7 +12,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from . import analytics_cache, data, portfolio, provenance, signal_journal, signals
+from . import analytics_cache, costs, data, portfolio, provenance, signal_journal, signals
 from ._common import (
     avg as _avg,
     clean_close as _clean_close,
@@ -152,7 +152,7 @@ def analyze_series(
         }
         analytics_cache.put("evidence_walk", cache_key, windows_by_horizon)
     base_windows = windows_by_horizon[horizon_days]
-    decay = [_decay_row(horizon, windows_by_horizon[horizon]) for horizon in decay_horizons]
+    decay = [_decay_row(horizon, windows_by_horizon[horizon], step) for horizon in decay_horizons]
     out_warnings = list(warnings or [])
     if benchmark_status != "available":
         out_warnings.append(f"Benchmark {benchmark_symbol} needs live or uploaded history for alpha evidence.")
@@ -176,9 +176,11 @@ def analyze_series(
         "summary": summary,
         "false_positives": _false_positive_summary(base_windows),
         "confidence_bands": {
-            "forward_result_pct": _bands(row.get("forward_result_pct") for row in base_windows),
-            "alpha_pct": _bands(row.get("alpha_pct") for row in base_windows),
-            "hit_rate_pct": _hit_rate_band(base_windows),
+            "forward_result_pct": _bands((row.get("forward_result_pct") for row in base_windows),
+                                         overlap_factor=horizon_days / step),
+            "alpha_pct": _bands((row.get("alpha_pct") for row in base_windows),
+                                overlap_factor=horizon_days / step),
+            "hit_rate_pct": _hit_rate_band(base_windows, overlap_factor=horizon_days / step),
         },
         "regime_sensitivity": _regime_sensitivity(base_windows),
         "decay": decay,
@@ -197,8 +199,11 @@ def analyze_series(
             # cannot be backtested without look-ahead fabrication).
             "signal_basis_short": "trend+momentum proxy — not the live composite rating",
             "forward_measurement": "Signal is frozen at the close; forward return is measured over later sessions.",
-            "alpha_basis": f"Forward return minus {benchmark_symbol} return when benchmark history is available.",
-            "confidence_bands": "Percentiles and normal-approximation 90% mean confidence interval over measured walk-forward windows.",
+            "alpha_basis": (f"Forward return minus {benchmark_symbol} return when benchmark "
+                            f"history is available — {costs.GROSS_LABEL}."),
+            "confidence_bands": ("Percentiles over all measured windows; the 90% mean CI uses "
+                                 "effective N = windows / (horizon/step) because windows overlap "
+                                 "when the horizon exceeds the step."),
         },
         "disclaimer": "Analysis only. Evidence Lab combines historical walk-forward paper evidence with prospective Signal Journal tracking when available; it does not execute trades or guarantee outcomes.",
     }
@@ -417,6 +422,12 @@ def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "avg_forward_result_pct": _avg(row.get("forward_result_pct") for row in rows),
         "avg_benchmark_result_pct": _avg(row.get("benchmark_result_pct") for row in rows),
         "avg_alpha_pct": _avg(row.get("alpha_pct") for row in rows),
+        # Presentation-level companion: stored windows stay GROSS (a paper
+        # signal incurs no costs); the unlabeled word "alpha" was the
+        # dishonesty (review finding).
+        "avg_alpha_after_default_costs_pct": costs.net_of_default_costs(
+            _avg(row.get("alpha_pct") for row in rows)),
+        "alpha_cost_basis": costs.NET_ASSUMPTION_LABEL,
         "positive_alpha_rate_pct": _pct(sum(1 for row in rows if _finite(row.get("alpha_pct")) is not None and row["alpha_pct"] > 0), sum(1 for row in rows if _finite(row.get("alpha_pct")) is not None)),
         "first_signal_date": rows[0]["signal_date"] if rows else None,
         "last_signal_date": rows[-1]["signal_date"] if rows else None,
@@ -469,7 +480,7 @@ def _regime_sensitivity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def _decay_row(horizon: int, rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _decay_row(horizon: int, rows: list[dict[str, Any]], step: int = 21) -> dict[str, Any]:
     summary = _summary(rows)
     values_x = [_finite(row.get("signal_score")) for row in rows]
     values_y = [_finite(row.get("alpha_pct")) for row in rows]
@@ -488,19 +499,29 @@ def _decay_row(horizon: int, rows: list[dict[str, Any]]) -> dict[str, Any]:
         "avg_alpha_pct": summary["avg_alpha_pct"],
         "false_positive_rate_pct": _false_positive_summary(rows)["rate_pct"],
         "information_coefficient": ic,
-        "confidence_bands": _bands(row.get("alpha_pct") for row in rows),
+        "confidence_bands": _bands((row.get("alpha_pct") for row in rows),
+                                   overlap_factor=horizon / step),
     }
 
 
-def _bands(values) -> dict[str, Any]:
+def _bands(values, overlap_factor: float = 1.0) -> dict[str, Any]:
+    """Percentiles on the FULL sample; the CI uses effective N = windows /
+    overlap_factor. Windows overlap whenever horizon > step (e.g. the 63-day
+    decay row at step 21 shares 2/3 of each window with its neighbor), and
+    treating them as independent draws narrowed the bands by ~sqrt(overlap)
+    (review finding — first-order Hansen–Hodrick scaling restores coverage)."""
     clean = [float(value) for value in values if _finite(value) is not None]
     if not clean:
         return {"count": 0, "mean": None, "p05": None, "p25": None, "p50": None, "p75": None, "p95": None, "ci90_low": None, "ci90_high": None}
     arr = np.array(clean, dtype=float)
     mean = float(arr.mean())
-    se = float(arr.std(ddof=1) / np.sqrt(len(arr))) if len(arr) > 1 else 0.0
+    m = max(1.0, float(overlap_factor))
+    n_eff = max(1.0, len(arr) / m)
+    se = float(arr.std(ddof=1) / np.sqrt(n_eff)) if len(arr) > 1 else 0.0
     return {
         "count": int(len(arr)),
+        "n_eff": round(n_eff, 1),
+        "overlap_factor": round(m, 2),
         "mean": round(mean, 4),
         "p05": round(float(np.percentile(arr, 5)), 4),
         "p25": round(float(np.percentile(arr, 25)), 4),
@@ -512,14 +533,18 @@ def _bands(values) -> dict[str, Any]:
     }
 
 
-def _hit_rate_band(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _hit_rate_band(rows: list[dict[str, Any]], overlap_factor: float = 1.0) -> dict[str, Any]:
     flags = [row.get("paper_hit") for row in rows if row.get("paper_hit") is not None]
     if not flags:
         return {"count": 0, "mean": None, "ci90_low": None, "ci90_high": None}
     p = sum(1 for flag in flags if flag) / len(flags)
-    se = np.sqrt(max(p * (1 - p), 0.0) / len(flags))
+    m = max(1.0, float(overlap_factor))
+    n_eff = max(1.0, len(flags) / m)
+    se = np.sqrt(max(p * (1 - p), 0.0) / n_eff)
     return {
         "count": len(flags),
+        "n_eff": round(n_eff, 1),
+        "overlap_factor": round(m, 2),
         "mean": round(p * 100, 2),
         "ci90_low": round(max(0.0, (p - 1.645 * se) * 100), 2),
         "ci90_high": round(min(100.0, (p + 1.645 * se) * 100), 2),
@@ -585,9 +610,19 @@ def _label_on_or_before(labels: pd.Series, date: pd.Timestamp) -> str:
 
 
 def _benchmark_return(benchmark: pd.Series, start_date: pd.Timestamp, end_date: pd.Timestamp) -> float | None:
+    """Benchmark return over the TARGET's exact calendar window.
+
+    Both endpoints are the last bar at/before the target's window dates — the
+    old first-bar-at/AFTER end lookup measured the benchmark over a strictly
+    wider span whenever the target trades a calendar the benchmark doesn't
+    (crypto weeks, holidays, sparse uploads), corrupting alpha (review
+    finding). Same semantics as decision_journal._return_over_span. A window
+    the benchmark doesn't cover yet stays unresolved (None), never truncated."""
+    if benchmark.empty or benchmark.index.max() < end_date:
+        return None
     start = _value_on_or_before(benchmark, start_date)
-    end = _value_on_or_after(benchmark, end_date)
-    if start is None or end is None or start == 0:
+    end = _value_on_or_before(benchmark, end_date)
+    if start is None or end is None or start <= 0:
         return None
     return (end / start - 1.0) * 100
 
@@ -595,11 +630,6 @@ def _benchmark_return(benchmark: pd.Series, start_date: pd.Timestamp, end_date: 
 def _value_on_or_before(series: pd.Series, date: pd.Timestamp) -> float | None:
     values = series.loc[:date]
     return float(values.iloc[-1]) if len(values) else None
-
-
-def _value_on_or_after(series: pd.Series, date: pd.Timestamp) -> float | None:
-    values = series.loc[date:]
-    return float(values.iloc[0]) if len(values) else None
 
 
 def _benchmark_close(symbol: str) -> pd.Series | None:

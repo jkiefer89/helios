@@ -254,8 +254,9 @@ function ProspectiveValidationPanel({ payload }: { payload: EvidenceLabResponse 
           </div>
           <p className="muted">{prospective.basis}</p>
           <p className="forecast-note">
-            These entries record the exact composite rating (all components and dampers) at
-            signal time — the out-of-sample record of what the terminal actually said.
+            These entries record the composite score and action at signal time; entries from
+            2026-07-12 onward also carry the full component breakdown, weights, and dampers.
+            Model entries have no fundamentals leg (technicals-only) — recorded, not hidden.
           </p>
           <div className="terminal-table evidence-prospective-table" tabIndex={0} aria-label="Prospective Signal Journal evidence">
             <div className="terminal-table__head"><span>Input End</span><span>Action</span><span>Score</span><span>Status</span><span>Forward</span><span>Alpha</span><span>Hit</span></div>

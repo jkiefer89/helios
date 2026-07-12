@@ -130,3 +130,54 @@ def test_registry_matches_consumers():
     assert macro.sector_anchor("technology")["fair_pe"] == \
         assumptions.SECTOR_ANCHORS["values"]["technology"]["fair_pe"]
     assert risk_exposure._FACTOR_MAP is assumptions.FACTOR_MAP["values"]
+
+
+def test_wilson_band_never_collapses_at_extremes():
+    # Wald collapsed to [100, 100] at p=1 (review finding); Wilson must not.
+    perfect = model_validation._selection_adjusted_ci(
+        {"measured_count": 12, "hit_rate_p": 1.0}, 3)
+    assert perfect["status"] == "ok"
+    assert perfect["hit_rate_ci_high_pct"] == 100.0
+    assert perfect["hit_rate_ci_low_pct"] < 85.0     # honest width on n=12
+    zero = model_validation._selection_adjusted_ci(
+        {"measured_count": 12, "hit_rate_p": 0.0}, 3)
+    assert zero["hit_rate_ci_high_pct"] > 15.0
+    assert zero["hit_rate_ci_low_pct"] == 0.0
+
+
+def test_below_chance_forecast_cannot_move_the_action():
+    """Reproduced review finding: DA=42% on n=111 kept full forecast weight
+    and flipped HOLD->BUY. The edge gate must zero it out."""
+    import pandas as pd
+    from engine import signals
+    from tests.conftest import price_series
+    close = price_series(days=300, daily=0.0005)
+    fc_no_edge = {"expected_return_pct": 6.0, "horizon_days": 21,
+                  "quality": {"directional_accuracy": 0.42, "n_test": 111}}
+    fc_edge = {"expected_return_pct": 6.0, "horizon_days": 21,
+               "quality": {"directional_accuracy": 0.62, "n_test": 111}}
+    fc_unmeasured = {"expected_return_pct": 6.0, "horizon_days": 21,
+                     "quality": {"directional_accuracy": 0.42, "n_test": 10}}
+    sent = {"aggregate_score": 0.0, "count": 0}
+    gated = signals.evaluate(close, fc_no_edge, sent, history_days=300)
+    full = signals.evaluate(close, fc_edge, sent, history_days=300)
+    unmeasured = signals.evaluate(close, fc_unmeasured, sent, history_days=300)
+
+    def fc_contrib(sig):
+        return next(c for c in sig["components"] if c["name"] == "forecast")["contribution"]
+
+    assert fc_contrib(gated) == 0.0                      # below chance -> zero weight
+    assert fc_contrib(full) > 0.0                        # measured edge -> full weight
+    assert fc_contrib(unmeasured) > 0.0                  # unmeasured -> kept, caveated
+    assert any("gated" in c for c in gated["caveats"])
+    assert gated["score"] < full["score"]                # the gate actually moves the rating
+
+
+def test_edge_multiplier_shape():
+    from engine import signals
+    m = signals._forecast_edge_multiplier
+    assert m({"directional_accuracy": 0.50, "n_test": 100}) == 0.0
+    assert m({"directional_accuracy": 0.55, "n_test": 100}) == 1.0
+    assert m({"directional_accuracy": 0.525, "n_test": 100}) == pytest.approx(0.5)
+    assert m({"directional_accuracy": 0.42, "n_test": 10}) is None   # unmeasured
+    assert m(None) is None

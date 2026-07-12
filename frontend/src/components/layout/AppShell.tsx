@@ -397,7 +397,8 @@ export function AppShell(props: ShellProps) {
       )}
       <div className="context-bar" aria-label="Session context">
         <span><b>{activeGroup?.label || "Workspace"}</b> · {activeViewLabel}</span>
-        <span>{selectedContext ? <>Selected <b>{selectedContext}</b></> : "No selection"}</span>
+        <span>{selectedContext && selectedContext !== "No active selection"
+          ? <>Selected <b>{selectedContext}</b></> : "No selection"}</span>
         <span title={dataModeFullLabel}>{dataModeShortLabel}</span>
         <span>{props.dataStatus?.real_instrument_count ?? 0} real histories</span>
       </div>

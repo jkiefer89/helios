@@ -229,6 +229,19 @@ def _signal_evidence_metadata(sig: dict, endpoint: str) -> dict:
     point-in-time fundamentals exist for a retrospective backtest; pretending
     otherwise would be look-ahead bias)."""
     meta: dict = {"endpoint": endpoint}
+    # FULL component breakdown, weights, and dampers: the persisted record
+    # was a subset while the UI claimed "exact composite" (review finding).
+    # The prose clause is dropped to keep metadata_json compact — everything
+    # numeric that produced the rating is here.
+    meta["components"] = [
+        {"name": c.get("name"), "raw": c.get("raw"),
+         "effective_weight": c.get("effective_weight"),
+         "contribution": c.get("contribution")}
+        for c in (sig.get("components") or [])
+    ]
+    for field in ("vol_penalty", "mandate_fit", "conviction_pct"):
+        if field in sig:
+            meta[field] = sig.get(field)
     tactical = sig.get("tactical") or {}
     if tactical:
         meta["tactical_action"] = tactical.get("action")
@@ -238,6 +251,12 @@ def _signal_evidence_metadata(sig: dict, endpoint: str) -> dict:
         meta["strategic_action"] = strategic.get("action")
         meta["strategic_gap_pp"] = strategic.get("gap_vs_anchor_pct")
         meta["strategic_er_pct"] = strategic.get("expected_return_pct")
+    else:
+        # A missing leg is RECORDED, never silent: model entries have no
+        # fundamentals track, and that fact is part of the evidence.
+        meta["strategic_usable"] = False
+        if strategic.get("reason"):
+            meta["strategic_reason"] = strategic.get("reason")
     if "event_risk_damper" in sig:
         meta["event_risk_damper"] = sig.get("event_risk_damper")
         meta["macro"] = sig.get("macro") or {}
@@ -267,8 +286,9 @@ def _record_model_signal(mdl: portfolio.Model, ps: portfolio.PortfolioSeries, cl
 
 
 def auto_record_daily_signals(max_targets: int = 200) -> dict:
-    """Once per UTC day per real-eligible target, record the exact COMPOSITE
-    rating (all components + dampers) in the signal journal.
+    """Once per UTC day per real-eligible target, record the composite rating
+    (score, action, and — for entries from 2026-07-12 onward — the full
+    component breakdown, weights, and dampers) in the signal journal.
 
     Runs from the auto-live loop so prospective evidence accrues even when the
     operator doesn't click — view-triggered-only recording gave the journal a

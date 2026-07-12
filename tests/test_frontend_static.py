@@ -332,7 +332,10 @@ def test_reports_view_exposes_report_snapshot_exports():
     assert "Save snapshot" in source
     assert "HTML Snapshot" in source
     assert "PDF Export" in source
-    assert "Include AI narrative when available" in source
+    # Default-OFF cloud narrative with an explicit-consequence label
+    # (review finding: saving a report silently invoked the provider).
+    assert "Generate AI narrative on save (calls the cloud provider)" in source
+    assert 'localStorage.getItem("helios_report_ai") === "on"' in source
     assert "Encrypted local history" in source
     assert "api.saveReportSnapshot" in source
     assert "reportSnapshots" in client_source

@@ -67,6 +67,27 @@ def _sentiment_score(agg: float) -> float:
     return float(np.clip(agg, -1, 1))
 
 
+# The forecast component's weight is EARNED by measured out-of-sample edge.
+# Full weight only at >=55% walk-forward directional accuracy, ZERO at <=50%
+# (coin-flip): a measured below-chance model previously kept its full weight
+# and could flip a HOLD to BUY while a caveat politely mentioned the missing
+# edge (review finding, reproduced — DA=42% on n=111 still moved the action).
+_EDGE_MIN_TEST_N = 40
+
+
+def _forecast_edge_multiplier(quality: dict | None) -> float | None:
+    """[0, 1] weight multiplier from measured directional accuracy, or None
+    when the edge is UNMEASURED (small/absent test window — keep the weight
+    and say so; absence of measurement is not evidence of no edge)."""
+    if not quality:
+        return None
+    da = quality.get("directional_accuracy")
+    n_test = quality.get("n_test")
+    if da is None or not isinstance(n_test, (int, float)) or n_test < _EDGE_MIN_TEST_N:
+        return None
+    return float(np.clip((float(da) - 0.50) / 0.05, 0.0, 1.0))
+
+
 # A gap of +/-6 percentage points (annualized) between the building-block CMA
 # return and the mandate anchor saturates the fundamentals component. The gap is
 # an annualized figure, so this score is the same at a 5-day and a 90-day chart
@@ -183,6 +204,12 @@ def evaluate(close: pd.Series, forecast_result: dict, sentiment_result: dict,
     else:
         eff_w = dict(tech_w)
 
+    edge_mult = _forecast_edge_multiplier(forecast_result.get("quality"))
+    if edge_mult is not None:
+        # Weight is EARNED, never redistributed: a gated forecast simply
+        # contributes less (or nothing), it does not inflate the other legs.
+        eff_w["forecast"] = eff_w["forecast"] * edge_mult
+
     contributions = {k: eff_w[k] * raw[k] for k in raw}
     base_composite = sum(contributions.values())
 
@@ -209,7 +236,10 @@ def evaluate(close: pd.Series, forecast_result: dict, sentiment_result: dict,
     # Tactical: the four price/news components under the mandate's technical
     # weights — this is the horizon-sensitive leg (the Ridge forecast is over
     # the user's chart horizon by construction).
-    tactical_composite = sum(tech_w[k] * raw[k] for k in ("trend", "momentum", "forecast", "sentiment"))
+    tactical_w = dict(tech_w)
+    if edge_mult is not None:
+        tactical_w["forecast"] = tactical_w["forecast"] * edge_mult
+    tactical_composite = sum(tactical_w[k] * raw[k] for k in ("trend", "momentum", "forecast", "sentiment"))
     tactical_score = float(np.clip(tactical_composite * vol_penalty * mandate_fit * event_damper, -1, 1))
     tactical = {
         "action": _to_action(tactical_score),
@@ -353,9 +383,17 @@ def _caveats(fc, history_days, data_honesty) -> list:
     out = []
     q = fc.get("quality", {}) or {}
     da = q.get("directional_accuracy")
-    if da is not None and da <= 0.50:
-        out.append(f"Forecast shown but the model has no measured edge — directional accuracy "
-                   f"{da*100:.0f}% ≤ coin-flip; treat the forecast contribution skeptically.")
+    n_test = q.get("n_test")
+    edge_mult = _forecast_edge_multiplier(q)
+    if edge_mult is not None and edge_mult < 1.0:
+        out.append(
+            f"Forecast weight gated to {edge_mult:.0%} of the mandate weight — measured "
+            f"directional accuracy {da*100:.0f}% on {int(n_test)} test windows "
+            f"({'no' if edge_mult == 0 else 'thin'} out-of-sample edge; full weight requires ≥55%).")
+    elif da is not None and da <= 0.50 and edge_mult is None:
+        out.append(f"Forecast shown but its edge is UNMEASURED (test window under "
+                   f"{_EDGE_MIN_TEST_N}) and in-sample accuracy is {da*100:.0f}% — "
+                   "treat the forecast contribution skeptically.")
     if history_days is not None and history_days < 252:
         out.append(f"Only {history_days} analyzed trading days of history (<1y); estimates carry wide uncertainty.")
     if data_honesty and data_honesty.get("simulated_weight_pct", 0) > 0:

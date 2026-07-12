@@ -526,12 +526,14 @@ export interface RegimeDriver {
 }
 
 export interface RegimePayload {
-  label: "risk-on" | "neutral" | "risk-off" | string;
-  score: number;
+  // "unavailable" means NO benchmark data: score is null and no meter renders.
+  status?: "ok" | "unavailable" | string;
+  label: "risk-on" | "neutral" | "risk-off" | "unavailable" | string;
+  score: number | null;
   summary: string;
   drivers: RegimeDriver[];
   warnings: string[];
-  symbol?: string;
+  symbol?: string | null;
 }
 
 export interface CommandItem {

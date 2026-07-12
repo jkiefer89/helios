@@ -25,6 +25,9 @@ export function CommandCenter({
 }) {
   if (!payload) return <EmptyState title="Command Center unavailable" body="The backend did not return a command payload." />;
   const regime = payload.regime;
+  const regimeUnavailable = regime.status === "unavailable" || typeof regime.score !== "number";
+  // Narrowed for the meter branch (only rendered when a real score exists).
+  const regimeScore = typeof regime.score === "number" ? regime.score : 0;
   const topDrivers = regime.drivers.slice(0, 5);
   const sourceCounts = payload.data_provenance?.source_counts || {};
   const sourceStatus = formatSourceStatus(sourceCounts);
@@ -33,6 +36,18 @@ export function CommandCenter({
   const disclosureCards = buildDisclosureCards(payload, sourceStatus);
   return (
     <div className="view-stack command-terminal">
+      {regimeUnavailable ? (
+        <Panel title="Market Regime" meta="benchmark data required">
+          <EmptyState
+            title="Market regime unavailable"
+            body={regime.summary || "No benchmark price history loaded — regime unavailable."}
+          >
+            <button type="button" onClick={() => { window.dispatchEvent(new Event("helios:reveal-data-intake")); onOpenView("instruments"); }}>
+              Fetch or upload benchmark data
+            </button>
+          </EmptyState>
+        </Panel>
+      ) : (
       <section className="regime-terminal">
         <header className="regime-panel-head">
           <span>Market Regime Model <InfoMark /></span>
@@ -43,30 +58,30 @@ export function CommandCenter({
           <strong>{payload.display_label}</strong>
           <p>{regime.summary}</p>
         </div>
-        <div className="regime-meter" aria-label={`Regime score ${fmtNumber(regime.score, 0)} out of 100`}>
+        <div className="regime-meter" aria-label={`Regime score ${fmtNumber(regimeScore, 0)} out of 100`}>
           <button className="regime-segment risk-off" type="button" onClick={() => onOpenView("strategy")}>
             <span>Risk-off</span>
-            <b>{fmtNumber(Math.max(0, 100 - regime.score), 0)}<small>/100</small></b>
+            <b>{fmtNumber(Math.max(0, 100 - regimeScore), 0)}<small>/100</small></b>
             <em>Defensive pressure</em>
           </button>
           <button className="regime-segment risk-on active" type="button" onClick={() => onOpenView("analysis")}>
             <span>{regime.label}</span>
-            <b>{fmtNumber(regime.score, 0)}<small>/100</small></b>
+            <b>{fmtNumber(regimeScore, 0)}<small>/100</small></b>
             <em>{payload.eligible_for_real_research ? "Real-data review enabled" : "Demo-only regime proxy"}</em>
           </button>
           <button className="regime-segment neutral" type="button" onClick={() => onOpenView("opportunities")}>
             <span>Neutral</span>
-            <b>{fmtNumber(Math.max(0, 100 - Math.abs(regime.score - 50) * 2), 0)}<small>/100</small></b>
+            <b>{fmtNumber(Math.max(0, 100 - Math.abs(regimeScore - 50) * 2), 0)}<small>/100</small></b>
             <em>Balance signal</em>
           </button>
         </div>
-        <div className="regime-scale" role="img" aria-label={`Regime score ${fmtNumber(regime.score, 0)} on a 0 to 100 scale`}>
+        <div className="regime-scale" role="img" aria-label={`Regime score ${fmtNumber(regimeScore, 0)} on a 0 to 100 scale`}>
           <div className="regime-scale__track">
-            <i className="regime-scale__needle" style={{ left: `${Math.max(0, Math.min(100, regime.score))}%` }} />
+            <i className="regime-scale__needle" style={{ left: `${Math.max(0, Math.min(100, regimeScore))}%` }} />
           </div>
           <div className="regime-scale__legend">
             <span>0 · Risk-off</span>
-            <b>Score {fmtNumber(regime.score, 0)}</b>
+            <b>Score {fmtNumber(regimeScore, 0)}</b>
             <span>100 · Risk-on</span>
           </div>
         </div>
@@ -80,6 +95,7 @@ export function CommandCenter({
           ))}
         </div>
       </section>
+      )}
 
       {regime.warnings.length > 0 && <div className="warning-list command-warnings">{regime.warnings.map((warning) => <span key={warning}>{warning}</span>)}</div>}
       {!payload.eligible_for_real_research && (

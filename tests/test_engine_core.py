@@ -111,9 +111,13 @@ def test_hold_signal_copy_does_not_confuse_action_with_mandate_label():
     assert sig["action"] == "HOLD"
     assert "Balanced —" not in headline
     assert "Neutral evidence —" in headline
-    assert "Forecast transparency check" in headline
+    # Below-chance measured accuracy now GATES the forecast weight to zero
+    # (it used to keep full weight behind a polite transparency clause).
     assert "Model projects" not in headline
-    assert "no measured edge" in " ".join(sig["caveats"])
+    caveat_text = " ".join(sig["caveats"])
+    assert "gated" in caveat_text and "38%" in caveat_text
+    fc_component = next(c for c in sig["components"] if c["name"] == "forecast")
+    assert fc_component["contribution"] == 0.0
 
 
 def test_short_forecast_returns_expected_shape():

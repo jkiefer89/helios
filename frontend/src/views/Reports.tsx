@@ -34,7 +34,23 @@ export function Reports({
   const [snapshotError, setSnapshotError] = useState("");
   const [savingSnapshot, setSavingSnapshot] = useState(false);
   const [aiNarrative, setAiNarrative] = useState("");
-  const [includeAiNarrative, setIncludeAiNarrative] = useState(true);
+  // Default OFF: saving a report must never invoke the cloud provider
+  // without explicit intent (review finding). The choice persists.
+  const [includeAiNarrative, setIncludeAiNarrative] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("helios_report_ai") === "on";
+    } catch {
+      return false;
+    }
+  });
+  const toggleAiNarrative = (checked: boolean) => {
+    setIncludeAiNarrative(checked);
+    try {
+      localStorage.setItem("helios_report_ai", checked ? "on" : "off");
+    } catch {
+      // best-effort persistence
+    }
+  };
   const [preparedFor, setPreparedFor] = useState("");
   const [preparedBy, setPreparedBy] = useState("");
   const [reviewer, setReviewer] = useState("");
@@ -122,7 +138,7 @@ export function Reports({
         <div><div className="section-label">Analysis-Only Report</div><h1>Institutional Report System</h1><p>Advisor/client-ready reports with saved history, versioning, audit trails, disclosure blocks, and print/PDF layouts.</p></div>
         <form className="toolbar" onSubmit={(event) => { event.preventDefault(); build(target || defaultTarget); }}>
           <label>Target<TerminalSelect ariaLabel="Report target" value={target} onChange={setTarget} options={options} /></label>
-          <label className="check"><input type="checkbox" checked={includeAiNarrative} onChange={(event) => setIncludeAiNarrative(event.target.checked)} /> Include AI narrative when available</label>
+          <label className="check"><input type="checkbox" checked={includeAiNarrative} onChange={(event) => toggleAiNarrative(event.target.checked)} /> Generate AI narrative on save (calls the cloud provider)</label>
           <button type="submit">Build preview</button>
           <button type="button" onClick={() => void saveSnapshot()} disabled={!payload || savingSnapshot}>
             {savingSnapshot ? "Saving..." : "Save snapshot"}
