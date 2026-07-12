@@ -1038,6 +1038,56 @@ export interface ModelValidationResponse {
   disclaimer: string;
 }
 
+export interface LedgerAccount {
+  account_id: string;
+  display_name: string;
+  model_id: string;
+  created_at: string;
+}
+
+export interface LedgerActual {
+  status: string;
+  account_id?: string;
+  label?: string;
+  note?: string;
+  snapshot_count?: number;
+  period?: { start: string; end: string; days: number };
+  twr_net_pct?: number;
+  twr_gross_pct?: number;
+  fees_usd?: number;
+  external_flows_usd?: number;
+  avg_cash_weight_pct?: number | null;
+  cash_drag_est_pct?: number | null;
+  n_periods?: number;
+  periods?: Array<Record<string, unknown>>;
+  basis?: string;
+}
+
+export interface LedgerShortfallRow {
+  decision_id: string;
+  ticker: string;
+  side: string;
+  status: string;
+  n_fills?: number;
+  shares?: number;
+  avg_fill_price?: number;
+  decision_date?: string;
+  decision_close?: number;
+  shortfall_bps?: number;
+  fees_usd?: number;
+  basis?: string;
+}
+
+export interface LedgerPerformanceResponse {
+  actual: LedgerActual;
+  paper?: { status: string; model_id?: string; model_name?: string; label?: string;
+    return_pct?: number; series_basis?: string; note?: string };
+  gap_pct?: number;
+  gap_note?: string;
+  shortfall: LedgerShortfallRow[];
+  disclaimer?: string;
+}
+
 export interface ReportResponse extends ProvenancePayload {
   kind: "instrument" | "model" | string;
   title: string;

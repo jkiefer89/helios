@@ -28,7 +28,7 @@ except Exception:  # pragma: no cover - exercised when dependency install is bro
     Fernet = None
     InvalidToken = Exception
 
-SCHEMA_VERSION = 7  # 6: + decision_journal; 7: + macro_history (daily stance/GPR readings)
+SCHEMA_VERSION = 8  # 6: + decision_journal; 7: + macro_history; 8: + ledger (fills/snapshots/positions/accounts) + fundamentals_snapshots (PIT)
 REAL_SOURCES = {"live", "upload"}
 DISABLED_VALUES = {"", "0", "false", "off", "disabled", "none"}
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[1] / ".helios" / "helios.db"
@@ -1574,6 +1574,259 @@ class SQLiteStore:
         except Exception:
             return []
 
+    # ------------------------------------------------------------------ #
+    # Ledger: fills, account snapshots/positions, account->model mapping
+    # ------------------------------------------------------------------ #
+    def record_fills(self, fills: list[dict[str, Any]]) -> dict[str, Any]:
+        """Idempotent fill import: the dedupe key makes CSV re-imports no-ops."""
+        if not self.available:
+            return {"inserted": 0, "duplicates": 0, "warning": self.warning}
+        inserted = duplicates = 0
+        try:
+            with self._connect() as conn:
+                for fill in fills:
+                    cur = conn.execute(
+                        """
+                        INSERT OR IGNORE INTO trade_fills(
+                          fill_id, account_id, trade_date, settle_date, ticker, side,
+                          shares, price, fees, amount, source_file, decision_id,
+                          dedupe_key, created_at, metadata_json
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            str(fill["fill_id"])[:64],
+                            redact_secrets(str(fill["account_id"]))[:64],
+                            str(fill["trade_date"])[:10],
+                            str(fill.get("settle_date") or "")[:10],
+                            str(fill.get("ticker") or "").upper()[:16],
+                            str(fill["side"])[:12],
+                            float(fill.get("shares") or 0.0),
+                            float(fill.get("price") or 0.0),
+                            float(fill.get("fees") or 0.0),
+                            (float(fill["amount"]) if fill.get("amount") is not None else None),
+                            self._store_text(str(fill.get("source_file") or "")[:120]),
+                            str(fill.get("decision_id") or "")[:64],
+                            str(fill["dedupe_key"])[:64],
+                            utc_now(),
+                            self._store_json(fill.get("metadata") or {}),
+                        ),
+                    )
+                    if cur.rowcount:
+                        inserted += 1
+                    else:
+                        duplicates += 1
+            return {"inserted": inserted, "duplicates": duplicates}
+        except Exception as exc:
+            self.warning = f"Could not record fills: {exc}"
+            return {"inserted": inserted, "duplicates": duplicates, "warning": str(exc)}
+
+    def fills(self, account_id: str = "", limit: int = 2000) -> list[dict[str, Any]]:
+        if not self.available:
+            return []
+        try:
+            with self._connect() as conn:
+                if account_id:
+                    rows = conn.execute(
+                        "SELECT * FROM trade_fills WHERE account_id = ? "
+                        "ORDER BY trade_date ASC, fill_id ASC LIMIT ?",
+                        (account_id, max(1, min(int(limit), 20000))),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT * FROM trade_fills ORDER BY trade_date ASC, fill_id ASC LIMIT ?",
+                        (max(1, min(int(limit), 20000)),),
+                    ).fetchall()
+                return [self._fill_row(row) for row in rows]
+        except Exception:
+            return []
+
+    def _fill_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "fill_id": row["fill_id"],
+            "account_id": row["account_id"],
+            "trade_date": row["trade_date"],
+            "settle_date": row["settle_date"],
+            "ticker": row["ticker"],
+            "side": row["side"],
+            "shares": row["shares"],
+            "price": row["price"],
+            "fees": row["fees"],
+            "amount": row["amount"],
+            "source_file": self._load_text(row["source_file"]),
+            "decision_id": row["decision_id"],
+            "created_at": row["created_at"],
+            "metadata": self._load_json(row["metadata_json"]),
+        }
+
+    def record_account_snapshot(self, snapshot: dict[str, Any],
+                                positions: list[dict[str, Any]] | None = None) -> None:
+        if not self.available:
+            return
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO account_snapshots(
+                      account_id, as_of, cash, total_value, source, created_at, metadata_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        redact_secrets(str(snapshot["account_id"]))[:64],
+                        str(snapshot["as_of"])[:10],
+                        (float(snapshot["cash"]) if snapshot.get("cash") is not None else None),
+                        float(snapshot["total_value"]),
+                        str(snapshot.get("source") or "")[:64],
+                        utc_now(),
+                        self._store_json(snapshot.get("metadata") or {}),
+                    ),
+                )
+                conn.execute(
+                    "DELETE FROM account_positions WHERE account_id = ? AND as_of = ?",
+                    (str(snapshot["account_id"])[:64], str(snapshot["as_of"])[:10]),
+                )
+                for pos in positions or []:
+                    conn.execute(
+                        """
+                        INSERT OR REPLACE INTO account_positions(
+                          account_id, as_of, ticker, shares, price, market_value, cost_basis
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            str(snapshot["account_id"])[:64],
+                            str(snapshot["as_of"])[:10],
+                            str(pos.get("ticker") or "").upper()[:16],
+                            float(pos.get("shares") or 0.0),
+                            (float(pos["price"]) if pos.get("price") is not None else None),
+                            (float(pos["market_value"]) if pos.get("market_value") is not None else None),
+                            (float(pos["cost_basis"]) if pos.get("cost_basis") is not None else None),
+                        ),
+                    )
+        except Exception as exc:
+            self.warning = f"Could not record account snapshot: {exc}"
+
+    def account_snapshots(self, account_id: str) -> list[dict[str, Any]]:
+        if not self.available:
+            return []
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT * FROM account_snapshots WHERE account_id = ? ORDER BY as_of ASC",
+                    (account_id,),
+                ).fetchall()
+                return [{
+                    "account_id": row["account_id"], "as_of": row["as_of"],
+                    "cash": row["cash"], "total_value": row["total_value"],
+                    "source": row["source"], "created_at": row["created_at"],
+                    "metadata": self._load_json(row["metadata_json"]),
+                } for row in rows]
+        except Exception:
+            return []
+
+    def upsert_ledger_account(self, account_id: str, display_name: str = "",
+                              model_id: str = "") -> None:
+        if not self.available:
+            return
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO ledger_accounts(account_id, display_name, model_id, created_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(account_id) DO UPDATE SET
+                      display_name = CASE WHEN excluded.display_name != ''
+                                          THEN excluded.display_name
+                                          ELSE ledger_accounts.display_name END,
+                      model_id = CASE WHEN excluded.model_id != ''
+                                      THEN excluded.model_id
+                                      ELSE ledger_accounts.model_id END
+                    """,
+                    (redact_secrets(str(account_id))[:64],
+                     self._store_text(str(display_name)[:80]),
+                     str(model_id)[:64], utc_now()),
+                )
+        except Exception as exc:
+            self.warning = f"Could not upsert ledger account: {exc}"
+
+    def ledger_accounts(self) -> list[dict[str, Any]]:
+        if not self.available:
+            return []
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT * FROM ledger_accounts ORDER BY account_id ASC").fetchall()
+                return [{
+                    "account_id": row["account_id"],
+                    "display_name": self._load_text(row["display_name"]),
+                    "model_id": row["model_id"],
+                    "created_at": row["created_at"],
+                } for row in rows]
+        except Exception:
+            return []
+
+    def delete_ledger_account(self, account_id: str) -> dict[str, Any]:
+        """Remove an account and ALL its ledger rows (undo for a bad import)."""
+        if not self.available:
+            return {"deleted": False, "warning": self.warning}
+        try:
+            with self._connect() as conn:
+                fills = conn.execute("DELETE FROM trade_fills WHERE account_id = ?", (account_id,)).rowcount
+                snaps = conn.execute("DELETE FROM account_snapshots WHERE account_id = ?", (account_id,)).rowcount
+                conn.execute("DELETE FROM account_positions WHERE account_id = ?", (account_id,))
+                conn.execute("DELETE FROM ledger_accounts WHERE account_id = ?", (account_id,))
+            return {"deleted": True, "fills_removed": fills, "snapshots_removed": snaps}
+        except Exception as exc:
+            self.warning = f"Could not delete ledger account: {exc}"
+            return {"deleted": False, "warning": str(exc)}
+
+    # ------------------------------------------------------------------ #
+    # Point-in-time fundamentals: what Helios KNEW on each date
+    # ------------------------------------------------------------------ #
+    def record_fundamentals_snapshot(self, snap: dict[str, Any]) -> None:
+        if not self.available:
+            return
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO fundamentals_snapshots(
+                      symbol, as_of, dividend_yield, forward_pe, trailing_pe,
+                      earnings_growth, growth_basis, sector, source, roe,
+                      profit_margin, debt_to_equity, revenue_growth, current_price,
+                      target_mean_price, analyst_rating, n_analysts, next_earnings_date
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(snap["symbol"]).upper()[:16],
+                        str(snap["as_of"])[:10],
+                        snap.get("dividend_yield"), snap.get("forward_pe"),
+                        snap.get("trailing_pe"), snap.get("earnings_growth"),
+                        str(snap.get("growth_basis") or "")[:40],
+                        str(snap.get("sector") or "")[:60],
+                        str(snap.get("source") or "")[:60],
+                        snap.get("roe"), snap.get("profit_margin"),
+                        snap.get("debt_to_equity"), snap.get("revenue_growth"),
+                        snap.get("current_price"), snap.get("target_mean_price"),
+                        snap.get("analyst_rating"), snap.get("n_analysts"),
+                        str(snap.get("next_earnings_date") or "")[:10],
+                    ),
+                )
+        except Exception:
+            pass  # PIT capture is best-effort; a write failure never blocks a fetch
+
+    def fundamentals_history(self, symbol: str, limit: int = 400) -> list[dict[str, Any]]:
+        if not self.available:
+            return []
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT * FROM fundamentals_snapshots WHERE symbol = ? "
+                    "ORDER BY as_of ASC LIMIT ?",
+                    (str(symbol).upper(), max(1, min(int(limit), 5000))),
+                ).fetchall()
+                return [dict(row) for row in rows]
+        except Exception:
+            return []
+
     def save_report_snapshot(self, snapshot: dict[str, Any]) -> dict[str, Any]:
         if not self.available:
             return {"saved": False, "warning": self.warning}
@@ -1863,6 +2116,93 @@ def _create_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    # --- Ledger (minimum-viable accounting: fills, snapshots, positions) --- #
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ledger_accounts (
+          account_id TEXT PRIMARY KEY,
+          display_name TEXT NOT NULL DEFAULT '',
+          model_id TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          metadata_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS trade_fills (
+          fill_id TEXT PRIMARY KEY,
+          account_id TEXT NOT NULL,
+          trade_date TEXT NOT NULL,
+          settle_date TEXT NOT NULL DEFAULT '',
+          ticker TEXT NOT NULL DEFAULT '',
+          side TEXT NOT NULL,
+          shares REAL NOT NULL DEFAULT 0,
+          price REAL NOT NULL DEFAULT 0,
+          fees REAL NOT NULL DEFAULT 0,
+          amount REAL,
+          source_file TEXT NOT NULL DEFAULT '',
+          decision_id TEXT NOT NULL DEFAULT '',
+          dedupe_key TEXT NOT NULL UNIQUE,
+          created_at TEXT NOT NULL,
+          metadata_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS account_snapshots (
+          account_id TEXT NOT NULL,
+          as_of TEXT NOT NULL,
+          cash REAL,
+          total_value REAL NOT NULL,
+          source TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          metadata_json TEXT NOT NULL DEFAULT '{}',
+          PRIMARY KEY (account_id, as_of)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS account_positions (
+          account_id TEXT NOT NULL,
+          as_of TEXT NOT NULL,
+          ticker TEXT NOT NULL,
+          shares REAL NOT NULL DEFAULT 0,
+          price REAL,
+          market_value REAL,
+          cost_basis REAL,
+          PRIMARY KEY (account_id, as_of, ticker)
+        )
+        """
+    )
+    # --- Point-in-time fundamentals: what Helios KNEW on each date --- #
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS fundamentals_snapshots (
+          symbol TEXT NOT NULL,
+          as_of TEXT NOT NULL,
+          dividend_yield REAL,
+          forward_pe REAL,
+          trailing_pe REAL,
+          earnings_growth REAL,
+          growth_basis TEXT NOT NULL DEFAULT '',
+          sector TEXT NOT NULL DEFAULT '',
+          source TEXT NOT NULL DEFAULT '',
+          roe REAL,
+          profit_margin REAL,
+          debt_to_equity REAL,
+          revenue_growth REAL,
+          current_price REAL,
+          target_mean_price REAL,
+          analyst_rating REAL,
+          n_analysts INTEGER,
+          next_earnings_date TEXT NOT NULL DEFAULT '',
+          PRIMARY KEY (symbol, as_of)
+        )
+        """
+    )
     conn.execute(
         "INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES (?, ?)",
         (SCHEMA_VERSION, utc_now()),
@@ -1874,6 +2214,9 @@ def _create_schema(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_report_snapshots_target ON report_snapshots(target_kind, target_id, created_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_model_governance_model ON model_governance_events(model_id, created_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_data_quality_alerts_status ON data_quality_alerts(status, category, severity)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_trade_fills_account_date ON trade_fills(account_id, trade_date)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_trade_fills_decision ON trade_fills(decision_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_fundamentals_snapshots_symbol ON fundamentals_snapshots(symbol, as_of)")
 
 
 def _check_schema_version(conn: sqlite3.Connection) -> None:

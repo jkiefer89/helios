@@ -23,7 +23,7 @@ import json
 import os
 import threading
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from . import data  # reuse the existing yfinance guard (_yf / HAS_YF)
 
@@ -90,6 +90,12 @@ class Fundamentals:
     analyst_rating: float | None = None     # 1 strong buy .. 5 sell (Yahoo scale)
     n_analysts: int | None = None
     next_earnings_date: str = ""            # next scheduled report (YYYY-MM-DD)
+    # Observation date (UTC fetch date): cached-vs-fresh becomes visible, and
+    # the PIT snapshot table records what Helios KNEW on this date.
+    as_of: str = ""
+    # Cross-provider disagreements (>25% on overlapping numeric fields) —
+    # warnings, never blocks; mechanizes the unit-semantics bug class.
+    reconciliation_warnings: list = field(default_factory=list)
 
     @property
     def usable(self) -> bool:
@@ -459,6 +465,30 @@ def _merge_raw(primary: dict, filler: dict) -> dict:
     return merged
 
 
+# Fields where two providers reporting the same thing >25% apart usually means
+# a unit/semantics bug or stale vendor data — exactly the class of corruption
+# previous review passes caught only by hand (D/E percent-vs-ratio, yield
+# double-division). Warn, never block.
+_RECONCILE_FIELDS = ("trailing_pe", "dividend_yield", "debt_to_equity")
+_RECONCILE_TOLERANCE = 0.25
+
+
+def _reconcile(raws: list[tuple[str, dict]]) -> list[str]:
+    warnings: list[str] = []
+    for field_name in _RECONCILE_FIELDS:
+        vals = [(name, float(raw[field_name])) for name, raw in raws
+                if isinstance(raw.get(field_name), (int, float))
+                and not isinstance(raw.get(field_name), bool)]
+        if len(vals) < 2:
+            continue
+        nums = [v for _, v in vals]
+        lo, hi = min(nums), max(nums)
+        if hi > 0 and lo >= 0 and (hi - lo) / hi > _RECONCILE_TOLERANCE:
+            detail = "; ".join(f"{name} {value:.4g}" for name, value in vals)
+            warnings.append(f"{field_name}: providers disagree ({detail}) — verify before relying on it.")
+    return warnings
+
+
 def _auto_provider(ticker: str) -> dict:
     """Provider chain, best-first with field-level gap filling:
     FMP consensus (if keyed) > Intrinio standardized (if keyed) > yfinance.
@@ -466,12 +496,22 @@ def _auto_provider(ticker: str) -> dict:
     import time
     _TICKER_DEADLINE.value = time.monotonic() + PER_TICKER_BUDGET_S
     try:
+        raws: list[tuple[str, dict]] = []
         merged: dict = {}
         if os.environ.get("HELIOS_FMP_KEY", "").strip():
-            merged = _merge_raw(merged, _fmp_provider(ticker))
+            raw = _fmp_provider(ticker)
+            raws.append(("fmp", raw))
+            merged = _merge_raw(merged, raw)
         if os.environ.get("HELIOS_INTRINIO_KEY", "").strip():
-            merged = _merge_raw(merged, _intrinio_provider(ticker))
-        merged = _merge_raw(merged, _yfinance_provider(ticker))
+            raw = _intrinio_provider(ticker)
+            raws.append(("intrinio", raw))
+            merged = _merge_raw(merged, raw)
+        raw = _yfinance_provider(ticker)
+        raws.append(("yfinance", raw))
+        merged = _merge_raw(merged, raw)
+        recon = _reconcile([(name, r) for name, r in raws if r])
+        if recon:
+            merged["reconciliation_warnings"] = recon
         return merged
     finally:
         _TICKER_DEADLINE.value = None
@@ -497,6 +537,39 @@ def _cache_now() -> float:
 def invalidate_cache() -> None:
     with _PROVIDER_LOCK:
         _FETCH_CACHE.clear()
+
+
+def _record_pit_snapshot(result: "Fundamentals") -> None:
+    """Append today's observation to the point-in-time store (best-effort).
+
+    Zero vendor cost: Helios's own daily operation becomes the PIT database
+    that later validates the strategic track honestly — no retrospective
+    backtest has to fake what was knowable (review finding). Lazy import
+    avoids an engine import cycle; failure never blocks a fetch."""
+    try:
+        from . import persistence
+        persistence.get_store().record_fundamentals_snapshot({
+            "symbol": result.ticker,
+            "as_of": result.as_of or datetime.date.today().isoformat(),
+            "dividend_yield": result.dividend_yield,
+            "forward_pe": result.forward_pe,
+            "trailing_pe": result.trailing_pe,
+            "earnings_growth": result.earnings_growth,
+            "growth_basis": result.growth_basis,
+            "sector": result.sector,
+            "source": result.source,
+            "roe": result.roe,
+            "profit_margin": result.profit_margin,
+            "debt_to_equity": result.debt_to_equity,
+            "revenue_growth": result.revenue_growth,
+            "current_price": result.current_price,
+            "target_mean_price": result.target_mean_price,
+            "analyst_rating": result.analyst_rating,
+            "n_analysts": result.n_analysts,
+            "next_earnings_date": result.next_earnings_date,
+        })
+    except Exception:
+        pass
 
 
 def fetch_cached(ticker: str) -> "Fundamentals | None":
@@ -572,7 +645,11 @@ def fetch(ticker: str, provider=None) -> Fundamentals:
                         and raw["n_analysts"] == raw["n_analysts"]          # NaN guard
                         and abs(raw["n_analysts"]) < 10_000 else None),
             next_earnings_date=str(raw.get("next_earnings_date") or ""),
+            as_of=datetime.date.today().isoformat(),
+            reconciliation_warnings=list(raw.get("reconciliation_warnings") or []),
         )
+    if use_default and result.usable:
+        _record_pit_snapshot(result)
     if use_default:  # empties negative-cache briefly; usable answers cache long
         with _PROVIDER_LOCK:
             if len(_FETCH_CACHE) >= _FETCH_CACHE_MAX:

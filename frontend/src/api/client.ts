@@ -31,6 +31,8 @@ import type {
   SignalJournalResponse,
   StrategyResponse,
   TickersResponse,
+  LedgerAccount,
+  LedgerPerformanceResponse,
 } from "./types";
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
@@ -210,6 +212,22 @@ export const api = {
   aiMacroBrief: (payload: Record<string, unknown>, regenerate = false) =>
     aiPost("/api/ai/macro/brief", payload, undefined, regenerate),
   listDecisions: (limit = 200) => request<DecisionsResponse>(`/api/decisions?limit=${limit}`),
+  ledgerAccounts: () => request<{ accounts: LedgerAccount[] }>("/api/ledger/accounts"),
+  ledgerPerformance: (account: string) =>
+    request<LedgerPerformanceResponse>(`/api/ledger/performance?account=${encodeURIComponent(account)}`),
+  ledgerMapAccount: (body: { account_id: string; model_id: string; display_name?: string }) =>
+    request<{ accounts: LedgerAccount[] }>("/api/ledger/account/map", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  ledgerUpload: (kind: "fills" | "positions", file: File, accountId: string, asOf?: string) => {
+    const form = new FormData();
+    form.append("file", file);
+    form.append("account_id", accountId);
+    if (asOf) form.append("as_of", asOf);
+    return request<Record<string, unknown>>(`/api/ledger/${kind}/upload`, { method: "POST", body: form });
+  },
   recordDecision: (body: {
     target_kind: string;
     target_id: string;

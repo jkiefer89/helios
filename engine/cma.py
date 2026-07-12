@@ -138,6 +138,7 @@ def instrument_forward(ticker: str, fnd, mandate_key: str = "balanced") -> dict:
         "fair_pe_anchor": hr.blocks.get("fair_pe_anchor"),
         "anchor_as_of": hr.blocks.get("anchor_as_of", ""),
         "source": getattr(fnd, "source", "none"),
+        "fundamentals_as_of": getattr(fnd, "as_of", "") or "",
         "sector": getattr(fnd, "sector", "") or "",
         "method": "building_block_cma",
         "assumptions_version": _macro.SECTOR_ANCHORS_AS_OF,
@@ -146,6 +147,10 @@ def instrument_forward(ticker: str, fnd, mandate_key: str = "balanced") -> dict:
     if out["usable"]:
         out["expected_return_pct"] = round(hr.expected_return * 100.0, 2)
         out["gap_vs_anchor_pct"] = round((hr.expected_return - anchor) * 100.0, 2)
+    recon = list(getattr(fnd, "reconciliation_warnings", None) or [])
+    if recon:
+        # Cross-provider disagreement rides with the number it questions.
+        out["reconciliation_warnings"] = recon[:5]
     # Quality context (shown, and mildly scored, only when present).
     quality = {}
     for field in ("roe", "profit_margin", "debt_to_equity", "revenue_growth"):

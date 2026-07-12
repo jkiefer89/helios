@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
-import type { DecisionBucketStats, DecisionEntry, DecisionsResponse } from "../api/types";
+import type {
+  DecisionBucketStats, DecisionEntry, DecisionsResponse,
+  LedgerAccount, LedgerPerformanceResponse, ModelSummary,
+} from "../api/types";
 import { Panel, StatTile } from "../components/cards/Panel";
 import { EmptyState } from "../components/empty-states/EmptyState";
-import { fmtNumber, fmtTimestamp } from "../utils/format";
+import { fmtMoney, fmtNumber, fmtTimestamp } from "../utils/format";
 
 const ACTIONS = ["BUY", "ADD", "HOLD", "TRIM", "SELL"] as const;
 
@@ -154,6 +157,8 @@ export function Decisions() {
           </Panel>
       </section>
 
+      <LedgerSection />
+
       <Panel title="Decisions" meta={`${decisions.length} recorded`}>
         {error && <div className="notice danger" role="alert">{error}</div>}
         {loading && !data ? (
@@ -208,4 +213,159 @@ function outcomeCell(d: DecisionEntry, horizon: string) {
   const ret = o.target_return_pct;
   const mark = o.hit == null ? "" : o.hit ? " ✓" : " ✗";
   return `${ret >= 0 ? "+" : ""}${fmtNumber(ret, 1)}%${mark}`;
+}
+
+/**
+ * Ledger — ACTUAL account outcomes from custodian exports, next to the paper
+ * research series. Fills/positions CSVs import idempotently; two dated
+ * snapshots unlock a real Modified-Dietz TWR (gross + net of observed fees).
+ */
+function LedgerSection() {
+  const [accounts, setAccounts] = useState<LedgerAccount[]>([]);
+  const [models, setModels] = useState<ModelSummary[]>([]);
+  const [accountId, setAccountId] = useState("");
+  const [perf, setPerf] = useState<LedgerPerformanceResponse | null>(null);
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [asOf, setAsOf] = useState("");
+  const [newAccount, setNewAccount] = useState("");
+
+  const refreshAccounts = useCallback(async () => {
+    try {
+      const [acct, mods] = await Promise.all([api.ledgerAccounts(), api.models()]);
+      setAccounts(acct.accounts);
+      setModels(mods.models);
+      if (!accountId && acct.accounts.length) setAccountId(acct.accounts[0].account_id);
+    } catch {
+      // accounts list is optional context; uploads surface their own errors
+    }
+  }, [accountId]);
+
+  useEffect(() => { void refreshAccounts(); }, [refreshAccounts]);
+
+  const loadPerformance = useCallback(async (id: string) => {
+    if (!id) return;
+    try {
+      setPerf(await api.ledgerPerformance(id));
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Could not load ledger performance.");
+    }
+  }, []);
+
+  useEffect(() => { if (accountId) void loadPerformance(accountId); }, [accountId, loadPerformance]);
+
+  const upload = async (kind: "fills" | "positions", file: File | null) => {
+    const target = accountId || newAccount.trim();
+    if (!file || !target || busy) {
+      if (!target) setMessage("Enter or select an account id first.");
+      return;
+    }
+    setBusy(true);
+    setMessage("");
+    try {
+      const result = await api.ledgerUpload(kind, file, target, kind === "positions" ? asOf : undefined);
+      const warnings = Array.isArray(result.warnings) ? result.warnings.length : 0;
+      setMessage(`${kind === "fills"
+        ? `Imported ${String(result.inserted)} fill(s) (${String(result.duplicates)} duplicate, ${String(result.skipped_non_trade)} non-trade)`
+        : `Snapshot ${String(result.as_of)} saved: ${fmtMoney(Number(result.total_value))} across ${String(result.n_positions)} positions`}${warnings ? ` · ${warnings} warning(s)` : ""}.`);
+      await refreshAccounts();
+      if (!accountId) setAccountId(target);
+      await loadPerformance(target);
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Upload failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const mapModel = async (modelId: string) => {
+    if (!accountId) return;
+    try {
+      const result = await api.ledgerMapAccount({ account_id: accountId, model_id: modelId });
+      setAccounts(result.accounts);
+      await loadPerformance(accountId);
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Could not map the account.");
+    }
+  };
+
+  const actual = perf?.actual;
+  const paper = perf?.paper;
+  const mappedModel = accounts.find((a) => a.account_id === accountId)?.model_id || "";
+  const shortfall = (perf?.shortfall || []).filter((row) => row.status === "measured");
+
+  return (
+    <Panel title="Ledger — Actual vs Paper" meta="custodian fills + snapshots · Modified-Dietz TWR">
+      <div className="decision-form">
+        <div className="decision-form__row">
+          <select value={accountId} onChange={(e) => setAccountId(e.target.value)} aria-label="Ledger account">
+            <option value="">{accounts.length ? "Select account" : "No accounts yet"}</option>
+            {accounts.map((a) => <option key={a.account_id} value={a.account_id}>{a.display_name || a.account_id}</option>)}
+          </select>
+          <input value={newAccount} onChange={(e) => setNewAccount(e.target.value)}
+            placeholder="…or new account id" aria-label="New account id" />
+          <select value={mappedModel} onChange={(e) => void mapModel(e.target.value)}
+            aria-label="Mapped model" disabled={!accountId}>
+            <option value="">Map to model…</option>
+            {models.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+          </select>
+        </div>
+        <div className="decision-form__row">
+          <label>Fills CSV
+            <input type="file" accept=".csv" disabled={busy}
+              onChange={(e) => { void upload("fills", e.target.files?.[0] ?? null); e.target.value = ""; }} />
+          </label>
+          <label>Positions CSV
+            <input type="file" accept=".csv" disabled={busy}
+              onChange={(e) => { void upload("positions", e.target.files?.[0] ?? null); e.target.value = ""; }} />
+          </label>
+          <input value={asOf} onChange={(e) => setAsOf(e.target.value)}
+            placeholder="Positions as-of (YYYY-MM-DD)" aria-label="Positions as-of date" />
+        </div>
+        {message && <p className="forecast-note">{message}</p>}
+      </div>
+
+      {actual && actual.status === "measured" ? (
+        <>
+          <div className="stat-grid">
+            <StatTile label="Actual TWR (net)" value={`${fmtNumber(actual.twr_net_pct, 2)}%`}
+              tone={(actual.twr_net_pct ?? 0) >= 0 ? "positive" : "negative"} />
+            <StatTile label="Actual TWR (gross)" value={`${fmtNumber(actual.twr_gross_pct, 2)}%`} />
+            <StatTile label="Fees observed" value={fmtMoney(actual.fees_usd ?? 0)} />
+            <StatTile label="Paper (research series)"
+              value={paper?.status === "measured" ? `${fmtNumber(paper.return_pct, 2)}%` : paper?.status === "no_model_mapped" ? "map a model" : "—"} />
+            <StatTile label="Actual − paper gap"
+              value={perf?.gap_pct != null ? `${fmtNumber(perf.gap_pct, 2)}%` : "—"}
+              tone={perf?.gap_pct != null ? (perf.gap_pct >= 0 ? "positive" : "negative") : undefined} />
+          </div>
+          <p className="forecast-note">
+            {actual.period ? `${actual.period.start} → ${actual.period.end} · ${actual.n_periods} Dietz sub-period(s)` : ""}
+            {actual.cash_drag_est_pct != null ? ` · est. cash drag ${fmtNumber(actual.cash_drag_est_pct, 2)}%` : ""}
+            {" — actual numbers from custodian data; paper stays a cost-free research construction."}
+          </p>
+        </>
+      ) : actual ? (
+        <EmptyState title={actual.status === "insufficient_snapshots" ? "Awaiting snapshots" : "No actual performance yet"}
+          body={actual.note || "Upload custodian fills and at least two dated positions snapshots to measure a real return."} />
+      ) : (
+        <EmptyState title="No ledger data" body="Upload custodian fills and positions CSVs to start measuring actual outcomes." />
+      )}
+
+      {shortfall.length > 0 && (
+        <div className="terminal-table" tabIndex={0} aria-label="Implementation shortfall table">
+          <div className="terminal-table__head"><span>Decision</span><span>Ticker</span><span>Side</span><span>Avg fill</span><span>Decision close</span><span>Shortfall</span></div>
+          {shortfall.slice(0, 8).map((row) => (
+            <div className="table-row" key={`${row.decision_id}-${row.ticker}-${row.side}`}>
+              <span>{row.decision_date}<small>{row.decision_id.slice(0, 12)}</small></span>
+              <strong>{row.ticker}</strong>
+              <span>{row.side}</span>
+              <span>{fmtNumber(row.avg_fill_price, 2)}</span>
+              <span>{fmtNumber(row.decision_close, 2)}</span>
+              <span className={(row.shortfall_bps ?? 0) > 0 ? "tone-negative" : "tone-positive"}>{fmtNumber(row.shortfall_bps, 0)} bps</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </Panel>
+  );
 }
