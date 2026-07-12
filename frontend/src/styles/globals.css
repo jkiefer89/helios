@@ -871,6 +871,11 @@ kbd {
   padding: 0 1.1rem;
   overflow-x: auto;
   scrollbar-width: none;
+  /* Overflow must be SIGNALED at every width: with the scrollbar hidden and
+     no fade, clipped views (Risk, Reports) were simply invisible at 1280px
+     (review finding). */
+  -webkit-mask-image: linear-gradient(90deg, #000 92%, transparent);
+  mask-image: linear-gradient(90deg, #000 92%, transparent);
 }
 
 .workspace-nav::-webkit-scrollbar {
@@ -6980,6 +6985,30 @@ button.locked-table-row:hover {
 
   .tool-icon {
     display: none;
+  }
+
+  /* Recover ~650px so the 13 nav items fit at 1280px: group names and
+     button icons become title-attribute hover hints instead of always-on
+     chrome, and paddings tighten. */
+  .nav-group__label {
+    display: none;
+  }
+
+  .workspace-nav {
+    gap: 0.6rem;
+  }
+
+  .workspace-nav .nav-icon {
+    display: none;
+  }
+
+  .workspace-nav button {
+    padding: 0 0.4rem;
+    font-size: 0.73rem;
+  }
+
+  .nav-group + .nav-group::before {
+    margin-right: 0.55rem;
   }
 }
 

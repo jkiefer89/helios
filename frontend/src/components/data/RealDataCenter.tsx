@@ -137,7 +137,9 @@ export function RealDataCenter({
         <>
           <Panel title="Persisted Instruments" meta={`${realRows.length} live/upload histories`}>
             {realRows.length === 0 ? (
-              <EmptyState title="No persisted real histories" body="Fetch a live ticker or upload a price CSV to create durable local research data." />
+              <EmptyState title="No persisted real histories" body="Fetch a live ticker or upload a price CSV to create durable local research data.">
+                <button type="button" onClick={() => window.dispatchEvent(new Event("helios:reveal-data-intake"))}>Open data intake</button>
+              </EmptyState>
             ) : (
               <div className="terminal-table real-data-table" tabIndex={0} aria-label="Persisted real data instruments">
                 <div className="terminal-table__head">

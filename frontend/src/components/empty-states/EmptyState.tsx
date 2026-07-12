@@ -1,4 +1,8 @@
-export function EmptyState({ title, body, actions = [] }: { title: string; body: string; actions?: string[] }) {
+import type { ReactNode } from "react";
+
+export function EmptyState({ title, body, actions = [], children }: {
+  title: string; body: string; actions?: string[]; children?: ReactNode;
+}) {
   return (
     <div className="empty-state">
       <strong>{title}</strong>
@@ -8,6 +12,7 @@ export function EmptyState({ title, body, actions = [] }: { title: string; body:
           {actions.map((action) => <li key={action}>{action}</li>)}
         </ul>
       )}
+      {children}
     </div>
   );
 }

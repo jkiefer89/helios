@@ -568,7 +568,18 @@ def model_risk():
     mdl = portfolio.get(request.args.get("id", ""))
     if mdl is None:
         return err("Unknown model.", 404)
-    return ok({**risk_exposure.analyze_model_risk(mdl), "disclaimer": ANALYSIS_ONLY_DISCLAIMER})
+    # AUM makes capacity sizing possible: ?aum= wins, then the env default;
+    # unset -> the capacity block honestly reports aum_not_set (never assumed).
+    import os
+    raw_aum = request.args.get("aum", "") or os.environ.get("HELIOS_MODEL_AUM_USD", "")
+    try:
+        aum_usd = float(raw_aum.replace(",", "").replace("$", "")) if raw_aum else None
+    except ValueError:
+        return err("aum must be a dollar number (e.g. 250000000).", 400)
+    if aum_usd is not None and not (0 < aum_usd <= 1e13):
+        return err("aum must be between 0 and 10 trillion.", 400)
+    return ok({**risk_exposure.analyze_model_risk(mdl, aum_usd=aum_usd),
+               "disclaimer": ANALYSIS_ONLY_DISCLAIMER})
 
 
 def _holdings_with_signals(ps: portfolio.PortfolioSeries, mdl: portfolio.Model) -> list:

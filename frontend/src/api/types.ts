@@ -690,10 +690,39 @@ export interface ClinicResponse extends ProvenancePayload {
   explanation: string;
 }
 
+export interface CapacityHoldingRow {
+  ticker: string;
+  weight_pct: number;
+  position_usd: number;
+  adv_source: string;
+  proxy_as_of?: string | null;
+  status: string;
+  estimated_adv_usd?: number;
+  one_day_participation_pct?: number;
+  days_to_liquidate_10pct?: number;
+  days_to_liquidate_20pct?: number;
+  impact_estimate_bps?: number;
+}
+
+export interface CapacityBlock {
+  status: string;
+  note?: string;
+  aum_usd?: number;
+  holdings?: CapacityHoldingRow[];
+  max_days_to_liquidate_10pct?: number;
+  weighted_days_to_liquidate_10pct?: number;
+  holdings_over_5d?: string[];
+  holdings_over_20d?: string[];
+  unsized_count?: number;
+  proxy_based_count?: number;
+  basis?: string;
+}
+
 export interface RiskAnalyticsResponse extends ProvenancePayload {
   id: string;
   name: string;
   risk_exposure_unavailable?: boolean;
+  capacity?: CapacityBlock;
   mandate: { key: string; label: string; [key: string]: unknown };
   benchmark?: { symbol: string; status: string };
   sector_exposure: Array<{ name: string; weight_pct: number; tickers: string[] }>;

@@ -291,8 +291,11 @@ function ResearchUnlockCTA({
         {missing.length > 0 && <small className="muted">Missing: {missing.slice(0, 8).join(", ")}{missing.length > 8 ? "..." : ""}</small>}
       </div>
       <div className="unlock-actions">
-        <button type="button" onClick={() => onOpenView("instruments")}>Fetch live ticker data</button>
-        <button type="button" onClick={() => onOpenView("instruments")}>Upload real price CSV</button>
+        {/* Opening Instruments alone was a dead end: the only fetch/upload
+            controls live in the default-collapsed sidebar (review finding) —
+            these CTAs must also reveal the intake panel. */}
+        <button type="button" onClick={() => { window.dispatchEvent(new Event("helios:reveal-data-intake")); onOpenView("instruments"); }}>Fetch live ticker data</button>
+        <button type="button" onClick={() => { window.dispatchEvent(new Event("helios:reveal-data-intake")); onOpenView("instruments"); }}>Upload real price CSV</button>
         <button type="button" onClick={() => onOpenView("models")}>Upload model CSV/Excel</button>
         <button type="button" onClick={() => onOpenView("data-quality")}>Review Real Data Center gates</button>
       </div>

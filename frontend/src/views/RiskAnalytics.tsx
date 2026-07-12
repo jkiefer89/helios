@@ -20,6 +20,7 @@ export function RiskAnalytics({
 }) {
   const defaultModelId = selectedModel || models[0]?.id || "";
   const [modelId, setModelId] = useState(defaultModelId);
+  const [aumInput, setAumInput] = useState("");
   const { payload, error, isLoading, load, isCurrentTarget } = useViewFetch<RiskAnalyticsResponse>({ failureMessage: "Risk analytics failed." });
   const modelOptions = models.length > 0
     ? models.map((model) => ({ value: model.id, label: `${model.name} · ${model.mandate_label}` }))
@@ -30,10 +31,12 @@ export function RiskAnalytics({
       .sort((left, right) => right.value - left.value);
   }, [payload]);
 
-  const run = useCallback((requestedModelId: string) => {
+  const run = useCallback((requestedModelId: string, aumRaw?: string) => {
     if (!requestedModelId) return;
     onSelectModel(requestedModelId);
-    void load(requestedModelId, () => api.modelRisk(requestedModelId));
+    const parsed = Number((aumRaw ?? "").replace(/[$,\s]/g, ""));
+    const aumUsd = Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+    void load(requestedModelId, () => api.modelRisk(requestedModelId, aumUsd));
   }, [load, onSelectModel]);
 
   useEffect(() => {
@@ -50,8 +53,10 @@ export function RiskAnalytics({
           <h1>Risk + portfolio analytics</h1>
           <p>Concentration, stress, liquidity, and benchmark-relative risk from real model histories; factor and sector exposure use a static hand-assigned taxonomy, not history.</p>
         </div>
-        <form className="toolbar" onSubmit={(event) => { event.preventDefault(); run(modelId); }}>
+        <form className="toolbar" onSubmit={(event) => { event.preventDefault(); run(modelId, aumInput); }}>
           <label>Model<TerminalSelect ariaLabel="Risk Analytics model" value={modelId} onChange={setModelId} options={modelOptions} disabled={models.length === 0} /></label>
+          <label>AUM $<input value={aumInput} onChange={(e) => setAumInput(e.target.value)}
+            placeholder="e.g. 250,000,000" inputMode="numeric" aria-label="Model AUM in dollars" /></label>
           <button type="submit" disabled={models.length === 0}>Analyze risk</button>
         </form>
       </header>
@@ -175,9 +180,61 @@ export function RiskAnalytics({
             </div>
             <p className="muted">{payload.liquidity_flags.summary.basis}</p>
           </Panel>
+
+          <CapacityPanel capacity={payload.capacity} />
         </>
       )}
     </div>
+  );
+}
+
+function CapacityPanel({ capacity }: { capacity?: RiskAnalyticsResponse["capacity"] }) {
+  if (!capacity) return null;
+  if (capacity.status === "aum_not_set") {
+    return (
+      <Panel title="Implementation Capacity" meta="AUM required">
+        <EmptyState title="No AUM set" body={capacity.note || "Enter the model's AUM above to size positions against real liquidity."} />
+      </Panel>
+    );
+  }
+  const tone = capacity.status === "capacity_constrained" ? "tone-negative"
+    : capacity.status === "watch" ? "tone-warning" : "tone-positive";
+  const rows = (capacity.holdings || []).filter((row) => row.status === "ok");
+  const unsized = (capacity.holdings || []).filter((row) => row.status !== "ok");
+  return (
+    <Panel
+      title="Implementation Capacity"
+      meta={`AUM ${fmtMoney(capacity.aum_usd || 0)} · days-to-liquidate at 10%/20% ADV caps`}
+    >
+      <div className="metric-grid compact-metrics">
+        <div className="stat-tile"><span>Status</span><strong className={tone}>{titleCase(String(capacity.status || ""))}</strong><small>{(capacity.holdings_over_20d || []).length ? `${(capacity.holdings_over_20d || []).join(", ")} >20d` : (capacity.holdings_over_5d || []).length ? `${(capacity.holdings_over_5d || []).join(", ")} >5d` : "All holdings exit ≤5 days at 10% cap"}</small></div>
+        <div className="stat-tile"><span>Slowest exit</span><strong>{fmtNumber(capacity.max_days_to_liquidate_10pct, 1)}d</strong><small>at 10% participation</small></div>
+        <div className="stat-tile"><span>Weighted exit</span><strong>{fmtNumber(capacity.weighted_days_to_liquidate_10pct, 1)}d</strong><small>weight-averaged</small></div>
+        <div className="stat-tile"><span>Unverified ADV</span><strong>{fmtNumber((capacity.proxy_based_count || 0) + unsized.length, 0)}</strong><small>{capacity.proxy_based_count || 0} static proxy · {unsized.length} unsized</small></div>
+      </div>
+      <div className="terminal-table liquidity-table" tabIndex={0} aria-label="Implementation capacity table">
+        <div className="terminal-table__head"><span>Ticker</span><span>Position $</span><span>1-day part.</span><span>Days @10%</span><span>Est. impact</span></div>
+        {rows.map((row) => (
+          <div className="table-row" key={row.ticker}>
+            <strong>{row.ticker}<small>{row.adv_source === "static_public_proxy" ? "proxy ADV" : row.adv_source === "observed_60d_dollar_volume" ? "observed ADV" : row.adv_source}</small></strong>
+            <span>{fmtMoney(row.position_usd || 0)}</span>
+            <span>{fmtPct(row.one_day_participation_pct)}</span>
+            <span className={Number(row.days_to_liquidate_10pct) > 20 ? "tone-negative" : Number(row.days_to_liquidate_10pct) > 5 ? "tone-warning" : ""}>{fmtNumber(row.days_to_liquidate_10pct, 1)}d</span>
+            <span>{row.impact_estimate_bps != null ? `${fmtNumber(row.impact_estimate_bps, 0)} bps` : "—"}</span>
+          </div>
+        ))}
+        {unsized.map((row) => (
+          <div className="table-row" key={row.ticker}>
+            <strong>{row.ticker}</strong>
+            <span>{fmtMoney(row.position_usd || 0)}</span>
+            <span>—</span>
+            <span>—</span>
+            <span className="tone-warning">ADV unavailable</span>
+          </div>
+        ))}
+      </div>
+      <p className="muted">{capacity.basis}</p>
+    </Panel>
   );
 }
 

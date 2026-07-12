@@ -137,7 +137,8 @@ export const api = {
       })}`,
     ),
   clinic: (id: string) => request<ClinicResponse>(`/api/model/clinic?id=${encodeURIComponent(id)}`),
-  modelRisk: (id: string) => request<RiskAnalyticsResponse>(`/api/model/risk?id=${encodeURIComponent(id)}`),
+  modelRisk: (id: string, aumUsd?: number) => request<RiskAnalyticsResponse>(
+    `/api/model/risk?id=${encodeURIComponent(id)}${aumUsd ? `&aum=${encodeURIComponent(String(aumUsd))}` : ""}`),
   reportInstrument: (symbol: string) =>
     request<ReportResponse>(`/api/report/instrument?ticker=${encodeURIComponent(symbol)}`),
   reportModel: (id: string) => request<ReportResponse>(`/api/report/model?id=${encodeURIComponent(id)}`),

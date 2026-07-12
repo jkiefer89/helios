@@ -85,7 +85,7 @@ _LIQUIDITY_AVG_DAILY_DOLLAR_VOLUME = assumptions.LIQUIDITY_ADV_PROXIES["values"]
 _ADV_PROXY_AS_OF = assumptions.LIQUIDITY_ADV_PROXIES["as_of"]
 
 
-def analyze_model_risk(model: portfolio.Model) -> dict[str, Any]:
+def analyze_model_risk(model: portfolio.Model, aum_usd: float | None = None) -> dict[str, Any]:
     try:
         ps = portfolio.build_series(model, allow_sample=False, allow_simulated=False)
     except ValueError as exc:
@@ -102,6 +102,7 @@ def analyze_model_risk(model: portfolio.Model) -> dict[str, Any]:
     factor_exposure = _factor_exposure(model)
     vol_budget = _volatility_budget(metrics, model)
     liquidity = _liquidity_flags(model)
+    capacity = _capacity_analysis(model, liquidity.get("items") or [], aum_usd)
     concentration = _concentration(model, ps)
     drawdown = _drawdown_stress(ps.close)
     scenario_shocks = _scenario_shocks(model, factor_exposure)
@@ -136,8 +137,10 @@ def analyze_model_risk(model: portfolio.Model) -> dict[str, Any]:
         "drawdown_stress": drawdown,
         "scenario_shocks": scenario_shocks,
         "liquidity_flags": liquidity,
+        "capacity": capacity,
         "benchmark_relative": benchmark_relative,
         "client_risk_pack": _client_risk_pack(
+            capacity=capacity,
             model=model,
             close=ps.close,
             data_provenance=p,
@@ -253,6 +256,7 @@ def _blocked_client_risk_pack(model: portfolio.Model, reason: str, missing_ticke
 
 def _client_risk_pack(
     *,
+    capacity: dict[str, Any],
     model: portfolio.Model,
     close: pd.Series,
     data_provenance: dict[str, Any],
@@ -279,10 +283,13 @@ def _client_risk_pack(
         liquidity_watchlist=liquidity_watchlist,
         benchmark_relative=benchmark_relative,
         factor_exposure=factor_exposure,
+        capacity=capacity,
     )
-    risk_posture = _risk_posture(stress, concentration_warnings, liquidity_watchlist, volatility_budget)
+    risk_posture = _risk_posture(stress, concentration_warnings, liquidity_watchlist,
+                                 volatility_budget, capacity)
     return {
         "available": True,
+        "capacity": capacity,
         "summary": {
             "model_id": model.id,
             "model_name": model.name,
@@ -488,8 +495,21 @@ def _break_model_language(
     liquidity_watchlist: list[dict[str, Any]],
     benchmark_relative: dict[str, Any],
     factor_exposure: dict[str, float],
+    capacity: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
+    if capacity and capacity.get("status") == "capacity_constrained":
+        worst_days = capacity.get("max_days_to_liquidate_10pct")
+        rows.append({
+            "driver": "Implementation capacity",
+            "severity": "high",
+            "trigger": "A holding needs >20 trading days to exit at 10% ADV participation",
+            "evidence": (f"At ${capacity.get('aum_usd'):,.0f} AUM the slowest holding needs "
+                         f"{worst_days} days to liquidate at a 10% participation cap."),
+            "language": ("This model does not exit cleanly at the stated AUM — the slowest "
+                         f"position needs {worst_days} trading days at a 10% participation cap; "
+                         "size down or diversify the illiquid sleeve."),
+        })
     growth = float(factor_exposure.get("growth") or 0.0)
     if growth >= 30:
         rows.append({
@@ -561,11 +581,14 @@ def _risk_posture(
     concentration_warnings: list[dict[str, Any]],
     liquidity_watchlist: list[dict[str, Any]],
     volatility_budget: dict[str, Any],
+    capacity: dict[str, Any] | None = None,
 ) -> str:
     if volatility_budget.get("status") == "over_budget":
         return "elevated"
     if any(row.get("severity") == "high" for row in stress_scenarios + concentration_warnings):
         return "elevated"
+    if capacity and capacity.get("status") == "capacity_constrained":
+        return "watch"
     if any(row.get("flag") != "normal" for row in liquidity_watchlist):
         return "watch"
     return "review_ready"
@@ -738,6 +761,98 @@ def _effective_liquidity_score(ticker: str) -> int:
     fallback — the same precedence the liquidity flags surface uses."""
     observed = _observed_liquidity(ticker)
     return int(observed.get("liquidity_score") or _liquidity_score(ticker))
+
+
+# Days-to-liquidate participation caps: 10% of ADV is a conservative
+# institutional exit pace; 20% is aggressive.
+_CAPACITY_CAPS = (0.10, 0.20)
+_CAPACITY_WATCH_DAYS = 5.0
+_CAPACITY_CONSTRAINED_DAYS = 20.0
+
+
+def _daily_sigma(ticker: str) -> float | None:
+    """Recent daily return volatility from REAL history (impact scaling)."""
+    inst = data.get(ticker)
+    if inst is None or not provenance.is_real_source(inst.source) or "close" not in inst.df:
+        return None
+    rets = inst.df["close"].dropna().pct_change().tail(120).dropna()
+    if len(rets) < 30:
+        return None
+    return float(rets.std())
+
+
+def _capacity_analysis(model: portfolio.Model, liquidity_items: list[dict[str, Any]],
+                       aum_usd: float | None) -> dict[str, Any]:
+    """Dollar-sized implementation capacity: can this book actually be traded?
+
+    BUY/HOLD/SELL labels never became governed dollar exposure, and liquidity
+    analysis had no AUM or trade size — it could not say whether a strategy
+    works at $1B (review finding). Participation, days-to-liquidate at 10%/20%
+    ADV caps, and a square-root impact estimate per holding; every number is
+    an order-of-magnitude ESTIMATE, never execution advice.
+    """
+    if aum_usd is None or aum_usd <= 0:
+        return {
+            "status": "aum_not_set",
+            "note": ("Pass ?aum=<dollars> (or set HELIOS_MODEL_AUM_USD) to size positions "
+                     "against real liquidity — Helios never assumes an AUM silently."),
+        }
+    by_ticker = {str(item.get("ticker")): item for item in liquidity_items}
+    rows: list[dict[str, Any]] = []
+    for holding in model.holdings:
+        item = by_ticker.get(holding.ticker, {})
+        position_usd = float(holding.weight) * float(aum_usd)
+        adv = item.get("estimated_adv_usd")
+        row: dict[str, Any] = {
+            "ticker": holding.ticker,
+            "weight_pct": round(float(holding.weight) * 100, 2),
+            "position_usd": round(position_usd, 0),
+            "adv_source": item.get("adv_source") or "unavailable",
+            "proxy_as_of": item.get("proxy_as_of"),
+        }
+        if not adv or float(adv) <= 0:
+            row["status"] = "adv_unavailable"
+            rows.append(row)
+            continue
+        ratio = position_usd / float(adv)
+        row.update({
+            "status": "ok",
+            "estimated_adv_usd": float(adv),
+            "one_day_participation_pct": round(ratio * 100, 2),
+            "days_to_liquidate_10pct": round(ratio / _CAPACITY_CAPS[0], 2),
+            "days_to_liquidate_20pct": round(ratio / _CAPACITY_CAPS[1], 2),
+        })
+        sigma = _daily_sigma(holding.ticker)
+        if sigma is not None:
+            # Square-root market-impact heuristic: sigma_daily * sqrt(size/ADV).
+            row["impact_estimate_bps"] = round(10000 * sigma * (ratio ** 0.5), 1)
+        rows.append(row)
+    sized = [r for r in rows if r["status"] == "ok"]
+    unsized = [r for r in rows if r["status"] != "ok"]
+    if not sized:
+        return {"status": "adv_unavailable", "aum_usd": float(aum_usd), "holdings": rows,
+                "note": "No holding has an ADV estimate; capacity cannot be sized."}
+    days10 = [r["days_to_liquidate_10pct"] for r in sized]
+    sized_w = sum(r["weight_pct"] for r in sized) or 1.0
+    weighted_days = sum(r["days_to_liquidate_10pct"] * r["weight_pct"] for r in sized) / sized_w
+    over_watch = [r["ticker"] for r in sized if r["days_to_liquidate_10pct"] > _CAPACITY_WATCH_DAYS]
+    over_hard = [r["ticker"] for r in sized if r["days_to_liquidate_10pct"] > _CAPACITY_CONSTRAINED_DAYS]
+    status = ("capacity_constrained" if over_hard
+              else "watch" if over_watch else "within_capacity")
+    return {
+        "status": status,
+        "aum_usd": float(aum_usd),
+        "holdings": rows,
+        "max_days_to_liquidate_10pct": round(max(days10), 2),
+        "weighted_days_to_liquidate_10pct": round(weighted_days, 2),
+        "holdings_over_5d": over_watch,
+        "holdings_over_20d": over_hard,
+        "unsized_count": len(unsized),
+        "proxy_based_count": sum(1 for r in sized if r["adv_source"] == "static_public_proxy"),
+        "basis": ("Position $ vs average daily dollar volume; days-to-liquidate at 10%/20% "
+                  "participation caps; square-root impact scaled by observed daily vol. "
+                  "Order-of-magnitude estimates from available data — not execution advice."),
+    }
 
 
 def _liquidity_flags(model: portfolio.Model) -> dict[str, Any]:

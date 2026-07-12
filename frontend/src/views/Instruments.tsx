@@ -37,7 +37,9 @@ export function Instruments({
       />
       <Panel title="Instrument Universe" meta={`${tickers.length} loaded`}>
         {tickers.length === 0 ? (
-          <EmptyState title="No instruments loaded" body="Upload a price CSV or fetch a live ticker to begin." />
+          <EmptyState title="No instruments loaded" body="Upload a price CSV or fetch a live ticker to begin.">
+            <button type="button" onClick={() => window.dispatchEvent(new Event("helios:reveal-data-intake"))}>Open data intake</button>
+          </EmptyState>
         ) : (
           <div className="terminal-table instruments-table" tabIndex={0} aria-label="Scrollable instrument universe table" onKeyDown={scrollTableByKey}>
             <div className="terminal-table__head">

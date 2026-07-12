@@ -101,6 +101,34 @@ export function AppShell(props: ShellProps) {
       return true;
     }
   });
+  const navRef = useRef<HTMLElement | null>(null);
+  // The active view must never sit scrolled out of the (scrollbar-less) nav:
+  // clipped at 1280px, navigating right hid Command Center entirely.
+  useEffect(() => {
+    const nav = navRef.current;
+    if (!nav) return;
+    const active = nav.querySelector("button.active");
+    active?.scrollIntoView({ behavior: "auto", inline: "nearest", block: "nearest" });
+  }, [props.activeView]);
+  // First-run CTAs open Instruments but the ONLY fetch/upload controls live in
+  // this (default-collapsed) sidebar — an onboarding dead end (review finding).
+  // CTAs call this to actually reveal the intake panel; the explicit choice is
+  // persisted like a manual toggle.
+  const revealDataIntake = () => {
+    setSidebarCollapsed(false);
+    try {
+      localStorage.setItem("helios_sidebar", "open");
+    } catch {
+      // best-effort persistence
+    }
+  };
+  useEffect(() => {
+    // Views deep in the tree (Command Center CTA, Instruments empty state)
+    // request the reveal via this event — no prop drilling through App.
+    const onReveal = () => revealDataIntake();
+    window.addEventListener("helios:reveal-data-intake", onReveal);
+    return () => window.removeEventListener("helios:reveal-data-intake", onReveal);
+  }, []);
   const toggleSidebar = () => {
     setSidebarCollapsed((current) => {
       const next = !current;
@@ -318,7 +346,7 @@ export function AppShell(props: ShellProps) {
             </div>
           </div>
         </div>
-        <nav className="workspace-nav" aria-label="Primary workspace">
+        <nav className="workspace-nav" aria-label="Primary workspace" ref={navRef}>
           {navGroups.map((group) => (
             <div className="nav-group" key={group.label}>
               <span className="nav-group__label" aria-hidden="true">{group.label}</span>
@@ -328,6 +356,7 @@ export function AppShell(props: ShellProps) {
                   className={props.activeView === id ? "active" : ""}
                   type="button"
                   aria-current={props.activeView === id ? "page" : undefined}
+                  title={`${group.label} · ${viewLabel(id)}`}
                   onClick={() => props.onViewChange(id)}
                 >
                   <ShellIcon id={id} />
