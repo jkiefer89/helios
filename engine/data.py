@@ -14,6 +14,9 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 import io
 import hashlib
+import json as _json
+import os
+import urllib.request
 import re
 import threading
 import time
@@ -355,56 +358,162 @@ def parse_csv(
 # --------------------------------------------------------------------------- #
 # Live fetch (optional)
 # --------------------------------------------------------------------------- #
-def fetch_live(symbol: str, period: str = "2y", persist: bool = True) -> Instrument:
-    """Pull live history (and free news headlines) via yfinance."""
-    if not HAS_YF:
-        raise RuntimeError("yfinance is not installed; live data unavailable.")
-    symbol = clean_symbol(symbol, fallback="")
-    if not symbol:
-        raise ValueError("Invalid ticker symbol.")
-    t = _yf.Ticker(symbol)
-    # Bounded outbound call so a slow/hung upstream can't pin a worker thread.
-    with _YF_SEMAPHORE:
-        hist = t.history(period=period, auto_adjust=True, timeout=10)
-    if hist is None or hist.empty:
-        raise RuntimeError(f"No live data returned for '{symbol}'.")
-    hist = hist.rename(columns=str.lower)
-    df = hist[["open", "high", "low", "close", "volume"]].copy()
+_PERIOD_DAYS = {"1mo": 31, "3mo": 93, "6mo": 186, "1y": 366, "2y": 731, "5y": 1827, "10y": 3653, "max": 7300}
+# FMP EOD is opt-in until a side-by-side reconciliation justifies cutover:
+# HELIOS_PRICE_SOURCE=fmp makes the KEYED paid feed primary (dividend-adjusted,
+# matching yfinance auto_adjust semantics) with yfinance as fallback.
+_FMP_EOD_MAX_BYTES = 16 * 1024 * 1024
+
+
+def _clean_price_frame(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    """Shared provider hygiene: finite positive closes, one row per date,
+    future bars clamped (a provider/clock anomaly must not inject
+    unanalyzable prices; the rest of a live series is still good)."""
+    df = df.copy()
     df.index = pd.to_datetime(df.index).tz_localize(None).normalize()
-    # Same hygiene as parse_csv: finite positive closes, one row per date.
     df["close"] = pd.to_numeric(df["close"], errors="coerce")
     df = df[np.isfinite(df["close"]) & (df["close"] > 0)]
     df = df[~df.index.duplicated(keep="last")].sort_index()
-    # Clamp (not reject) future bars from providers: a provider/clock anomaly
-    # must not inject unanalyzable future prices, but the rest of a live
-    # series is still good (unlike a corrupted CSV export).
     df = df[df.index <= _future_cutoff()]
     if df.empty:
         raise RuntimeError(f"No live data returned for '{symbol}'.")
+    return df
 
+
+def _fmp_price_history(symbol: str, period: str = "2y") -> pd.DataFrame | None:
+    """Dividend-adjusted EOD history from FMP's stable API, or None on any
+    failure (caller falls back to yfinance — never a fabricated series)."""
+    key = os.environ.get("HELIOS_FMP_KEY", "").strip()
+    if not key:
+        return None
+    days = _PERIOD_DAYS.get((period or "2y").lower(), 731)
+    start = (datetime.now() - timedelta(days=days)).date().isoformat()
+    base = os.environ.get("HELIOS_FMP_BASE_URL", "https://financialmodelingprep.com").rstrip("/")
+    url = (f"{base}/stable/historical-price-eod/dividend-adjusted"
+           f"?symbol={symbol}&from={start}&apikey={key}")
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Helios Research Terminal"})
+        with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310 (fixed https host)
+            payload = _json.loads(resp.read(_FMP_EOD_MAX_BYTES + 1).decode("utf-8", errors="replace"))
+    except Exception:
+        return None
+    rows = payload if isinstance(payload, list) else []
+    records = []
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("date"):
+            continue
+        records.append({
+            "date": row["date"],
+            "open": row.get("adjOpen"), "high": row.get("adjHigh"),
+            "low": row.get("adjLow"), "close": row.get("adjClose"),
+            "volume": row.get("volume"),
+        })
+    if not records:
+        return None
+    df = pd.DataFrame(records).set_index("date")
+    try:
+        return _clean_price_frame(df, symbol)
+    except RuntimeError:
+        return None
+
+
+def reconcile_price_sources(symbol: str, period: str = "3mo") -> dict:
+    """Side-by-side FMP vs yfinance closes — the evidence that justifies (or
+    blocks) a price-source cutover. Never rewrites persisted history."""
+    symbol = clean_symbol(symbol, fallback="")
+    if not symbol:
+        raise ValueError("Invalid ticker symbol.")
+    fmp = _fmp_price_history(symbol, period)
+    yf_df = None
+    if HAS_YF:
+        try:
+            with _YF_SEMAPHORE:
+                hist = _yf.Ticker(symbol).history(period=period, auto_adjust=True, timeout=10)
+            if hist is not None and not hist.empty:
+                yf_df = _clean_price_frame(hist.rename(columns=str.lower)[["close"]], symbol)
+        except Exception:
+            yf_df = None
+    if fmp is None or yf_df is None:
+        return {"symbol": symbol, "status": "unavailable",
+                "fmp_rows": int(len(fmp)) if fmp is not None else 0,
+                "yfinance_rows": int(len(yf_df)) if yf_df is not None else 0,
+                "note": "Both sources must respond to reconcile — nothing is assumed."}
+    joined = pd.concat({"fmp": fmp["close"], "yfinance": yf_df["close"]}, axis=1).dropna()
+    if len(joined) < 5:
+        return {"symbol": symbol, "status": "insufficient_overlap",
+                "overlap_days": int(len(joined))}
+    rel = ((joined["fmp"] - joined["yfinance"]).abs() / joined["yfinance"])
+    worst_day = rel.idxmax()
+    return {
+        "symbol": symbol,
+        "status": "ok",
+        "overlap_days": int(len(joined)),
+        "mean_abs_diff_pct": round(float(rel.mean()) * 100, 4),
+        "max_abs_diff_pct": round(float(rel.max()) * 100, 4),
+        "worst_day": str(worst_day.date()),
+        "fmp_last": round(float(joined["fmp"].iloc[-1]), 4),
+        "yfinance_last": round(float(joined["yfinance"].iloc[-1]), 4),
+        "note": ("Dividend-adjusted closes compared over the overlap window. Cut over "
+                 "(HELIOS_PRICE_SOURCE=fmp) only when diffs stay in adjustment-timing "
+                 "noise (<~0.1% mean) across your book."),
+    }
+
+
+def fetch_live(symbol: str, period: str = "2y", persist: bool = True) -> Instrument:
+    """Pull live history (and free news headlines).
+
+    Provider order follows HELIOS_PRICE_SOURCE: 'fmp' prefers the keyed paid
+    EOD feed with yfinance fallback; default stays yfinance-first until a
+    reconciliation window justifies cutover (review roadmap, stage 3)."""
+    symbol = clean_symbol(symbol, fallback="")
+    if not symbol:
+        raise ValueError("Invalid ticker symbol.")
+    df = None
+    provider_used = ""
+    if os.environ.get("HELIOS_PRICE_SOURCE", "yfinance").strip().lower() == "fmp":
+        df = _fmp_price_history(symbol, period)
+        if df is not None:
+            provider_used = "fmp_eod_adjusted"
+    t = _yf.Ticker(symbol) if HAS_YF else None
+    if df is None:
+        if not HAS_YF:
+            raise RuntimeError("yfinance is not installed; live data unavailable.")
+        # Bounded outbound call so a slow/hung upstream can't pin a worker thread.
+        with _YF_SEMAPHORE:
+            hist = t.history(period=period, auto_adjust=True, timeout=10)
+        if hist is None or hist.empty:
+            raise RuntimeError(f"No live data returned for '{symbol}'.")
+        hist = hist.rename(columns=str.lower)
+        df = _clean_price_frame(hist[["open", "high", "low", "close", "volume"]], symbol)
+        provider_used = "yfinance"
+
+    # Headlines + display name stay yfinance best-effort regardless of the
+    # price provider (FMP EOD carries neither).
     headlines = []
-    try:
-        with _YF_SEMAPHORE:
-            news_items = _bounded_provider_call(lambda: t.news) or []
-        for item in news_items[:12]:
-            title = (item.get("content", {}) or {}).get("title") or item.get("title")
-            if title:
-                headlines.append(title)
-    except Exception:
-        pass
-
     name = symbol.upper()
-    try:
-        with _YF_SEMAPHORE:
-            info = _bounded_provider_call(lambda: t.info) or {}
-        name = info.get("shortName") or name
-    except Exception:
-        pass
+    if t is not None:
+        try:
+            with _YF_SEMAPHORE:
+                news_items = _bounded_provider_call(lambda: t.news) or []
+            for item in news_items[:12]:
+                title = (item.get("content", {}) or {}).get("title") or item.get("title")
+                if title:
+                    headlines.append(title)
+        except Exception:
+            pass
+        try:
+            with _YF_SEMAPHORE:
+                info = _bounded_provider_call(lambda: t.info) or {}
+            name = info.get("shortName") or name
+        except Exception:
+            pass
 
     inst = Instrument(symbol.upper(), name, df, "live", headlines)
     register(inst)
     if persist:
-        _persist_instrument(inst, adjusted=True, metadata={"period": period, "imported_via": "live_fetch"})
+        _persist_instrument(inst, adjusted=True,
+                            metadata={"period": period, "imported_via": "live_fetch",
+                                      "price_provider": provider_used})
     return inst
 
 

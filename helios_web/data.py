@@ -212,6 +212,23 @@ def data_quality_dashboard():
     return ok(data_quality.dashboard_payload())
 
 
+@bp.route("/api/data/price-reconciliation")
+def price_reconciliation():
+    """Side-by-side FMP vs yfinance closes for one symbol — the evidence
+    gate before HELIOS_PRICE_SOURCE=fmp cutover (never rewrites history)."""
+    symbol = data.clean_symbol(request.args.get("ticker", ""), fallback="")
+    if not symbol:
+        return err("Provide a ticker symbol.", 400)
+    if not _LIVE_SEMAPHORE.acquire(blocking=False):
+        return err("Too many live-data requests in flight — try again in a moment.", 429)
+    try:
+        return ok(data.reconcile_price_sources(symbol, period=request.args.get("period", "3mo")))
+    except ValueError as exc:
+        return err(str(exc), 400)
+    finally:
+        _LIVE_SEMAPHORE.release()
+
+
 @bp.route("/api/data/refresh", methods=["POST"])
 def data_refresh():
     payload = request.get_json(silent=True) or {}
