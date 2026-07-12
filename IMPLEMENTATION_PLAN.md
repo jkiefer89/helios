@@ -27,7 +27,13 @@ for a ~$1.1B book — never client-facing, execution always external.
 
 ## What the review got right — the plan
 
-### Phase 0 — Integrity hotfixes (all Small; target: next session, one slice each)
+### Phase 0 — Integrity hotfixes — ✅ SHIPPED (commit c2c4c06, 2026-07-11)
+
+All five items below are implemented, regression-locked
+(`tests/test_phase0_integrity.py`), and verified live: production boots with
+55 live / 0 sample instruments, model analyze carries the series-basis label,
+and the journal dashboard collapsed 10 real near-duplicate window observations
+on first contact.
 
 **0.1 Future-dated data is rejected, flagged, and unmeasurable** *(review #8 — confirmed
 by live reproduction: a future-dated CSV parsed cleanly, showed `is_stale=False`, and a
