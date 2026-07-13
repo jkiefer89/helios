@@ -37,6 +37,12 @@ jobs:
       - name: Typecheck frontend
         run: npm --prefix frontend run typecheck
 
+      - name: Lint frontend
+        run: npm --prefix frontend run lint
+
+      - name: Frontend tests
+        run: npm --prefix frontend run test
+
       - name: Build frontend
         run: npm --prefix frontend run build
 
@@ -47,4 +53,4 @@ jobs:
         run: python -m json.tool .design_spec.json >/dev/null
 
       - name: Run offline tests
-        run: python -m pytest --cov=engine --cov=helios_web --cov=app --cov-report=term-missing
+        run: python -m pytest --cov=engine --cov=helios_web --cov=app --cov-report=term-missing --cov-fail-under=80
