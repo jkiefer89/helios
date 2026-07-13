@@ -26,7 +26,8 @@ export function Reports({
   onSelectModel: (id: string) => void;
   dataStatus: DataStatusResponse | null;
 }) {
-  const defaultTarget = selectedModel ? `model:${selectedModel}` : selectedInstrument ? `instrument:${selectedInstrument}` : tickers[0] ? `instrument:${tickers[0].symbol}` : "";
+  // No first-ticker fallback: report targets are operator-chosen, never a silent default.
+  const defaultTarget = selectedModel ? `model:${selectedModel}` : selectedInstrument ? `instrument:${selectedInstrument}` : "";
   const [target, setTarget] = useState(defaultTarget);
   const { payload, error, isLoading, load, isCurrentTarget } = useViewFetch<ReportResponse>({ failureMessage: "Report build failed." });
   const [journalEntries, setJournalEntries] = useState<SignalJournalEntry[]>([]);

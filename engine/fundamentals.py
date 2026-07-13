@@ -512,9 +512,29 @@ def _auto_provider(ticker: str) -> dict:
         recon = _reconcile([(name, r) for name, r in raws if r])
         if recon:
             merged["reconciliation_warnings"] = recon
+        _vault_provider_payloads(ticker, raws)
         return merged
     finally:
         _TICKER_DEADLINE.value = None
+
+
+def _vault_provider_payloads(ticker: str, raws: list[tuple[str, dict]]) -> None:
+    """v10 raw vendor vault: each provider's response as received, hash-deduped
+    (an unchanged payload stores once). Best-effort — never blocks a fetch."""
+    try:
+        import json as _json
+
+        from . import persistence
+
+        store = persistence.get_store()
+        for name, raw in raws:
+            if not raw:
+                continue
+            store.vault_payload(
+                name, "fundamentals", ticker,
+                _json.dumps(raw, sort_keys=True, default=str))
+    except Exception:
+        return
 
 
 # Default-provider results are cached for a few hours: fundamentals move on

@@ -22,7 +22,7 @@ from .pdf_layout import (
     page_background as _rl_background,
     panel as _rl_panel,
 )
-from . import pdf_layout
+from . import costs, pdf_layout
 from .reporting import DISCLAIMER
 
 
@@ -388,7 +388,11 @@ def _rl_signal_journal_page(pdf, snapshot: dict[str, Any], width: float, height:
         ("Signal Count", summary.get("total_count") or 0),
         ("Forward Results", f"{summary.get('measured_count') or 0} measured / {summary.get('pending_count') or 0} pending"),
         ("Hit Rate", _fmt_optional_pdf_pct(summary.get("hit_rate_pct"))),
-        ("Alpha Vs Benchmark", _fmt_optional_pdf_pct(summary.get("avg_alpha_pct"))),
+        ("Alpha Vs Benchmark (Gross)", _fmt_optional_pdf_pct(summary.get("avg_alpha_pct"))),
+        ("Alpha Net Of Default Costs", _fmt_optional_pdf_pct(
+            summary.get("avg_alpha_after_default_costs_pct")
+            if summary.get("avg_alpha_after_default_costs_pct") is not None
+            else costs.net_of_default_costs(summary.get("avg_alpha_pct")))),
     ]
     _rl_card_grid(pdf, cards, 42, 568, 252, 58, colors)
 
@@ -401,7 +405,7 @@ def _rl_signal_journal_page(pdf, snapshot: dict[str, Any], width: float, height:
                 f"{row.get('input_end_date') or ''} / {row.get('target_name') or row.get('target_id') or ''} / "
                 f"{row.get('action_label') or 'Review'} / score {row.get('score') or 0} / "
                 f"{row.get('forward_status') or 'pending'} / forward {_fmt_optional_pdf_pct(row.get('forward_result_pct'))} / "
-                f"alpha vs benchmark {_fmt_optional_pdf_pct(row.get('alpha_pct'))}"
+                f"alpha vs benchmark (gross) {_fmt_optional_pdf_pct(row.get('alpha_pct'))}"
             )
             y = _rl_wrapped(pdf, text, 58, y, 490, 8.4, colors.HexColor("#c8d3df"), max_lines=2)
             y -= 7
@@ -428,7 +432,7 @@ def _rl_signal_journal_page(pdf, snapshot: dict[str, Any], width: float, height:
                 f"{row.get('target_name') or row.get('target_id') or ''}: "
                 f"{row.get('signal_count') or 0} signals, {row.get('measured_count') or 0} measured, "
                 f"hit rate {_fmt_optional_pdf_pct(row.get('hit_rate_pct'))}, "
-                f"alpha vs benchmark {_fmt_optional_pdf_pct(row.get('avg_alpha_pct'))}, "
+                f"alpha vs benchmark (gross) {_fmt_optional_pdf_pct(row.get('avg_alpha_pct'))}, "
                 f"latest {row.get('latest_action_label') or 'Review'} vs {row.get('benchmark') or 'benchmark'}."
             )
             y = _rl_wrapped(pdf, text, 58, y, 490, 8.4, colors.HexColor("#c8d3df"), max_lines=2)
@@ -811,7 +815,11 @@ def _signal_journal_html(snapshot: dict[str, Any]) -> str:
         "Measured Forward Results": summary.get("measured_count") or 0,
         "Pending Forward Results": summary.get("pending_count") or 0,
         "Hit Rate": _fmt_html_pct(summary.get("hit_rate_pct")),
-        "Alpha Vs Benchmark": _fmt_html_pct(summary.get("avg_alpha_pct")),
+        "Alpha Vs Benchmark (Gross)": _fmt_html_pct(summary.get("avg_alpha_pct")),
+        "Alpha Net Of Default Costs": _fmt_html_pct(
+            summary.get("avg_alpha_after_default_costs_pct")
+            if summary.get("avg_alpha_after_default_costs_pct") is not None
+            else costs.net_of_default_costs(summary.get("avg_alpha_pct"))),
     }
     html_parts = [
         "<section>",
@@ -850,7 +858,7 @@ def _signal_history_table(rows: list[Any]) -> str:
         return '<p class="muted">No signal journal entries are available for this report target.</p>'
     return (
         "<table><thead><tr><th>Signal Date</th><th>Target</th><th>Action</th><th>Benchmark</th>"
-        "<th>Forward Results</th><th>Alpha Vs Benchmark</th></tr></thead><tbody>"
+        "<th>Forward Results</th><th>Alpha Vs Benchmark (Gross)</th></tr></thead><tbody>"
         + "".join(body) + "</tbody></table>"
     )
 
@@ -874,7 +882,7 @@ def _benchmark_table(rows: list[Any]) -> str:
         )
     return (
         "<table><thead><tr><th>Benchmark</th><th>Measured</th><th>Forward</th><th>Benchmark</th>"
-        "<th>Alpha Vs Benchmark</th><th>Hit Rate</th></tr></thead><tbody>"
+        "<th>Alpha Vs Benchmark (Gross)</th><th>Hit Rate</th></tr></thead><tbody>"
         + "".join(body) + "</tbody></table>"
     )
 
@@ -898,7 +906,7 @@ def _model_credibility_table(rows: list[Any]) -> str:
         )
     return (
         "<table><thead><tr><th>Model</th><th>Signals</th><th>Measured / Pending</th>"
-        "<th>Hit Rate</th><th>Alpha Vs Benchmark</th><th>Latest</th></tr></thead><tbody>"
+        "<th>Hit Rate</th><th>Alpha Vs Benchmark (Gross)</th><th>Latest</th></tr></thead><tbody>"
         + "".join(body) + "</tbody></table>"
     )
 

@@ -114,3 +114,26 @@ def test_performance_requires_account_and_reports_honestly(client):
     assert body["paper"]["status"] == "no_model_mapped"
     assert isinstance(body["shortfall"], list)
     assert body["disclaimer"]
+
+
+def test_flex_import_route_dormant_without_token(client, monkeypatch):
+    monkeypatch.delenv("HELIOS_IBKR_FLEX_TOKEN", raising=False)
+    monkeypatch.delenv("HELIOS_IBKR_FLEX_QUERY_ID", raising=False)
+    resp = client.post("/api/ledger/flex/import")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["status"] == "not_configured"
+    assert "HELIOS_IBKR_FLEX_TOKEN" in body["note"]
+
+
+def test_data_jobs_reports_freshness_and_audit(client):
+    from engine import data as engine_data
+    from tests.conftest import price_csv
+    engine_data.parse_csv(price_csv(days=100), "JOBX", "Job X", source_filename="jobx.csv")
+    resp = client.get("/api/data/jobs")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["audit_chain"]["status"] in {"intact", "unavailable"}
+    assert "auto_live" in body and "refresh_log" in body
+    assert isinstance(body["freshness"], list)
+    assert "calendar days" in body["basis"]

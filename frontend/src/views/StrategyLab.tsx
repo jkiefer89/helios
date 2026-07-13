@@ -25,7 +25,8 @@ export function StrategyLab({
   onSelectInstrument: (symbol: string) => void;
   onSelectModel: (id: string) => void;
 }) {
-  const defaultTarget = selectedModel ? `model:${selectedModel}` : selectedInstrument ? `instrument:${selectedInstrument}` : tickers[0] ? `instrument:${tickers[0].symbol}` : "";
+  // No first-ticker fallback: strategy targets are operator-chosen, never a silent default.
+  const defaultTarget = selectedModel ? `model:${selectedModel}` : selectedInstrument ? `instrument:${selectedInstrument}` : "";
   const [target, setTarget] = useState(defaultTarget);
   const [costBps, setCostBps] = useState(5);
   const [slippageBps, setSlippageBps] = useState(0);

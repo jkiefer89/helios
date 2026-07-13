@@ -8,9 +8,9 @@ import pandas as pd
 from flask import Blueprint, request
 
 from engine import (
-    backtest, cma, data, evidence_lab, forecast, fundamentals, holdings, indicators, macro,
-    macro_events, news, opportunity, portfolio, provenance, regime, sec_events, sentiment,
-    signal_journal, signals, strategy,
+    backtest, cma, costs, data, evidence_lab, forecast, fundamentals, holdings, indicators,
+    macro, macro_events, news, opportunity, portfolio, provenance, regime, sec_events,
+    sentiment, signal_journal, signals, strategy,
 )
 
 from .core import (
@@ -378,7 +378,7 @@ def auto_record_daily_signals(max_targets: int = 200) -> dict:
 
 
 def _strategy_request_args():
-    cost_bps, cost_error = _safe_float_arg("cost_bps", 5.0, 0.0, 500.0)
+    cost_bps, cost_error = _safe_float_arg("cost_bps", costs.DEFAULT_COST_BPS_PER_SIDE, 0.0, 500.0)
     if cost_error:
         return None, None, None, cost_error
     slippage_bps, slippage_error = _safe_float_arg("slippage_bps", 0.0, 0.0, 500.0)

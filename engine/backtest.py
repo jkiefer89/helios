@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import pandas as pd
 
-from . import strategy
+from . import costs, strategy
 
 
-def run(close: pd.Series, entry: float = 0.15, exit: float = -0.05, cost_bps: float = 5.0) -> dict:
+def run(close: pd.Series, entry: float = 0.15, exit: float = -0.05, cost_bps: float = costs.DEFAULT_COST_BPS_PER_SIDE) -> dict:
     """Backtest the causal signal rule against buy-and-hold on ``close``.
 
     Delegates to strategy.analyze_strategy (the single source of truth) and

@@ -8,7 +8,10 @@ net. Fix: every surface labels alpha gross-of-costs, and aggregate views
 show a companion figure net of THIS default, computed at presentation time
 (never written into journal rows).
 
-Strategy Lab imports the same constant so the two surfaces cannot drift.
+Strategy Lab, backtest, and the API default all import
+DEFAULT_COST_BPS_PER_SIDE so the surfaces cannot drift; Evidence Lab,
+Signal Journal, Decision Journal, model validation, and report exports
+attach the net companion + basis labels at presentation time.
 """
 from __future__ import annotations
 

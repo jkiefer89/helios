@@ -63,7 +63,12 @@ export function SignalJournal() {
             <Panel title="Hit Rate" meta={`${payload.summary.measured_count} measured`}>
               <div className="metric-grid">
                 <StatTile label="Paper hit rate" value={fmtPct(payload.summary.hit_rate_pct)} tone={toneForPositive(payload.summary.hit_rate_pct)} />
-                <StatTile label="Avg alpha" value={fmtPct(payload.summary.avg_alpha_pct)} tone={toneForSigned(payload.summary.avg_alpha_pct)} />
+                <StatTile label="Avg alpha (gross)" value={fmtPct(payload.summary.avg_alpha_pct)} tone={toneForSigned(payload.summary.avg_alpha_pct)} />
+                <StatTile
+                  label="Alpha net of default costs"
+                  value={fmtPct(payload.summary.avg_alpha_after_default_costs_pct)}
+                  tone={toneForSigned(payload.summary.avg_alpha_after_default_costs_pct)}
+                />
                 <StatTile label="Avg forward" value={fmtPct(payload.summary.avg_forward_result_pct)} tone={toneForSigned(payload.summary.avg_forward_result_pct)} />
                 <StatTile label="Avg score" value={fmtNumber(payload.summary.avg_score, 2)} />
               </div>

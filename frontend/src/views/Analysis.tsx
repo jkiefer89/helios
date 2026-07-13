@@ -42,7 +42,8 @@ export function Analysis({
   onSelectInstrument: (symbol: string) => void;
   onSelectModel: (id: string) => void;
 }) {
-  const defaultTarget = selectedModel ? `model:${selectedModel}` : selectedInstrument ? `instrument:${selectedInstrument}` : tickers[0] ? `instrument:${tickers[0].symbol}` : "";
+  // No first-ticker fallback: analysis context is operator-chosen, never a silent default.
+  const defaultTarget = selectedModel ? `model:${selectedModel}` : selectedInstrument ? `instrument:${selectedInstrument}` : "";
   const [target, setTarget] = useState(defaultTarget);
   const [horizon, setHorizon] = useState<string | number>(21);
   const { payload, error, isLoading, load, isCurrentTarget } = useViewFetch<AnalysisResponse>({ failureMessage: "Analysis failed." });
@@ -508,6 +509,7 @@ function TacticalForecastPanel({ forecast, series }: { forecast: TacticalForecas
     { label: "P(up)", value: `${fmtNumber(forecast.prob_up * 100, 0)}%`, tone: "neutral" },
     { label: "Dir. accuracy", value: accuracy == null ? "—" : `${fmtNumber(accuracy * 100, 1)}%`, tone: "neutral" },
   ];
+  const calibration = forecast.quality?.calibration;
   return (
     <div className="forecast-panel">
       <div className="metric-grid">
@@ -515,6 +517,17 @@ function TacticalForecastPanel({ forecast, series }: { forecast: TacticalForecas
       </div>
       <ForecastConeChart points={tacticalConePoints(series, forecast)} ariaLabel={`${forecast.horizon_days} day forecast confidence cone`} />
       <p className="forecast-note">{forecast.horizon_days}d horizon · Monte-Carlo percentile cone (P05/P25/median/P75/P95) anchored to the last close.</p>
+      {calibration?.status === "ok" ? (
+        <p className="forecast-note">
+          Calibration (out-of-sample, n={calibration.n_test}): Brier {fmtNumber(calibration.brier_score ?? 0, 3)} vs 0.250 coin
+          {" · "}skill {fmtNumber((calibration.brier_skill ?? 0) * 100, 0)}%
+          {(calibration.bins || []).length > 0 && (
+            <> · accuracy by conviction {(calibration.bins || []).map((b) => `${b.bin} ${fmtNumber(b.realized_accuracy_pct, 0)}%`).join(" / ")}</>
+          )}
+        </p>
+      ) : calibration ? (
+        <p className="forecast-note">Calibration: insufficient out-of-sample history (n={calibration.n_test ?? 0}) — accumulates as data grows.</p>
+      ) : null}
     </div>
   );
 }

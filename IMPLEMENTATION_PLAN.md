@@ -357,3 +357,61 @@ results, and git history. The review's own standard is adopted as the north
 star: another qualified reviewer should be able to reproduce every input,
 calculation, and decision as-of the time it occurred.
 
+
+## Completion batch — SHIPPED 2026-07-13 (operator: "don't come back until all these are complete")
+
+Everything previously rescoped/deferred, built pragmatically at single-operator
+scale. Excluded by explicit operator decision: the experiment registry (its
+value accrues only once model variants are being iterated) and the
+shadow-evidence clock (inherently time-based).
+
+- **Shared net-cost engine**: `engine/costs.py` is now the single source —
+  Strategy/backtest/API defaults import `DEFAULT_COST_BPS_PER_SIDE` (were four
+  duplicated literals); Signal Journal, Decision Journal, model validation,
+  Evidence Lab (decay/regime/empty shapes), and PDF/HTML report exports all
+  carry `avg_alpha_after_default_costs_pct` + basis labels beside gross;
+  `opportunity._backtest_quality` charges the benchmark its round trip so the
+  score's alpha is like-for-like (was net-strategy vs gross-benchmark).
+  Stored journal rows stay gross (locked by test).
+- **Forecast calibration**: `forecast._calibration` — Brier vs the 0.25 coin,
+  P(up)=Phi(pred/train-residual sigma) (disclosed transform), realized accuracy
+  by |prediction| terciles; surfaced in the Analysis forecast panel. Live JPM:
+  Brier 0.253, flat bins — independently confirms the edge gate's verdict.
+- **DSR + PBO**: Bailey–López de Prado Deflated Sharpe (luck hurdle rises with
+  trial count) and CSCV PBO over date-aligned walk-forward alpha windows, both
+  as validation-dashboard outputs with honest data floors (DSR ≥10 windows/≥2
+  trials; PBO ≥3 models/≥16 aligned windows).
+- **Schema v10 data spine**: security_master (identity upsert that never
+  clobbers known facts), vendor_vault (hash-deduped raw fundamentals payloads),
+  price_revisions (silent restatements only — uniform dividend re-adjustment
+  shifts are excluded by median-ratio logic), corporate_actions
+  (splits/dividends captured on live fetch), and a hash-chained audit over
+  decision/outcome/fill writes with `audit_verify()` re-deriving every link
+  (tamper names the first bad seq). Persisted `price_provider` now also
+  hydrates into memory on restart.
+- **IBKR Flex adapter** (`engine/custodian.py`, dormant until
+  HELIOS_IBKR_FLEX_TOKEN/QUERY_ID): SendRequest→GetStatement with
+  generation-retry, trades/cash-transactions/positions/cash-report mapped onto
+  the ledger contract, fill dedupe keys byte-identical to the CSV path so both
+  paths reconcile to no-ops. POST /api/ledger/flex/import.
+- **Current-to-target optimizer** (`engine/rebalance.py`, CVXPY QP with a
+  deterministic capped-projection fallback): position caps, one-way turnover,
+  ADV-participation liquidity budget, cash buffer, long-only; cost-aware
+  no-trade zone; dust suppression; real-prices-only (blocks, never invents);
+  target-unreachability NAMED per constraint with shortfalls. POST
+  /api/rebalance/propose + proposal panel in Decisions.
+- **Jobs & freshness** (GET /api/data/jobs + Data Quality panel): auto-live
+  state, refresh failures, per-symbol bar age + provider label, audit-chain
+  status, recent vault entries and price revisions.
+- **Frontend prescriptions**: Output workspace renamed Results; automatic
+  first-ticker/model selection removed (App, Analysis, Evidence Lab — views
+  with visible pickers keep their labeled dropdown defaults); net-alpha
+  companions rendered beside gross in Evidence Lab and Signal Journal;
+  calibration note in Analysis; DSR/PBO line in Model Validation; routing
+  contract + Results/palette locks in Vitest (11 frontend tests) and
+  tests/test_frontend_static.py.
+
+Suites at ship: 586 backend + 11 frontend green; typecheck/lint/build clean;
+live-verified against the running terminal (jobs panel, provider hydration
+48 fmp/7 yfinance, calibration on JPM, DSR/PBO degradation, rebalance
+blocked-path, Flex dormant-path).

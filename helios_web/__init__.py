@@ -24,7 +24,7 @@ def init_app():
 
     from engine import data as engine_data, portfolio
 
-    from . import ai, analysis, core, data, decisions, ledger, models, reports, spa
+    from . import ai, analysis, core, data, decisions, ledger, models, rebalance, reports, spa
 
     app = core.app
     if not app.blueprints:
@@ -36,7 +36,7 @@ def init_app():
             engine_data.load_samples()
         engine_data.load_persisted_instruments()
         portfolio.load_persisted_models()
-        for module in (data, analysis, models, reports, ai, decisions, ledger, spa):
+        for module in (data, analysis, models, reports, ai, decisions, ledger, rebalance, spa):
             app.register_blueprint(module.bp)
         data._start_auto_live_refresh()
     return app

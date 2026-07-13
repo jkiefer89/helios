@@ -18,7 +18,8 @@ export function RiskAnalytics({
   selectedModel?: string;
   onSelectModel: (id: string) => void;
 }) {
-  const defaultModelId = selectedModel || models[0]?.id || "";
+  // No first-model fallback: risk analytics run on the model the operator chose.
+  const defaultModelId = selectedModel || "";
   const [modelId, setModelId] = useState(defaultModelId);
   const [aumInput, setAumInput] = useState("");
   const { payload, error, isLoading, load, isCurrentTarget } = useViewFetch<RiskAnalyticsResponse>({ failureMessage: "Risk analytics failed." });

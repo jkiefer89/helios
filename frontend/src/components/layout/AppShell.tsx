@@ -52,7 +52,7 @@ export const navGroups: Array<{ label: string; ids: ViewId[] }> = [
   { label: "Data", ids: ["instruments", "data-quality"] },
   { label: "Research", ids: ["opportunities", "analysis", "strategy", "evidence", "journal", "decisions"] },
   { label: "Portfolio", ids: ["models", "clinic", "risk"] },
-  { label: "Output", ids: ["reports"] },
+  { label: "Results", ids: ["reports"] },
 ];
 
 export function isViewId(value: string): value is ViewId {

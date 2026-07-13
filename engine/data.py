@@ -164,11 +164,68 @@ def register(inst: Instrument) -> None:
         unchanged = False
     if unchanged:
         return
+    _record_price_revisions(sym, prev, inst)
     # The replaced frame supersedes any memoized holding-price resolution (and
     # any failed-resolution back-off) for this symbol.
     _invalidate_resolution_caches(sym)
     # Any store change (upload, live fetch, refresh) invalidates memoized analytics.
     analytics_cache.invalidate()
+
+
+_REVISION_THRESHOLD = 0.001  # 0.1%: below this, float/adjustment jitter
+
+
+def _record_price_revisions(sym: str, prev: Instrument | None, inst: Instrument) -> None:
+    """Silent vendor restatements of ALREADY-STORED bars become durable
+    evidence (v10 spine). New bars are not revisions; only overlapping dates
+    whose close moved more than the jitter threshold are recorded."""
+    if prev is None or prev.source != "live" or inst.source != "live":
+        return
+    # A provider switch (FMP <-> yfinance fallback flip) changes adjustment
+    # methodology wholesale — that is a labeled sourcing event, not a vendor
+    # restatement; comparing across it floods the ledger with false positives
+    # (adversarial-review finding).
+    if getattr(prev, "price_provider", "") != getattr(inst, "price_provider", ""):
+        return
+    try:
+        if "close" not in prev.df or "close" not in inst.df:
+            return
+        old_close = prev.df["close"].dropna()
+        new_close = inst.df["close"].dropna()
+        overlap = old_close.index.intersection(new_close.index)
+        if overlap.empty:
+            return
+        # Exclude the most recent stored bar: same-day live quotes legitimately
+        # move until the session closes.
+        overlap = overlap[overlap < old_close.index.max()]
+        if len(overlap) < 2:
+            return
+        ratios = (new_close[overlap] / old_close[overlap]).dropna()
+        if ratios.empty:
+            return
+        # A dividend/split re-adjustment shifts EVERY bar by the same ratio —
+        # expected and explained by the corporate_actions table, not a
+        # restatement. Only bars deviating from the common shift are evidence.
+        median_ratio = float(ratios.median())
+        revisions = []
+        for ts in overlap:
+            old_px, new_px = float(old_close[ts]), float(new_close[ts])
+            if old_px <= 0 or median_ratio <= 0:
+                continue
+            deviation = abs(new_px / old_px / median_ratio - 1.0)
+            if deviation > _REVISION_THRESHOLD:
+                revisions.append({
+                    "bar_date": str(pd.Timestamp(ts).date()),
+                    "old_close": round(old_px, 6), "new_close": round(new_px, 6),
+                    "change_pct": round(deviation * 100, 4),
+                })
+        if revisions:
+            from . import persistence
+
+            persistence.get_store().record_price_revisions(
+                sym, revisions, provider=getattr(inst, "price_provider", ""))
+    except Exception:
+        return
 
 
 # --------------------------------------------------------------------------- #
@@ -513,11 +570,50 @@ def fetch_live(symbol: str, period: str = "2y", persist: bool = True) -> Instrum
 
     inst = Instrument(symbol.upper(), name, df, "live", headlines, price_provider=provider_used)
     register(inst)
+    _capture_security_facts(inst, t)
     if persist:
         _persist_instrument(inst, adjusted=True,
                             metadata={"period": period, "imported_via": "live_fetch",
                                       "price_provider": provider_used})
     return inst
+
+
+def _capture_security_facts(inst: Instrument, ticker_obj) -> None:
+    """v10 spine, best-effort: identity row + corporate actions (splits and
+    dividends the provider reports). Never blocks or slows a failed fetch."""
+    try:
+        from . import persistence
+
+        store = persistence.get_store()
+        store.record_security(inst.symbol, name=inst.name,
+                              price_provider=getattr(inst, "price_provider", ""))
+        if ticker_obj is None:
+            return
+        actions: list[dict] = []
+        try:
+            with _YF_SEMAPHORE:
+                splits = _bounded_provider_call(lambda: ticker_obj.splits)
+            for ts, ratio in (splits or {}).items() if splits is not None else []:
+                if ratio:
+                    actions.append({"action_type": "split", "ex_date": str(pd.Timestamp(ts).date()),
+                                    "value": float(ratio), "source": "yfinance"})
+        except Exception:
+            pass
+        try:
+            with _YF_SEMAPHORE:
+                dividends = _bounded_provider_call(lambda: ticker_obj.dividends)
+            if dividends is not None and len(dividends):
+                for ts, amount in dividends.tail(40).items():
+                    if amount:
+                        actions.append({"action_type": "dividend",
+                                        "ex_date": str(pd.Timestamp(ts).date()),
+                                        "value": float(amount), "source": "yfinance"})
+        except Exception:
+            pass
+        if actions:
+            store.record_corporate_actions(inst.symbol, actions)
+    except Exception:
+        return
 
 
 def load_persisted_instruments() -> None:
@@ -527,7 +623,8 @@ def load_persisted_instruments() -> None:
 
         store = persistence.get_store()
         for item in store.load_instruments():
-            register(Instrument(item.symbol, item.name, item.df, item.source, []))
+            register(Instrument(item.symbol, item.name, item.df, item.source, [],
+                                price_provider=str((item.metadata or {}).get("price_provider") or "")))
     except Exception:
         # Persistence is optional; callers can inspect /api/data/status for the warning.
         return

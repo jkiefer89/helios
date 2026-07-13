@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
-import type { DataQualityAlert, DataQualityIssue, DataQualityResponse } from "../api/types";
+import type { DataJobsResponse, DataQualityAlert, DataQualityIssue, DataQualityResponse } from "../api/types";
 import { Panel, StatTile } from "../components/cards/Panel";
 import { EmptyState } from "../components/empty-states/EmptyState";
 import { fmtNumber, fmtTimestamp, titleCase } from "../utils/format";
 
 export function DataQuality() {
   const [payload, setPayload] = useState<DataQualityResponse | null>(null);
+  const [jobs, setJobs] = useState<DataJobsResponse | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
 
@@ -15,6 +16,11 @@ export function DataQuality() {
     setError("");
     try {
       setPayload(await api.dataQuality());
+      try {
+        setJobs(await api.dataJobs());
+      } catch {
+        setJobs(null); // jobs panel is optional context; quality checks still render
+      }
     } catch (err) {
       setPayload(null);
       setError(err instanceof Error ? err.message : "Data quality dashboard unavailable.");
@@ -76,6 +82,34 @@ export function DataQuality() {
               </div>
             </Panel>
           </section>
+
+          {jobs && (
+            <Panel title="Jobs & Freshness" meta={`auto-live ${jobs.auto_live.running ? "running" : "idle"} · last ${jobs.auto_live.last_run || "never"}`}>
+              <div className="metric-grid compact-metrics">
+                <StatTile label="Stale symbols (>5d)" value={fmtNumber(jobs.stale_count, 0)} tone={jobs.stale_count ? "warning" : "positive"} />
+                <StatTile label="Recent failures" value={fmtNumber(jobs.recent_failures.length, 0)} tone={jobs.recent_failures.length ? "negative" : "positive"} />
+                <StatTile label="Audit chain" value={jobs.audit_chain.status}
+                  tone={jobs.audit_chain.status === "intact" ? "positive" : jobs.audit_chain.status === "broken" ? "negative" : "neutral"} />
+                <StatTile label="Price revisions seen" value={fmtNumber(jobs.price_revisions_recent.length, 0)}
+                  tone={jobs.price_revisions_recent.length ? "warning" : "positive"} />
+              </div>
+              {jobs.freshness.length > 0 && (
+                <div className="terminal-table" tabIndex={0} aria-label="Data freshness table">
+                  <div className="terminal-table__head"><span>Symbol</span><span>Last bar</span><span>Age (cal. days)</span><span>Rows</span><span>Provider</span></div>
+                  {jobs.freshness.slice(0, 10).map((row) => (
+                    <div className="table-row" key={row.symbol}>
+                      <strong>{row.symbol}</strong>
+                      <span>{row.last_bar}</span>
+                      <span className={row.age_calendar_days > 5 ? "tone-warning" : ""}>{row.age_calendar_days}</span>
+                      <span>{row.rows}</span>
+                      <span>{row.price_provider || "—"}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <p className="forecast-note">{jobs.basis}</p>
+            </Panel>
+          )}
 
           <Panel title="Alert Center" meta={payload.alerts.tracking_available ? `${payload.alerts.summary.notification_count} notifications` : "tracking unavailable"}>
             {!payload.alerts.tracking_available && (

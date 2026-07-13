@@ -611,7 +611,15 @@ function ModelValidationDashboard({
                 const bandText = adjusted?.status === "ok"
                   ? ` Selection-adjusted hit-rate band: ${fmtNumber(adjusted.hit_rate_ci_low_pct, 0)}–${fmtNumber(adjusted.hit_rate_ci_high_pct, 0)}%.`
                   : "";
-                return holdoutText + bandText;
+                const dsr = validation.selection?.deflated_sharpe as Record<string, number | string> | undefined;
+                const pbo = validation.selection?.pbo as Record<string, number | string> | undefined;
+                const dsrText = dsr?.status === "ok"
+                  ? ` DSR: ${fmtNumber(Number(dsr.deflated_sharpe_probability) * 100, 0)}% probability the champion beats the luckiest of ${String(dsr.n_trials)} trials.`
+                  : " DSR: accumulating (needs ≥10 windows, ≥2 trials).";
+                const pboText = pbo?.status === "ok"
+                  ? ` PBO: ${fmtNumber(Number(pbo.pbo) * 100, 0)}% of CSCV splits saw the in-sample winner fall to the bottom half out-of-sample.`
+                  : "";
+                return holdoutText + bandText + dsrText + pboText;
               })()}
             </p>
           )}

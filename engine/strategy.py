@@ -10,14 +10,14 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from . import mandate, signals
+from . import costs, mandate, signals
 
 TRADING_DAYS = 252
 
 
 def analyze_strategy(
     close: pd.Series,
-    cost_bps: float = 5.0,
+    cost_bps: float = costs.DEFAULT_COST_BPS_PER_SIDE,
     slippage_bps: float = 0.0,
     start: str | None = None,
     end: str | None = None,

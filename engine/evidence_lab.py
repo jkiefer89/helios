@@ -294,6 +294,9 @@ def _prospective_validation(target: dict[str, Any]) -> dict[str, Any]:
         "avg_forward_result_pct": _avg(entry.get("forward_result_pct") for entry in measured),
         "avg_benchmark_result_pct": _avg(entry.get("benchmark_result_pct") for entry in measured),
         "avg_alpha_pct": _avg(entry.get("alpha_pct") for entry in measured),
+        "avg_alpha_after_default_costs_pct": costs.net_of_default_costs(
+            _avg(entry.get("alpha_pct") for entry in measured)),
+        "alpha_cost_basis": costs.NET_ASSUMPTION_LABEL,
         "benchmark_comparison": signal_journal.benchmark_comparison(entries),
         "latest_entries": [_compact_journal_entry(entry) for entry in ordered[:10]],
         "caveat": "Prospective paper tracking only; no orders, brokerage execution, return guarantee, or investment advice.",
@@ -313,6 +316,7 @@ def _empty_prospective_validation(status: str, basis: str) -> dict[str, Any]:
         "avg_forward_result_pct": None,
         "avg_benchmark_result_pct": None,
         "avg_alpha_pct": None,
+        "avg_alpha_after_default_costs_pct": None,
         "benchmark_comparison": [],
         "latest_entries": [],
         "caveat": "Prospective paper tracking only; no orders, brokerage execution, return guarantee, or investment advice.",
@@ -444,6 +448,8 @@ def _empty_summary() -> dict[str, Any]:
         "avg_forward_result_pct": None,
         "avg_benchmark_result_pct": None,
         "avg_alpha_pct": None,
+        "avg_alpha_after_default_costs_pct": None,
+        "alpha_cost_basis": costs.NET_ASSUMPTION_LABEL,
         "positive_alpha_rate_pct": None,
         "first_signal_date": None,
         "last_signal_date": None,
@@ -474,6 +480,8 @@ def _regime_sensitivity(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "count": len(group),
             "hit_rate_pct": _pct(sum(1 for flag in hits if flag), len(hits)),
             "avg_alpha_pct": _avg(row.get("alpha_pct") for row in group),
+            "avg_alpha_after_default_costs_pct": costs.net_of_default_costs(
+                _avg(row.get("alpha_pct") for row in group)),
             "avg_forward_result_pct": _avg(row.get("forward_result_pct") for row in group),
             "false_positive_rate_pct": fp["rate_pct"],
         })
@@ -497,6 +505,7 @@ def _decay_row(horizon: int, rows: list[dict[str, Any]], step: int = 21) -> dict
         "hit_rate_pct": summary["hit_rate_pct"],
         "avg_forward_result_pct": summary["avg_forward_result_pct"],
         "avg_alpha_pct": summary["avg_alpha_pct"],
+        "avg_alpha_after_default_costs_pct": summary.get("avg_alpha_after_default_costs_pct"),
         "false_positive_rate_pct": _false_positive_summary(rows)["rate_pct"],
         "information_coefficient": ic,
         "confidence_bands": _bands((row.get("alpha_pct") for row in rows),

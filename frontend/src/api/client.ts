@@ -31,7 +31,9 @@ import type {
   SignalJournalResponse,
   StrategyResponse,
   TickersResponse,
+  DataJobsResponse,
   LedgerAccount,
+  RebalanceProposal,
   LedgerPerformanceResponse,
 } from "./types";
 
@@ -219,6 +221,15 @@ export const api = {
       body: JSON.stringify(body),
     }),
   ledgerAccounts: () => request<{ accounts: LedgerAccount[] }>("/api/ledger/accounts"),
+  ledgerFlexImport: () =>
+    request<Record<string, unknown>>("/api/ledger/flex/import", { method: "POST" }),
+  rebalancePropose: (body: { account_id: string; model_id: string; constraints?: Record<string, number> }) =>
+    request<RebalanceProposal>("/api/rebalance/propose", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  dataJobs: () => request<DataJobsResponse>("/api/data/jobs"),
   ledgerPerformance: (account: string) =>
     request<LedgerPerformanceResponse>(`/api/ledger/performance?account=${encodeURIComponent(account)}`),
   ledgerMapAccount: (body: { account_id: string; model_id: string; display_name?: string }) =>

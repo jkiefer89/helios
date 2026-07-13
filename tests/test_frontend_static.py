@@ -589,3 +589,52 @@ def test_csp_script_src_is_self_with_no_cdn_exception(tmp_path, monkeypatch):
         csp = client.get(path).headers["Content-Security-Policy"]
         assert "jsdelivr" not in csp, path
         assert "script-src 'self';" in csp, path
+
+
+def test_deep_review_completion_ui_prescriptions():
+    """Review completion batch: Results workspace, no silent auto-selection,
+    palette aliases, net-cost companions, rebalance proposals, jobs panel."""
+    shell = (ROOT / "frontend" / "src" / "components" / "layout" / "AppShell.tsx").read_text()
+    app = (ROOT / "frontend" / "src" / "App.tsx").read_text()
+    analysis = (ROOT / "frontend" / "src" / "views" / "Analysis.tsx").read_text()
+    evidence = (ROOT / "frontend" / "src" / "views" / "EvidenceLab.tsx").read_text()
+    journal = (ROOT / "frontend" / "src" / "views" / "SignalJournal.tsx").read_text()
+    decisions = (ROOT / "frontend" / "src" / "views" / "Decisions.tsx").read_text()
+    quality = (ROOT / "frontend" / "src" / "views" / "DataQuality.tsx").read_text()
+
+    # Output workspace renamed to Results.
+    assert '{ label: "Results", ids: ["reports"] }' in shell
+    assert '"Output"' not in shell
+
+    # No silent first-ticker/model selection anywhere in the app shell flow —
+    # including the four sibling views the adversarial review caught writing
+    # first-item defaults back into global state.
+    assert "tickers[0]?.symbol" not in app
+    assert "tickers[0]" not in analysis.split("defaultTarget")[1][:200]
+    assert "operator-chosen" in evidence or "operator-chosen" in analysis
+    for view_name in ("StrategyLab", "Reports", "PortfolioClinic", "RiskAnalytics"):
+        view_src = (ROOT / "frontend" / "src" / "views" / f"{view_name}.tsx").read_text()
+        assert "tickers[0]" not in view_src, view_name
+        assert "models[0]?.id" not in view_src, view_name
+
+    # Search palette aliases for capability names.
+    assert "Ledger — Actual vs Paper" in shell
+    assert "Saved report snapshots" in shell
+
+    # Net-of-costs companions rendered beside gross alpha.
+    assert "avg_alpha_after_default_costs_pct" in evidence
+    assert "avg_alpha_after_default_costs_pct" in journal
+    assert "Avg alpha (gross)" in evidence and "Avg alpha (gross)" in journal
+
+    # Rebalance proposal surface with named violations.
+    assert "RebalancePanel" in decisions
+    assert "rebalancePropose" in decisions
+    assert "Target not fully reachable" in decisions
+
+    # Jobs & freshness operational panel with audit-chain status.
+    assert "Jobs & Freshness" in quality
+    assert "audit_chain" in quality
+
+    # Calibration rendered with its honest basis.
+    assert "Brier" in analysis
+    assert "insufficient out-of-sample history" in analysis

@@ -867,6 +867,7 @@ export interface EvidenceLabSummary {
   avg_forward_result_pct?: number | null;
   avg_benchmark_result_pct?: number | null;
   avg_alpha_pct?: number | null;
+  avg_alpha_after_default_costs_pct?: number | null;
   positive_alpha_rate_pct?: number | null;
   first_signal_date?: string | null;
   last_signal_date?: string | null;
@@ -917,6 +918,7 @@ export interface EvidenceProspectiveValidation {
   avg_forward_result_pct?: number | null;
   avg_benchmark_result_pct?: number | null;
   avg_alpha_pct?: number | null;
+  avg_alpha_after_default_costs_pct?: number | null;
   benchmark_comparison: SignalJournalBenchmarkComparison[];
   latest_entries: EvidenceProspectiveEntry[];
   caveat: string;
@@ -943,6 +945,7 @@ export interface EvidenceLabResponse extends ProvenancePayload {
     count: number;
     hit_rate_pct?: number | null;
     avg_alpha_pct?: number | null;
+    avg_alpha_after_default_costs_pct?: number | null;
     avg_forward_result_pct?: number | null;
     false_positive_rate_pct?: number | null;
   }>;
@@ -952,6 +955,7 @@ export interface EvidenceLabResponse extends ProvenancePayload {
     hit_rate_pct?: number | null;
     avg_forward_result_pct?: number | null;
     avg_alpha_pct?: number | null;
+    avg_alpha_after_default_costs_pct?: number | null;
     false_positive_rate_pct?: number | null;
     information_coefficient?: number | null;
     confidence_bands: EvidenceConfidenceBand;
@@ -1024,7 +1028,10 @@ export interface ModelValidationResponse {
       hit_rate_ci_low_pct?: number; hit_rate_ci_high_pct?: number;
       alpha_ci_low_pct?: number; alpha_ci_high_pct?: number; basis?: string };
     prospective_confirmation?: { measured_count?: number | null;
-      hit_rate_pct?: number | null; avg_alpha_pct?: number | null; basis?: string };
+      hit_rate_pct?: number | null; avg_alpha_pct?: number | null;
+      avg_alpha_after_default_costs_pct?: number | null; basis?: string };
+    deflated_sharpe?: Record<string, number | string>;
+    pbo?: Record<string, number | string>;
   };
   summary: {
     model_count: number;
@@ -1214,6 +1221,7 @@ export interface SignalJournalSummary {
   avg_forward_result_pct?: number | null;
   avg_benchmark_result_pct?: number | null;
   avg_alpha_pct?: number | null;
+  avg_alpha_after_default_costs_pct?: number | null;
   model_count: number;
   instrument_count: number;
   research_ready_count: number;
@@ -1225,6 +1233,7 @@ export interface SignalJournalBenchmarkComparison {
   avg_forward_result_pct?: number | null;
   avg_benchmark_result_pct?: number | null;
   avg_alpha_pct?: number | null;
+  avg_alpha_after_default_costs_pct?: number | null;
   hit_rate_pct?: number | null;
 }
 
@@ -1237,6 +1246,7 @@ export interface SignalJournalModelEvidence {
   hit_rate_pct?: number | null;
   avg_score?: number | null;
   avg_alpha_pct?: number | null;
+  avg_alpha_after_default_costs_pct?: number | null;
   latest_action_label: string;
   latest_score?: number | null;
   latest_input_end_date: string;
@@ -1312,11 +1322,31 @@ export interface SignalMarker {
 export type ForecastBandKey = "p05" | "p25" | "p50" | "p75" | "p95";
 export type ForecastBands = Record<ForecastBandKey, number[]>;
 
+export interface ForecastCalibrationBin {
+  bin: string;
+  n: number;
+  avg_predicted_pct: number;
+  avg_p_up: number;
+  realized_up_rate: number;
+  realized_accuracy_pct: number;
+}
+
+export interface ForecastCalibration {
+  status: "ok" | "insufficient_data";
+  n_test?: number;
+  brier_score?: number;
+  brier_reference?: number;
+  brier_skill?: number;
+  bins?: ForecastCalibrationBin[];
+  basis?: string;
+}
+
 export interface ForecastQuality {
   r2?: number | null;
   rmse?: number | null;
   directional_accuracy?: number | null;
   n_test?: number;
+  calibration?: ForecastCalibration;
 }
 
 export interface FeatureWeight {
@@ -1692,4 +1722,58 @@ export interface AIChatResponse {
   status?: AIStatusResponse;
   data_quality?: DataQuality;
   disclaimer?: string;
+}
+
+
+export interface RebalanceTrade {
+  ticker: string;
+  side: "BUY" | "SELL";
+  current_weight_pct: number;
+  target_weight_pct: number;
+  proposed_weight_pct: number;
+  trade_usd: number;
+  est_shares: number;
+  price_used: number;
+  price_as_of: string;
+  est_cost_usd: number;
+  est_days_to_trade: number | null;
+}
+
+export interface RebalanceProposal {
+  status: "proposed" | "infeasible" | "blocked";
+  reason?: string;
+  account_id?: string;
+  model_id?: string;
+  model_name?: string;
+  snapshot_as_of?: string;
+  total_value_usd?: number;
+  method?: string;
+  trades?: RebalanceTrade[];
+  suppressed_dust_trades?: number;
+  target_reachable?: boolean;
+  violations?: Array<{ constraint: string; detail: string }>;
+  summary?: {
+    n_trades: number;
+    one_way_turnover_pct: number;
+    residual_to_target_pct: number;
+    est_total_cost_usd: number;
+    proposed_cash_pct: number;
+  };
+  unpriced_tickers?: string[];
+  warnings?: string[];
+  solver_notes?: string[];
+  basis?: string;
+  disclaimer?: string;
+}
+
+export interface DataJobsResponse {
+  auto_live: Record<string, unknown> & { running?: boolean; last_run?: string | null };
+  refresh_log: Array<{ symbol: string; status: string; rows_added: number; message: string; attempted_at: string }>;
+  recent_failures: Array<{ symbol: string; status: string; message: string; attempted_at: string }>;
+  freshness: Array<{ symbol: string; last_bar: string; age_calendar_days: number; rows: number; price_provider: string }>;
+  stale_count: number;
+  audit_chain: { status: string; entries?: number; first_bad_seq?: number };
+  vault_recent: Array<{ id: number; provider: string; endpoint: string; symbol: string; retrieved_at: string }>;
+  price_revisions_recent: Array<{ symbol: string; bar_date: string; old_close: number; new_close: number; change_pct: number; observed_at: string }>;
+  basis: string;
 }

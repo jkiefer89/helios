@@ -9,8 +9,9 @@ from __future__ import annotations
 import numpy as np
 
 from . import (
-    analytics_cache, cma, data, forecast, fundamentals, indicators, macro_events, mandate,
-    portfolio, provenance, regime as regime_mod, sec_events, sentiment, signals, strategy,
+    analytics_cache, cma, costs, data, forecast, fundamentals, indicators, macro_events,
+    mandate, portfolio, provenance, regime as regime_mod, sec_events, sentiment, signals,
+    strategy,
 )
 from ._common import dedupe as _dedupe
 
@@ -395,7 +396,12 @@ def _forecast_quality(quality: dict) -> float:
 
 
 def _backtest_quality(strategy_return: float, benchmark_return: float, sharpe: float) -> float:
-    alpha = strategy_return - benchmark_return
+    # Basis alignment: strategy_return is NET of per-side costs (strategy.py
+    # charges turnover), while benchmark buy-and-hold arrives GROSS. Charging
+    # the benchmark its one implementation round trip keeps the alpha inside
+    # this score like-for-like instead of penalizing the strategy leg only
+    # (review finding: mixed gross/net basis).
+    alpha = strategy_return - (benchmark_return - costs.ROUND_TRIP_COST_PCT)
     return float(np.clip(50 + alpha * 1.1 + sharpe * 13, 0, 100))
 
 

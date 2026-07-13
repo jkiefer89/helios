@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from flask import Blueprint, request
 
-from engine import ledger, persistence, portfolio
+from engine import custodian, ledger, persistence, portfolio
 
 from .core import ANALYSIS_ONLY_DISCLAIMER, err, ok
 
@@ -85,6 +85,16 @@ def delete_account(account_id: str):
     result = persistence.get_store().delete_ledger_account(str(account_id).strip())
     persistence.get_store().flush()
     return ok(result)
+
+
+@bp.route("/api/ledger/flex/import", methods=["POST"])
+def flex_import():
+    """Pull the configured IBKR Flex query into the ledger (idempotent)."""
+    try:
+        result = custodian.import_flex()
+    except (RuntimeError, ValueError) as exc:
+        return err(str(exc), 502)
+    return ok({**result, "disclaimer": ANALYSIS_ONLY_DISCLAIMER})
 
 
 @bp.route("/api/ledger/performance")

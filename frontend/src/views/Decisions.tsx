@@ -3,6 +3,7 @@ import { api } from "../api/client";
 import type {
   DecisionBucketStats, DecisionEntry, DecisionsResponse,
   LedgerAccount, LedgerPerformanceResponse, ModelSummary,
+  RebalanceProposal,
 } from "../api/types";
 import { Panel, StatTile } from "../components/cards/Panel";
 import { EmptyState } from "../components/empty-states/EmptyState";
@@ -366,6 +367,95 @@ function LedgerSection() {
           ))}
         </div>
       )}
+
+      <RebalancePanel key={`${accountId}:${mappedModel}`} accountId={accountId} modelId={mappedModel} />
     </Panel>
+  );
+}
+
+function RebalancePanel({ accountId, modelId }: { accountId: string; modelId: string }) {
+  const [proposal, setProposal] = useState<RebalanceProposal | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const propose = async () => {
+    if (!accountId || !modelId || busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      setProposal(await api.rebalancePropose({ account_id: accountId, model_id: modelId }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Proposal failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!accountId || !modelId) {
+    return (
+      <p className="forecast-note">
+        Map this account to a model to unlock constrained current-to-target proposals.
+      </p>
+    );
+  }
+  return (
+    <div className="rebalance-panel">
+      <div className="decision-form__row">
+        <button type="button" onClick={() => void propose()} disabled={busy}>
+          {busy ? "Solving…" : "Propose rebalance to target"}
+        </button>
+        {proposal?.method && <small>{proposal.method === "cvxpy_qp" ? "convex QP" : "capped projection"}</small>}
+      </div>
+      {error && <p className="forecast-note tone-negative">{error}</p>}
+      {proposal?.status === "blocked" && (
+        <EmptyState title="Proposal blocked" body={proposal.reason || "Missing data."} />
+      )}
+      {proposal?.status === "infeasible" && (
+        <div className="forecast-note tone-negative">
+          <strong>Constraints cannot be satisfied:</strong>
+          <ul>{(proposal.violations || []).map((v) => <li key={v.detail}>{v.detail}</li>)}</ul>
+        </div>
+      )}
+      {proposal?.status === "proposed" && proposal.summary && (
+        <>
+          <p className="forecast-note">
+            Proposal for <b>{proposal.account_id}</b> → <b>{proposal.model_name || proposal.model_id}</b>
+            {" "}(snapshot {proposal.snapshot_as_of})
+          </p>
+          <div className="stat-grid">
+            <StatTile label="Trades" value={proposal.summary.n_trades} />
+            <StatTile label="One-way turnover" value={`${fmtNumber(proposal.summary.one_way_turnover_pct, 1)}%`} />
+            <StatTile label="Residual to target" value={`${fmtNumber(proposal.summary.residual_to_target_pct, 1)}%`}
+              tone={proposal.target_reachable ? "positive" : "negative"} />
+            <StatTile label="Est. cost" value={fmtMoney(proposal.summary.est_total_cost_usd)} />
+            <StatTile label="Cash after" value={`${fmtNumber(proposal.summary.proposed_cash_pct, 1)}%`} />
+          </div>
+          {proposal.target_reachable === false && (
+            <div className="forecast-note tone-negative">
+              <strong>Target not fully reachable under current constraints:</strong>
+              <ul>{(proposal.violations || []).map((v) => <li key={v.detail}>{v.detail}</li>)}</ul>
+            </div>
+          )}
+          {(proposal.trades || []).length > 0 && (
+            <div className="terminal-table" tabIndex={0} aria-label="Proposed trades table">
+              <div className="terminal-table__head">
+                <span>Ticker</span><span>Side</span><span>Now → Target</span><span>Proposed</span><span>Trade</span><span>Days @ cap</span>
+              </div>
+              {(proposal.trades || []).slice(0, 20).map((t) => (
+                <div className="table-row" key={t.ticker}>
+                  <strong>{t.ticker}</strong>
+                  <span className={t.side === "BUY" ? "tone-positive" : "tone-negative"}>{t.side}</span>
+                  <span>{fmtNumber(t.current_weight_pct, 1)}% → {fmtNumber(t.target_weight_pct, 1)}%</span>
+                  <span>{fmtNumber(t.proposed_weight_pct, 1)}%</span>
+                  <span>{fmtMoney(t.trade_usd)}<small>≈{fmtNumber(t.est_shares, 0)} sh @ {fmtNumber(t.price_used, 2)}</small></span>
+                  <span>{t.est_days_to_trade != null ? fmtNumber(t.est_days_to_trade, 1) : "ADV n/a"}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          <p className="forecast-note">{proposal.basis} {proposal.disclaimer}</p>
+        </>
+      )}
+    </div>
   );
 }

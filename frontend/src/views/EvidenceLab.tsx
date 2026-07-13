@@ -29,10 +29,9 @@ export function EvidenceLab({
   const defaultTarget = useMemo(() => {
     if (selectedModel) return `model:${selectedModel}`;
     if (selectedInstrument) return `instrument:${selectedInstrument}`;
-    if (models[0]) return `model:${models[0].id}`;
-    if (tickers[0]) return `instrument:${tickers[0].symbol}`;
+    // No first-model/ticker fallback: evidence targets are operator-chosen.
     return "";
-  }, [models, selectedInstrument, selectedModel, tickers]);
+  }, [selectedInstrument, selectedModel]);
   const [target, setTarget] = useState(defaultTarget);
   const [horizon, setHorizon] = useState("21");
   const [trainWindow, setTrainWindow] = useState("252");
@@ -121,7 +120,12 @@ export function EvidenceLab({
             </Panel>
             <Panel title="Alpha vs Benchmark" meta={payload.benchmark.symbol}>
               <div className="metric-grid compact-metrics">
-                <StatTile label="Avg alpha" value={fmtPct(payload.summary.avg_alpha_pct)} tone={toneForSigned(payload.summary.avg_alpha_pct)} />
+                <StatTile label="Avg alpha (gross)" value={fmtPct(payload.summary.avg_alpha_pct)} tone={toneForSigned(payload.summary.avg_alpha_pct)} />
+                <StatTile
+                  label="Alpha net of default costs"
+                  value={fmtPct(payload.summary.avg_alpha_after_default_costs_pct)}
+                  tone={toneForSigned(payload.summary.avg_alpha_after_default_costs_pct)}
+                />
                 <StatTile label="Forward" value={fmtPct(payload.summary.avg_forward_result_pct)} tone={toneForSigned(payload.summary.avg_forward_result_pct)} />
                 <StatTile label="Benchmark" value={fmtPct(payload.summary.avg_benchmark_result_pct)} />
                 <StatTile label="Status" value={titleCase(payload.benchmark.status)} />
@@ -250,7 +254,12 @@ function ProspectiveValidationPanel({ payload }: { payload: EvidenceLabResponse 
             <StatTile label="Measured" value={fmtNumber(prospective.measured_count, 0)} tone={prospective.measured_count ? "positive" : "warning"} />
             <StatTile label="Pending" value={fmtNumber(prospective.pending_count, 0)} tone={prospective.pending_count ? "warning" : "positive"} />
             <StatTile label="Hit rate" value={fmtPct(prospective.hit_rate_pct)} tone={toneForHit(prospective.hit_rate_pct)} />
-            <StatTile label="Avg alpha" value={fmtPct(prospective.avg_alpha_pct)} tone={toneForSigned(prospective.avg_alpha_pct)} />
+            <StatTile label="Avg alpha (gross)" value={fmtPct(prospective.avg_alpha_pct)} tone={toneForSigned(prospective.avg_alpha_pct)} />
+            <StatTile
+              label="Alpha net of default costs"
+              value={fmtPct(prospective.avg_alpha_after_default_costs_pct)}
+              tone={toneForSigned(prospective.avg_alpha_after_default_costs_pct)}
+            />
           </div>
           <p className="muted">{prospective.basis}</p>
           <p className="forecast-note">

@@ -34,11 +34,13 @@ from . import data, persistence, portfolio
 _DATE_ALIASES = ("trade date", "date", "trade_date", "transaction date", "activity date", "run date")
 _SETTLE_ALIASES = ("settle date", "settlement date", "settle_date")
 _TICKER_ALIASES = ("symbol", "ticker", "security", "security id")
-_SIDE_ALIASES = ("side", "action", "transaction type", "type", "activity", "description")
+_SIDE_ALIASES = ("side", "action", "transaction type", "type", "activity", "description",
+                 "buy/sell", "buysell")
 _SHARES_ALIASES = ("shares", "quantity", "qty", "units")
 _PRICE_ALIASES = ("price", "fill price", "execution price", "trade price", "price ($)")
 _FEES_ALIASES = ("fees", "commission", "commission & fees", "fees & comm", "fee")
-_AMOUNT_ALIASES = ("amount", "net amount", "amount ($)", "net amount ($)")
+_AMOUNT_ALIASES = ("amount", "net amount", "amount ($)", "net amount ($)",
+                   "netcash", "net cash", "proceeds")
 _MV_ALIASES = ("market value", "value", "market value ($)", "current value")
 _COST_ALIASES = ("cost basis", "cost", "cost basis total")
 
@@ -118,7 +120,8 @@ def parse_fills_csv(raw: bytes, account_id: str, source_filename: str = "") -> d
     amount_col = _pick(cols, _AMOUNT_ALIASES)
     settle_col = _pick(cols, _SETTLE_ALIASES)
     decision_col = _pick(cols, ("decision id", "decision_id", "decision"))
-    exec_col = _pick(cols, ("exec id", "execution id", "order id", "confirm", "confirmation"))
+    exec_col = _pick(cols, ("exec id", "execution id", "order id", "confirm", "confirmation",
+                            "ibexecid", "ib exec id", "exec_id", "tradeid", "trade id"))
 
     today_plus = pd.Timestamp(datetime.now(timezone.utc).date()) + pd.Timedelta(days=1)
     fills: list[dict[str, Any]] = []
@@ -144,13 +147,15 @@ def parse_fills_csv(raw: bytes, account_id: str, source_filename: str = "") -> d
             warnings.append(f"Row {index + 2}: unrecognized action '{row[side_col]}' — skipped; "
                             "map it manually if it is a trade or a cash flow.")
             continue
-        ticker = data.clean_symbol(str(row[ticker_col]), fallback="") if ticker_col else ""
+        ticker = (data.clean_symbol(str(row[ticker_col]), fallback="")
+                  if ticker_col is not None and pd.notna(row[ticker_col]) else "")
         shares = _num(row[shares_col]) if shares_col else None
         price = _num(row[price_col]) if price_col else None
         fees = _num(row[fees_col]) if fees_col else None
         amount = _num(row[amount_col]) if amount_col else None
         if side == "non_trade":
-            nt_ticker = data.clean_symbol(str(row[ticker_col]), fallback="") if ticker_col else ""
+            nt_ticker = (data.clean_symbol(str(row[ticker_col]), fallback="")
+                         if ticker_col is not None and pd.notna(row[ticker_col]) else "")
             nt_amount = _num(row[amount_col]) if amount_col else None
             nt_key = (f"{account_id}|{date.date().isoformat()}|{nt_ticker}|non_trade"
                       f"|{non_trade_subtype}|{nt_amount if nt_amount is not None else 'na'}|{index}")
@@ -171,6 +176,10 @@ def parse_fills_csv(raw: bytes, account_id: str, source_filename: str = "") -> d
             if not ticker:
                 warnings.append(f"Row {index + 2}: {side} with no ticker — skipped.")
                 continue
+            if shares is not None:
+                # IBKR-style exports sign sell quantities negative; the side
+                # column already carries direction, so magnitude is the fact.
+                shares = abs(shares)
             if (shares is None or shares == 0) and amount and price:
                 shares = abs(amount) / price
             if (price is None or price <= 0) and amount and shares:

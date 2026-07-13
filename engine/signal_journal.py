@@ -18,7 +18,7 @@ from typing import Any
 
 import pandas as pd
 
-from . import data, persistence, portfolio, provenance
+from . import costs, data, persistence, portfolio, provenance
 from ._common import (
     avg as _avg,
     clean_close as _clean_close,
@@ -230,6 +230,10 @@ def summarize_entries(entries: list[dict[str, Any]]) -> dict[str, Any]:
         "avg_forward_result_pct": _avg(entry.get("forward_result_pct") for entry in measured),
         "avg_benchmark_result_pct": _avg(entry.get("benchmark_result_pct") for entry in measured),
         "avg_alpha_pct": _avg(entry.get("alpha_pct") for entry in measured),
+        "avg_alpha_after_default_costs_pct": costs.net_of_default_costs(
+            _avg(entry.get("alpha_pct") for entry in measured)),
+        "alpha_basis": costs.GROSS_LABEL,
+        "alpha_cost_basis": costs.NET_ASSUMPTION_LABEL,
         "model_count": len({entry.get("target_id") for entry in entries if entry.get("target_kind") == "model"}),
         "instrument_count": len({entry.get("target_id") for entry in entries if entry.get("target_kind") == "instrument"}),
         "research_ready_count": len(real),
@@ -262,6 +266,8 @@ def benchmark_comparison(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "avg_forward_result_pct": _avg(entry.get("forward_result_pct") for entry in rows_for_benchmark),
             "avg_benchmark_result_pct": _avg(entry.get("benchmark_result_pct") for entry in rows_for_benchmark),
             "avg_alpha_pct": _avg(entry.get("alpha_pct") for entry in rows_for_benchmark),
+            "avg_alpha_after_default_costs_pct": costs.net_of_default_costs(
+                _avg(entry.get("alpha_pct") for entry in rows_for_benchmark)),
             "hit_rate_pct": _pct(sum(1 for flag in hit_flags if flag), len(hit_flags)),
             "demo_measured_count": demo_measured.pop(benchmark, 0),
         })
@@ -272,6 +278,7 @@ def benchmark_comparison(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "avg_forward_result_pct": None,
             "avg_benchmark_result_pct": None,
             "avg_alpha_pct": None,
+            "avg_alpha_after_default_costs_pct": None,
             "hit_rate_pct": None,
             "demo_measured_count": count,
         })
@@ -301,6 +308,8 @@ def model_evidence(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "hit_rate_pct": _pct(sum(1 for flag in hit_flags if flag), len(hit_flags)),
             "avg_score": _avg(entry.get("score") for entry in model_entries),
             "avg_alpha_pct": _avg(entry.get("alpha_pct") for entry in measured),
+            "avg_alpha_after_default_costs_pct": costs.net_of_default_costs(
+                _avg(entry.get("alpha_pct") for entry in measured)),
             "latest_action_label": latest.get("action_label") or "",
             "latest_score": latest.get("score"),
             "latest_input_end_date": latest.get("input_end_date") or "",
@@ -347,6 +356,7 @@ def drift_series(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "cumulative_measured_count": measured_count,
             "cumulative_hit_rate_pct": _pct(hit_count, measured_count),
             "cumulative_avg_alpha_pct": _avg(alpha_values),
+            "cumulative_avg_alpha_net_pct": costs.net_of_default_costs(_avg(alpha_values)),
         })
     return out
 

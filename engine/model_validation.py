@@ -9,7 +9,9 @@ from __future__ import annotations
 from statistics import NormalDist, stdev
 from typing import Any
 
-from . import evidence_lab, model_governance, portfolio
+import numpy as np
+
+from . import costs, evidence_lab, model_governance, portfolio
 from ._common import avg as _avg
 
 # Ranking uses the FIRST ~80% of walk-forward windows (chronological); the
@@ -69,14 +71,27 @@ def dashboard(
     if champion:
         selection["champion_adjusted"] = _selection_adjusted_ci(
             champion.get("ci_inputs") or {}, max(1, len(eligible)))
+        overlap = max(1.0, float(horizon_days) / max(1, int(step)))
+        selection["deflated_sharpe"] = _deflated_sharpe(
+            [a for _, a in champion.get("_alpha_series") or []],
+            [_sharpe([a for _, a in row.get("_alpha_series") or []]) for row in eligible],
+            overlap_factor=overlap)
+        selection["pbo"] = _pbo_cscv(
+            {row["model_id"]: dict(row.get("_alpha_series") or []) for row in eligible},
+            overlap_factor=overlap)
         prospective = champion.get("prospective_validation") or {}
         selection["prospective_confirmation"] = {
             "measured_count": prospective.get("measured_count"),
             "hit_rate_pct": prospective.get("hit_rate_pct"),
             "avg_alpha_pct": prospective.get("avg_alpha_pct"),
+            "avg_alpha_after_default_costs_pct": costs.net_of_default_costs(
+                prospective.get("avg_alpha_pct")),
             "basis": "Out-of-sample Signal Journal record for the champion — "
-                     "untouched by ranking by construction.",
+                     "untouched by ranking by construction; alpha gross, net companion "
+                     "at the disclosed default round trip.",
         }
+    for row in ordered:
+        row.pop("_alpha_series", None)
     return {
         "selection": selection,
         "models": ordered,
@@ -190,6 +205,8 @@ def _validation_row(
         },
         "holdout_confirmation": holdout_confirmation,
         "ci_inputs": _ci_inputs(windows),
+        "_alpha_series": [(str(r.get("signal_date") or ""), float(r["alpha_pct"]))
+                          for r in windows if isinstance(r.get("alpha_pct"), (int, float))],
         "model_id": model.id,
         "model_name": model.name,
         "mandate": model.mandate_key,
@@ -226,6 +243,8 @@ def _segment_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "hit_rate_pct": (round(100.0 * sum(1 for f in hit_flags if f) / len(hit_flags), 2)
                          if hit_flags else None),
         "avg_alpha_pct": round(sum(alphas) / len(alphas), 4) if alphas else None,
+        "avg_alpha_after_default_costs_pct": (
+            costs.net_of_default_costs(round(sum(alphas) / len(alphas), 4)) if alphas else None),
         "false_positive_rate_pct": (round(100.0 * fps / len(actionable), 2)
                                     if actionable else None),
     }
@@ -275,6 +294,9 @@ def _selection_adjusted_ci(inputs: dict[str, Any], n_trials: int) -> dict[str, A
     if inputs.get("alpha_mean") is not None and inputs.get("alpha_se") is not None:
         out["alpha_ci_low_pct"] = round(inputs["alpha_mean"] - z * inputs["alpha_se"], 4)
         out["alpha_ci_high_pct"] = round(inputs["alpha_mean"] + z * inputs["alpha_se"], 4)
+        out["alpha_ci_net_low_pct"] = costs.net_of_default_costs(out["alpha_ci_low_pct"])
+        out["alpha_ci_net_high_pct"] = costs.net_of_default_costs(out["alpha_ci_high_pct"])
+        out["alpha_cost_basis"] = costs.NET_ASSUMPTION_LABEL
     return out
 
 
@@ -404,3 +426,138 @@ def _number(value: Any, *, default: float | None) -> float | None:
 
 def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
+
+
+# --------------------------------------------------------------------------- #
+# Selection-adjusted evidence v2: DSR + PBO (review priority fix — "correct
+# for all trials"; both are validation OUTPUTS, not footnotes)
+# --------------------------------------------------------------------------- #
+_EULER_GAMMA = 0.5772156649015329
+
+
+def _sharpe(values: list[float]) -> float | None:
+    """Per-window Sharpe of an alpha series (not annualized — used only to
+    compare trials measured on the same window grid)."""
+    if len(values) < 2:
+        return None
+    arr = np.asarray(values, dtype=float)
+    sd = float(arr.std(ddof=1))
+    if sd <= 1e-12:
+        return None
+    return float(arr.mean() / sd)
+
+
+def _deflated_sharpe(champion_alphas: list[float], trial_sharpes: list,
+                     overlap_factor: float = 1.0) -> dict[str, Any]:
+    """Bailey & Lopez de Prado's Deflated Sharpe Ratio: the probability the
+    champion's Sharpe exceeds what the LUCKIEST of N trials would show by
+    chance, adjusted for the alpha series' skew/kurtosis. Degrades honestly
+    below the data floor instead of reporting noise."""
+    from statistics import NormalDist
+
+    trials = [s for s in trial_sharpes if s is not None]
+    n = len(champion_alphas)
+    # Overlapping windows (step < horizon) share forward days and are NOT
+    # independent; treating them as such overstates DSR in the dangerous
+    # direction. Deflate to the effective count, same convention as the
+    # evidence-lab confidence bands (adversarial-review finding).
+    n_eff = int(n / max(1.0, overlap_factor))
+    n_trials = len(trials)
+    if n_eff < 10 or n_trials < 2:
+        return {"status": "insufficient_data", "n_observations": n,
+                "n_effective": n_eff, "overlap_factor": round(overlap_factor, 2),
+                "n_trials": n_trials,
+                "note": ("Needs >=10 EFFECTIVE (overlap-adjusted) champion windows and "
+                         ">=2 ranked trials — accumulates as walk-forward history grows.")}
+    arr = np.asarray(champion_alphas, dtype=float)
+    sd = float(arr.std(ddof=1))
+    if sd <= 1e-12:
+        return {"status": "insufficient_data", "n_observations": n, "n_trials": n_trials,
+                "note": "Champion alpha series has no variance."}
+    sr = float(arr.mean() / sd)
+    centered = arr - arr.mean()
+    skew = float(np.mean(centered ** 3) / sd ** 3)
+    kurt = float(np.mean(centered ** 4) / sd ** 4)          # non-excess
+    var_sr = float(np.var(np.asarray(trials, dtype=float), ddof=1)) if n_trials > 1 else 0.0
+    nd = NormalDist()
+    if var_sr > 1e-12:
+        sr_star = (var_sr ** 0.5) * (
+            (1.0 - _EULER_GAMMA) * nd.inv_cdf(1.0 - 1.0 / n_trials)
+            + _EULER_GAMMA * nd.inv_cdf(1.0 - 1.0 / (n_trials * 2.718281828459045)))
+    else:
+        sr_star = 0.0   # identical trials: no selection lift to deflate
+    denom_sq = 1.0 - skew * sr + ((kurt - 1.0) / 4.0) * sr * sr
+    if denom_sq <= 1e-12:
+        return {"status": "insufficient_data", "n_observations": n, "n_trials": n_trials,
+                "note": "Higher-moment adjustment degenerate for this series."}
+    dsr = nd.cdf((sr - sr_star) * ((n_eff - 1) ** 0.5) / (denom_sq ** 0.5))
+    return {
+        "status": "ok",
+        "sharpe_per_window": round(sr, 4),
+        "expected_max_sharpe_under_trials": round(sr_star, 4),
+        "n_observations": n,
+        "n_effective": n_eff,
+        "overlap_factor": round(overlap_factor, 2),
+        "n_trials": n_trials,
+        "deflated_sharpe_probability": round(float(dsr), 4),
+        "basis": ("P(champion Sharpe > the luckiest of N trials by chance), skew/kurtosis "
+                  "adjusted (Bailey & Lopez de Prado). Confidence scales with the "
+                  "EFFECTIVE window count (raw / overlap factor, matching the evidence-lab "
+                  "bands); n_trials is a LOWER bound on real selection pressure "
+                  "(see n_trials_not_counted)."),
+    }
+
+
+def _pbo_cscv(series_by_model: dict[str, dict[str, float]],
+              overlap_factor: float = 1.0) -> dict[str, Any]:
+    """Probability of Backtest Overfitting via CSCV: across symmetric
+    train/test block splits of the aligned window grid, how often does the
+    in-sample winner rank in the bottom half out-of-sample?"""
+    from itertools import combinations
+
+    if len(series_by_model) < 3:
+        return {"status": "insufficient_data", "n_trials": len(series_by_model),
+                "note": "CSCV needs >=3 ranked models — add models or wait for history."}
+    common_dates = sorted(set.intersection(*(set(s) for s in series_by_model.values())))
+    # Overlapping windows leak in-sample information across CSCV block
+    # boundaries and bias PBO downward (looks less overfit). Decimate to a
+    # non-overlapping subgrid first — honesty over sample size.
+    stride = max(1, int(round(overlap_factor)))
+    decimated = common_dates[::stride]
+    T, N = len(decimated), len(series_by_model)
+    if T < 16:
+        return {"status": "insufficient_data", "n_trials": N,
+                "n_aligned_windows": len(common_dates),
+                "n_after_overlap_decimation": T,
+                "note": ("CSCV needs >=16 NON-OVERLAPPING walk-forward windows shared by "
+                         "every model (overlap-decimated at stride "
+                         f"{stride}).")}
+    model_ids = sorted(series_by_model)
+    matrix = np.array([[series_by_model[m][d] for m in model_ids] for d in decimated])
+    S = 8 if T >= 32 else 6 if T >= 24 else 4
+    blocks = np.array_split(np.arange(T), S)
+    logits: list[float] = []
+    for train_ids in combinations(range(S), S // 2):
+        train_rows = np.concatenate([blocks[i] for i in train_ids])
+        test_rows = np.concatenate([blocks[i] for i in range(S) if i not in train_ids])
+        best = int(np.argmax(matrix[train_rows].mean(axis=0)))
+        oos = matrix[test_rows].mean(axis=0)
+        rank = (float((oos < oos[best]).sum()) + 0.5 * float((oos == oos[best]).sum() - 1) + 1.0) / (N + 1)
+        rank = min(max(rank, 1e-6), 1 - 1e-6)
+        logits.append(float(np.log(rank / (1.0 - rank))))
+    pbo = float(np.mean(np.asarray(logits) <= 0.0))
+    return {
+        "status": "ok",
+        "pbo": round(pbo, 4),
+        "n_splits": len(logits),
+        "n_trials": N,
+        "n_aligned_windows": len(common_dates),
+        "n_after_overlap_decimation": T,
+        "overlap_stride": stride,
+        "block_count": S,
+        "basis": ("CSCV (Bailey et al.): fraction of symmetric block splits where the "
+                  "in-sample champion falls in the bottom half out-of-sample. Alpha "
+                  "windows aligned by signal date across all ranked models, DECIMATED "
+                  "to a non-overlapping subgrid when step < horizon. "
+                  "PBO near 0 = selection is robust; near 0.5+ = the ranking is noise."),
+    }

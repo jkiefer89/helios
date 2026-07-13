@@ -85,9 +85,11 @@ def _evaluate(X, y, alpha=1.0):
     n = len(y)
     split = int(n * 0.7)
     if split < 30 or n - split < 10:
-        return {"r2": None, "rmse": None, "directional_accuracy": None, "n_test": 0}
+        return {"r2": None, "rmse": None, "directional_accuracy": None, "n_test": 0,
+                "calibration": {"status": "insufficient_data", "n_test": max(0, n - split)}}
     w, b, mean, std = _ridge_fit(X[:split], y[:split], alpha)
     with np.errstate(all="ignore"):
+        train_pred = _standardize(X[:split], mean, std) @ w + b
         pred = _standardize(X[split:], mean, std) @ w + b
     actual = y[split:]
     rmse = float(np.sqrt(np.mean((pred - actual) ** 2)))
@@ -96,7 +98,59 @@ def _evaluate(X, y, alpha=1.0):
     r2 = float(1 - ss_res / ss_tot) if ss_tot > 1e-12 else None
     nonzero = actual != 0
     dir_acc = float(np.mean(np.sign(pred[nonzero]) == np.sign(actual[nonzero]))) if nonzero.any() else None
-    return {"r2": r2, "rmse": rmse, "directional_accuracy": dir_acc, "n_test": int(n - split)}
+    resid_sigma = float(np.std(y[:split] - train_pred))
+    return {"r2": r2, "rmse": rmse, "directional_accuracy": dir_acc, "n_test": int(n - split),
+            "calibration": _calibration(pred, actual, resid_sigma)}
+
+
+def _calibration(pred: np.ndarray, actual: np.ndarray, resid_sigma: float) -> dict:
+    """Out-of-sample calibration: does predicted conviction line up with
+    realized accuracy? (review priority fix — DA alone can hide a model whose
+    strong calls are no better than its weak ones).
+
+    P(up) derives from the point forecast via the train-residual scale
+    (Phi(pred/sigma)) — a disclosed transform, not a fitted probability model.
+    Brier is scored against realized direction; 0.25 is the uninformed coin.
+    """
+    from math import erf, sqrt
+
+    mask = actual != 0
+    pred, actual = np.asarray(pred)[mask], np.asarray(actual)[mask]
+    n = int(len(pred))
+    if n < 10 or resid_sigma <= 1e-12:
+        return {"status": "insufficient_data", "n_test": n}
+    p_up = np.array([0.5 * (1.0 + erf(p / (resid_sigma * sqrt(2.0)))) for p in pred])
+    realized_up = (actual > 0).astype(float)
+    brier = float(np.mean((p_up - realized_up) ** 2))
+    bins: list[dict] = []
+    magnitude = np.abs(pred)
+    edges = np.quantile(magnitude, [0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0])
+    for i, label in enumerate(("weak", "moderate", "strong")):
+        lo, hi = edges[i], edges[i + 1]
+        sel = (magnitude >= lo) & ((magnitude <= hi) if i == 2 else (magnitude < hi))
+        if not sel.any():
+            continue
+        hits = np.sign(pred[sel]) == np.sign(actual[sel])
+        bins.append({
+            "bin": label,
+            "n": int(sel.sum()),
+            "avg_predicted_pct": round(float(np.mean(pred[sel])) * 100, 4),
+            "avg_p_up": round(float(np.mean(p_up[sel])), 4),
+            "realized_up_rate": round(float(np.mean(realized_up[sel])), 4),
+            "realized_accuracy_pct": round(float(np.mean(hits)) * 100, 2),
+        })
+    return {
+        "status": "ok",
+        "n_test": n,
+        "brier_score": round(brier, 4),
+        "brier_reference": 0.25,
+        "brier_skill": round(1.0 - brier / 0.25, 4),
+        "bins": bins,
+        "basis": ("Walk-forward test segment only. P(up) = Phi(prediction / train-residual "
+                  "sigma) — a disclosed transform of the point forecast, not a fitted "
+                  "probability model. Bins are |prediction| terciles; a calibrated model "
+                  "shows realized accuracy rising with conviction. Brier 0.25 = coin."),
+    }
 
 
 # --------------------------------------------------------------------------- #

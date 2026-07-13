@@ -21,3 +21,10 @@ describe("workspace navigation mapping", () => {
     expect(navGroups.length).toBe(5);
   });
 });
+
+describe("review prescriptions (deep-review completion)", () => {
+  it("names the output workspace Results", () => {
+    expect(navGroups.map((g) => g.label)).toContain("Results");
+    expect(navGroups.map((g) => g.label)).not.toContain("Output");
+  });
+});

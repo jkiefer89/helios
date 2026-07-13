@@ -83,8 +83,9 @@ export default function App() {
     setMandates(mandatePayload.mandates);
     setDataStatus(statusPayload);
     setLiveAvailable(tickerPayload.live_available);
-    setSelectedInstrument((current) => current || tickerPayload.tickers[0]?.symbol || "");
-    setSelectedModel((current) => current || (tickerPayload.tickers.length ? "" : modelPayload.models[0]?.id || ""));
+    // No automatic first-ticker/model selection (review finding): analysis
+    // context is always something the operator chose — via the sidebar, the
+    // search palette, or a deep link — never a silent default.
   };
 
   const refreshCommand = async () => {

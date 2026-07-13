@@ -215,6 +215,48 @@ def data_status():
     return ok(_data_status_payload())
 
 
+@bp.route("/api/data/jobs")
+def data_jobs():
+    """Run history + freshness for every background data job — the review's
+    orchestrator-visibility intent at single-operator scale: last run, per-
+    symbol freshness/failures, provider labels, and audit-chain integrity."""
+    from datetime import date as _date
+
+    store = persistence.get_store()
+    freshness = []
+    today = _date.today()
+    for inst in data.all_instruments():
+        if inst.source != "live" or "close" not in inst.df:
+            continue
+        close = inst.df["close"].dropna()
+        if close.empty:
+            continue
+        last_bar = close.index.max()
+        freshness.append({
+            "symbol": inst.symbol,
+            "last_bar": str(last_bar.date()),
+            "age_calendar_days": int((today - last_bar.date()).days),
+            "rows": int(len(close)),
+            "price_provider": getattr(inst, "price_provider", "") or "",
+        })
+    freshness.sort(key=lambda row: -row["age_calendar_days"])
+    logs = store.refresh_log(limit=100)
+    failures = [row for row in logs if row.get("status") == "error"]
+    return ok({
+        "auto_live": _auto_live_status(),
+        "refresh_log": logs,
+        "recent_failures": failures[:20],
+        "freshness": freshness,
+        "stale_count": sum(1 for row in freshness if row["age_calendar_days"] > 5),
+        "audit_chain": store.audit_verify(limit=50000),
+        "vault_recent": store.vault_entries(limit=10),
+        "price_revisions_recent": store.price_revisions(limit=10),
+        "basis": ("Freshness ages are calendar days since the last stored bar "
+                  "(weekends/holidays inflate them by design — a Monday shows 2). "
+                  "Audit chain is re-derived hash-by-hash on every call."),
+    })
+
+
 @bp.route("/api/data-quality")
 def data_quality_dashboard():
     return ok(data_quality.dashboard_payload())

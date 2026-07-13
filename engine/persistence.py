@@ -28,7 +28,7 @@ except Exception:  # pragma: no cover - exercised when dependency install is bro
     Fernet = None
     InvalidToken = Exception
 
-SCHEMA_VERSION = 9  # 7: + macro_history; 8: + ledger + fundamentals_snapshots; 9: PIT first/last-of-day slots + retrieved_at + recon_warnings
+SCHEMA_VERSION = 10  # 8: + ledger + fundamentals_snapshots; 9: PIT slots; 10: security master + vendor vault + price revisions + corporate actions + audit chain
 REAL_SOURCES = {"live", "upload"}
 DISABLED_VALUES = {"", "0", "false", "off", "disabled", "none"}
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[1] / ".helios" / "helios.db"
@@ -65,6 +65,18 @@ class PersistedModel:
     source_filename: str
     holdings: list[dict[str, Any]]
     metadata: dict[str, Any]
+
+
+_AUDIT_APPEND_LOCK = threading.Lock()
+
+
+def _json_dumps_stable(payload: dict) -> str:
+    """Deterministic serialization for audit hashing (sorted keys, no spaces)."""
+    import json as _j
+    try:
+        return _j.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    except Exception:
+        return str(payload)
 
 
 def utc_now() -> str:
@@ -1395,7 +1407,11 @@ class SQLiteStore:
                     "SELECT * FROM decision_journal WHERE decision_id = ?",
                     (redact_secrets(str(entry["decision_id"]))[:64],),
                 ).fetchone()
-                return {"recorded": True, "entry": self._decision_row(row) if row else None}
+            self.audit_append("decision.record", {
+                "decision_id": entry["decision_id"], "target_id": entry.get("target_id"),
+                "my_action": entry.get("my_action"), "decision_date": entry.get("decision_date"),
+                "decision_price": entry.get("decision_price")})
+            return {"recorded": True, "entry": self._decision_row(row) if row else None}
         except Exception as exc:
             self.warning = f"Could not record decision: {exc}"
             return {"recorded": False, "warning": self.warning}
@@ -1454,6 +1470,9 @@ class SQLiteStore:
                         clean_id,
                     ),
                 )
+            self.audit_append("decision.outcomes", {
+                "decision_id": clean_id, "status": merged_status,
+                "horizons": sorted(merged), "evaluated_at": str(evaluated_at or "")})
         except Exception as exc:
             self.warning = f"Could not update decision outcomes: {exc}"
 
@@ -1625,6 +1644,11 @@ class SQLiteStore:
                         inserted += 1
                     else:
                         duplicates += 1
+            if inserted:
+                self.audit_append("ledger.fills", {
+                    "inserted": inserted, "duplicates": duplicates,
+                    "accounts": sorted({str(f.get("account_id") or "") for f in fills}),
+                    "dedupe_keys": sorted(str(f.get("dedupe_key") or "") for f in fills)[:50]})
             return {"inserted": inserted, "duplicates": duplicates}
         except Exception as exc:
             self.warning = f"Could not record fills: {exc}"
@@ -1731,6 +1755,269 @@ class SQLiteStore:
                 } for row in rows]
         except Exception:
             return []
+
+    def account_positions(self, account_id: str, as_of: str | None = None) -> list[dict[str, Any]]:
+        """Positions for one snapshot date; latest snapshot when as_of is None."""
+        if not self.available:
+            return []
+        try:
+            with self._connect() as conn:
+                target = as_of
+                if target is None:
+                    row = conn.execute(
+                        "SELECT MAX(as_of) AS latest FROM account_positions WHERE account_id = ?",
+                        (account_id,),
+                    ).fetchone()
+                    target = row["latest"] if row else None
+                if not target:
+                    return []
+                rows = conn.execute(
+                    "SELECT * FROM account_positions WHERE account_id = ? AND as_of = ? "
+                    "ORDER BY market_value DESC",
+                    (account_id, str(target)[:10]),
+                ).fetchall()
+                return [{
+                    "account_id": row["account_id"], "as_of": row["as_of"],
+                    "ticker": row["ticker"], "shares": row["shares"],
+                    "price": row["price"], "market_value": row["market_value"],
+                    "cost_basis": row["cost_basis"],
+                } for row in rows]
+        except Exception:
+            return []
+
+    # ------------------------------------------------------------------ #
+    # v10 data-architecture spine (all best-effort: never block a fetch)
+    # ------------------------------------------------------------------ #
+    def record_security(self, symbol: str, *, name: str = "", figi: str = "",
+                        exchange: str = "", security_type: str = "",
+                        price_provider: str = "") -> None:
+        """Upsert identity facts, keeping any already-known non-empty field."""
+        if not self.available:
+            return
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO security_master(symbol, name, figi, exchange, security_type,
+                                                price_provider, first_seen, last_verified)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(symbol) DO UPDATE SET
+                      name = CASE WHEN excluded.name != '' THEN excluded.name ELSE name END,
+                      figi = CASE WHEN excluded.figi != '' THEN excluded.figi ELSE figi END,
+                      exchange = CASE WHEN excluded.exchange != '' THEN excluded.exchange ELSE exchange END,
+                      security_type = CASE WHEN excluded.security_type != '' THEN excluded.security_type ELSE security_type END,
+                      price_provider = CASE WHEN excluded.price_provider != '' THEN excluded.price_provider ELSE price_provider END,
+                      last_verified = excluded.last_verified
+                    """,
+                    (str(symbol).upper()[:16], redact_secrets(str(name))[:120],
+                     str(figi)[:16], str(exchange)[:24], str(security_type)[:24],
+                     str(price_provider)[:32], utc_now(), utc_now()),
+                )
+        except Exception:
+            pass
+
+    def securities(self) -> list[dict[str, Any]]:
+        if not self.available:
+            return []
+        try:
+            with self._connect() as conn:
+                rows = conn.execute("SELECT * FROM security_master ORDER BY symbol").fetchall()
+                return [dict(row) for row in rows]
+        except Exception:
+            return []
+
+    def vault_payload(self, provider: str, endpoint: str, symbol: str,
+                      payload_text: str) -> bool:
+        """Raw vendor response, hash-deduped: identical payloads store once."""
+        if not self.available or not payload_text:
+            return False
+        import hashlib
+        # Store the FULL payload via the long-text path (_store_text routes
+        # through redact_secrets, which caps input at 800 chars — the exact
+        # trap that once truncated decision rationales). Hash the text as
+        # actually stored so payload_hash always verifies the row.
+        stored = redact_long_text(str(payload_text), limit=400_000)
+        digest = hashlib.sha256(stored.encode("utf-8", errors="replace")).hexdigest()
+        try:
+            with self._connect() as conn:
+                cur = conn.execute(
+                    "INSERT OR IGNORE INTO vendor_vault"
+                    "(provider, endpoint, symbol, retrieved_at, payload_hash, payload_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (str(provider)[:32], str(endpoint)[:120], str(symbol).upper()[:16],
+                     utc_now(), digest, self._store_long_text(stored, limit=400_000)),
+                )
+                return bool(cur.rowcount)
+        except Exception:
+            return False
+
+    def vault_entries(self, symbol: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        if not self.available:
+            return []
+        try:
+            with self._connect() as conn:
+                if symbol:
+                    rows = conn.execute(
+                        "SELECT id, provider, endpoint, symbol, retrieved_at, payload_hash "
+                        "FROM vendor_vault WHERE symbol = ? ORDER BY id DESC LIMIT ?",
+                        (str(symbol).upper(), max(1, min(int(limit), 2000))),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT id, provider, endpoint, symbol, retrieved_at, payload_hash "
+                        "FROM vendor_vault ORDER BY id DESC LIMIT ?",
+                        (max(1, min(int(limit), 2000)),),
+                    ).fetchall()
+                return [dict(row) for row in rows]
+        except Exception:
+            return []
+
+    def vault_payload_text(self, vault_id: int) -> str:
+        if not self.available:
+            return ""
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT payload_json FROM vendor_vault WHERE id = ?", (int(vault_id),)
+                ).fetchone()
+                return self._load_text(row["payload_json"]) if row else ""
+        except Exception:
+            return ""
+
+    def record_price_revisions(self, symbol: str, revisions: list[dict[str, Any]],
+                               provider: str = "") -> int:
+        """Silent vendor restatements of already-stored bars — evidence, kept."""
+        if not self.available or not revisions:
+            return 0
+        recorded = 0
+        try:
+            with self._connect() as conn:
+                for rev in revisions[:500]:
+                    cur = conn.execute(
+                        "INSERT OR IGNORE INTO price_revisions"
+                        "(symbol, bar_date, old_close, new_close, change_pct, provider, observed_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (str(symbol).upper()[:16], str(rev["bar_date"])[:10],
+                         float(rev["old_close"]), float(rev["new_close"]),
+                         float(rev["change_pct"]), str(provider)[:32], utc_now()),
+                    )
+                    recorded += int(bool(cur.rowcount))
+        except Exception:
+            return recorded
+        return recorded
+
+    def price_revisions(self, symbol: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
+        if not self.available:
+            return []
+        try:
+            with self._connect() as conn:
+                if symbol:
+                    rows = conn.execute(
+                        "SELECT * FROM price_revisions WHERE symbol = ? "
+                        "ORDER BY observed_at DESC LIMIT ?",
+                        (str(symbol).upper(), max(1, min(int(limit), 2000))),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT * FROM price_revisions ORDER BY observed_at DESC LIMIT ?",
+                        (max(1, min(int(limit), 2000)),),
+                    ).fetchall()
+                return [dict(row) for row in rows]
+        except Exception:
+            return []
+
+    def record_corporate_actions(self, symbol: str, actions: list[dict[str, Any]]) -> int:
+        if not self.available or not actions:
+            return 0
+        recorded = 0
+        try:
+            with self._connect() as conn:
+                for action in actions[:500]:
+                    cur = conn.execute(
+                        "INSERT OR IGNORE INTO corporate_actions"
+                        "(symbol, action_type, ex_date, value, source, retrieved_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (str(symbol).upper()[:16], str(action["action_type"])[:24],
+                         str(action["ex_date"])[:10], float(action["value"]),
+                         str(action.get("source") or "")[:32], utc_now()),
+                    )
+                    recorded += int(bool(cur.rowcount))
+        except Exception:
+            return recorded
+        return recorded
+
+    def corporate_actions(self, symbol: str, limit: int = 400) -> list[dict[str, Any]]:
+        if not self.available:
+            return []
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT * FROM corporate_actions WHERE symbol = ? "
+                    "ORDER BY ex_date DESC LIMIT ?",
+                    (str(symbol).upper(), max(1, min(int(limit), 2000))),
+                ).fetchall()
+                return [dict(row) for row in rows]
+        except Exception:
+            return []
+
+    def audit_append(self, action: str, payload: dict[str, Any] | str,
+                     actor: str = "operator") -> None:
+        """Append one tamper-evident link: chain_hash covers the previous link,
+        so any retroactive edit breaks every later hash."""
+        if not self.available:
+            return
+        import hashlib
+        text = payload if isinstance(payload, str) else _json_dumps_stable(payload)
+        payload_hash = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+        try:
+            # Head-read + insert must be atomic or concurrent waitress threads
+            # fork the chain and a benign race reads as tampering forever.
+            # The lock serializes in-process writers; BEGIN IMMEDIATE takes the
+            # SQLite write lock for cross-process ones.
+            with _AUDIT_APPEND_LOCK:
+                with self._connect() as conn:
+                    try:
+                        conn.execute("BEGIN IMMEDIATE")
+                    except Exception:
+                        pass  # already inside a transaction: the lock still guards us
+                    row = conn.execute(
+                        "SELECT chain_hash FROM audit_chain ORDER BY seq DESC LIMIT 1").fetchone()
+                    prev_hash = row["chain_hash"] if row else "genesis"
+                    ts = utc_now()
+                    chain_hash = hashlib.sha256(
+                        f"{prev_hash}|{payload_hash}|{ts}|{action}".encode()).hexdigest()
+                    conn.execute(
+                        "INSERT INTO audit_chain(ts, actor, action, payload_hash, prev_hash, chain_hash) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (ts, redact_secrets(str(actor))[:64], str(action)[:64],
+                         payload_hash, prev_hash, chain_hash),
+                    )
+        except Exception:
+            pass
+
+    def audit_verify(self, limit: int = 100000) -> dict[str, Any]:
+        """Walk the chain re-deriving every hash; any break is named by seq."""
+        if not self.available:
+            return {"status": "unavailable", "warning": self.warning}
+        import hashlib
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT * FROM audit_chain ORDER BY seq ASC LIMIT ?",
+                    (max(1, int(limit)),),
+                ).fetchall()
+            prev = "genesis"
+            for row in rows:
+                expected = hashlib.sha256(
+                    f"{prev}|{row['payload_hash']}|{row['ts']}|{row['action']}".encode()).hexdigest()
+                if row["prev_hash"] != prev or row["chain_hash"] != expected:
+                    return {"status": "broken", "first_bad_seq": int(row["seq"]),
+                            "entries_checked": len(rows)}
+                prev = row["chain_hash"]
+            return {"status": "intact", "entries": len(rows),
+                    "head_hash": prev if rows else "genesis"}
+        except Exception as exc:
+            return {"status": "error", "warning": str(exc)}
 
     def upsert_ledger_account(self, account_id: str, display_name: str = "",
                               model_id: str = "") -> None:
@@ -2284,6 +2571,77 @@ def _create_schema(conn: sqlite3.Connection) -> None:
           n_analysts INTEGER,
           next_earnings_date TEXT NOT NULL DEFAULT '',
           PRIMARY KEY (symbol, as_of, slot)
+        )
+        """
+    )
+    # --- v10: data-architecture spine (review: reproducible-as-of research) --- #
+    # Security identity, raw vendor payload vault (hash-deduped), silent price
+    # restatement ledger, corporate actions, and a hash-chained journal audit.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS security_master (
+          symbol TEXT PRIMARY KEY,
+          name TEXT NOT NULL DEFAULT '',
+          figi TEXT NOT NULL DEFAULT '',
+          exchange TEXT NOT NULL DEFAULT '',
+          security_type TEXT NOT NULL DEFAULT '',
+          price_provider TEXT NOT NULL DEFAULT '',
+          first_seen TEXT NOT NULL DEFAULT '',
+          last_verified TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS vendor_vault (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          provider TEXT NOT NULL,
+          endpoint TEXT NOT NULL DEFAULT '',
+          symbol TEXT NOT NULL DEFAULT '',
+          retrieved_at TEXT NOT NULL,
+          payload_hash TEXT NOT NULL,
+          payload_json TEXT NOT NULL,
+          UNIQUE (provider, symbol, payload_hash)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS price_revisions (
+          symbol TEXT NOT NULL,
+          bar_date TEXT NOT NULL,
+          old_close REAL NOT NULL,
+          new_close REAL NOT NULL,
+          change_pct REAL NOT NULL,
+          provider TEXT NOT NULL DEFAULT '',
+          observed_at TEXT NOT NULL,
+          PRIMARY KEY (symbol, bar_date, observed_at)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS corporate_actions (
+          symbol TEXT NOT NULL,
+          action_type TEXT NOT NULL,
+          ex_date TEXT NOT NULL,
+          value REAL NOT NULL,
+          source TEXT NOT NULL DEFAULT '',
+          retrieved_at TEXT NOT NULL DEFAULT '',
+          PRIMARY KEY (symbol, action_type, ex_date)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS audit_chain (
+          seq INTEGER PRIMARY KEY AUTOINCREMENT,
+          ts TEXT NOT NULL,
+          actor TEXT NOT NULL DEFAULT 'operator',
+          action TEXT NOT NULL,
+          payload_hash TEXT NOT NULL,
+          prev_hash TEXT NOT NULL,
+          chain_hash TEXT NOT NULL
         )
         """
     )

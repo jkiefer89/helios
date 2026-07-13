@@ -21,7 +21,7 @@ from typing import Any
 
 import pandas as pd
 
-from . import data, persistence, portfolio, provenance
+from . import costs, data, persistence, portfolio, provenance
 from ._common import avg as _avg, clean_close as _clean_close, paper_hit as _paper_hit, pct as _pct
 from .signal_journal import MODEL_BENCHMARKS
 
@@ -303,6 +303,8 @@ def _bucket_stats(entries: list[dict[str, Any]]) -> dict[str, Any]:
             "hit_rate_pct": _pct(sum(1 for o in rows if o.get("hit")), len(rows)),
             "avg_target_return_pct": _avg(o.get("target_return_pct") for o in rows),
             "avg_alpha_pct": _avg(o.get("alpha_pct") for o in rows),
+            "avg_alpha_after_default_costs_pct": costs.net_of_default_costs(
+                _avg(o.get("alpha_pct") for o in rows)),
         }
     return {
         "count": len(entries),
@@ -311,6 +313,10 @@ def _bucket_stats(entries: list[dict[str, Any]]) -> dict[str, Any]:
         "hit_rate_pct": _pct(sum(1 for h in hits if h), len(hits)),
         "avg_target_return_pct": _avg(o.get("target_return_pct") for _, o in measured),
         "avg_alpha_pct": _avg(o.get("alpha_pct") for _, o in measured),
+        "avg_alpha_after_default_costs_pct": costs.net_of_default_costs(
+            _avg(o.get("alpha_pct") for _, o in measured)),
+        "alpha_basis": costs.GROSS_LABEL,
+        "alpha_cost_basis": costs.NET_ASSUMPTION_LABEL,
         "headline_basis": "longest measured horizon per decision (mixed windows) — "
                           "use by_horizon for like-for-like comparisons",
         "by_horizon": by_horizon,
