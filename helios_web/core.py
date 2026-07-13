@@ -73,6 +73,12 @@ _AUTH_FAILURES_LOCK = threading.Lock()
 
 # Browser requests that mutate state must originate from our own origin.
 # curl / same-origin app fetches send no Sec-Fetch-Site header and pass.
+#
+# CONTRACT: methods listed here bypass the CSRF check entirely, so every GET
+# handler must be a pure read of caches/stores — no journal writes, no alert
+# counter bumps, no forced feed fetches. Anything that mutates state must be
+# a POST/PUT/DELETE route (see /api/macro/refresh for the pattern). Caching
+# reads that populate an in-process cache are fine; durable writes are not.
 _CSRF_SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
 

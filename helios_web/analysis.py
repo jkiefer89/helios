@@ -403,8 +403,19 @@ def command_center():
 def macro_intelligence():
     """Full macro snapshot: Fed stance (hawk/dove over official press+speeches),
     White House policy themes with sector pressure, geopolitical risk index,
-    FOMC proximity, and the live rate context."""
-    force = (request.args.get("refresh") or "").lower() in {"1", "true", "yes"}
+    FOMC proximity, and the live rate context. Pure read — a ?refresh param is
+    ignored; force a re-fetch via POST /api/macro/refresh."""
+    return _macro_payload(force=False)
+
+
+@bp.route("/api/macro/refresh", methods=["POST"])
+def macro_refresh():
+    """Force a macro feed re-fetch. POST because it mutates the cached
+    snapshot + persisted history (and so gets CSRF protection)."""
+    return _macro_payload(force=True)
+
+
+def _macro_payload(force: bool):
     snap = macro_events.macro_snapshot(force=force)
     return ok({
         **snap,

@@ -159,7 +159,7 @@ export function AppShell(props: ShellProps) {
     ? props.models.find((model) => model.id === props.selectedModel)?.name || props.selectedModel
     : props.selectedInstrument
       ? props.tickers.find((ticker) => ticker.symbol === props.selectedInstrument)?.symbol || props.selectedInstrument
-      : "No active selection";
+      : "";
   const dataModeFullLabel = props.dataMode?.label || "Data status pending";
   const dataModeShortLabel = compactDataModeLabel(props.dataMode?.mode, dataModeFullLabel);
 
@@ -184,6 +184,22 @@ export function AppShell(props: ShellProps) {
       meta: "Workspace",
       action: () => onViewChange(view.id),
     }));
+    // Feature aliases: things operators search for by capability name rather
+    // than by the view that hosts them.
+    const aliasResults: Array<{ key: string; label: string; meta: string; action: () => void }> = [
+      {
+        key: "alias-ledger",
+        label: "Ledger — Actual vs Paper",
+        meta: "Feature · Decision Journal",
+        action: () => onViewChange("decisions"),
+      },
+      {
+        key: "alias-report-snapshots",
+        label: "Saved report snapshots",
+        meta: "Feature · Reports",
+        action: () => onViewChange("reports"),
+      },
+    ];
     const instrumentResults = tickers.map((ticker) => ({
       key: `instrument-${ticker.symbol}`,
       label: `${ticker.symbol} · ${ticker.name}`,
@@ -196,7 +212,7 @@ export function AppShell(props: ShellProps) {
       meta: `Model · ${model.mandate_label} · ${model.n_holdings} holdings`,
       action: () => onSelectModel(model.id),
     }));
-    const all = [...viewResults, ...instrumentResults, ...modelResults];
+    const all = [...viewResults, ...aliasResults, ...instrumentResults, ...modelResults];
     if (!query) return all.slice(0, 7);
     return all
       .filter((item) => `${item.label} ${item.meta}`.toLowerCase().includes(query))
@@ -335,7 +351,7 @@ export function AppShell(props: ShellProps) {
                     <div><dt>SQLite</dt><dd>{props.dataStatus?.database.available ? "Ready" : "Warning"}</dd></div>
                     <div><dt>Real histories</dt><dd>{props.dataStatus?.real_instrument_count ?? 0}</dd></div>
                     <div><dt>Current view</dt><dd>{activeViewLabel}</dd></div>
-                    <div><dt>Selection</dt><dd>{selectedContext}</dd></div>
+                    <div><dt>Selection</dt><dd>{selectedContext || "No active selection"}</dd></div>
                   </dl>
                   <div className="advisor-menu__actions">
                     <button type="button" role="menuitem" aria-pressed={density === "compact"} onClick={toggleDensity}>
@@ -397,8 +413,7 @@ export function AppShell(props: ShellProps) {
       )}
       <div className="context-bar" aria-label="Session context">
         <span><b>{activeGroup?.label || "Workspace"}</b> · {activeViewLabel}</span>
-        <span>{selectedContext && selectedContext !== "No active selection"
-          ? <>Selected <b>{selectedContext}</b></> : "No selection"}</span>
+        <span>{selectedContext ? <>Selected <b>{selectedContext}</b></> : "No selection"}</span>
         <span title={dataModeFullLabel}>{dataModeShortLabel}</span>
         <span>{props.dataStatus?.real_instrument_count ?? 0} real histories</span>
       </div>

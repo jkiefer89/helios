@@ -92,3 +92,68 @@ def test_journal_metadata_carries_full_component_breakdown():
     assert meta["vol_penalty"] == 0.9
     assert meta["strategic_usable"] is False             # missing leg RECORDED
     assert meta["strategic_reason"] == "no fundamentals"
+
+
+# --------------------------------------------------------------------------- #
+# Batch 2 — D11: GET purity
+# --------------------------------------------------------------------------- #
+def test_get_decisions_is_pure_and_refresh_hook_scores(monkeypatch, tmp_path):
+    """GET /api/decisions never writes: a decision whose outcomes ARE
+    measurable stays pending across GETs, and the data-refresh hook
+    (refresh_pending_outcomes) is what advances it."""
+    import app as helios
+    from engine import decision_journal, persistence
+    from tests.conftest import price_csv
+
+    monkeypatch.setenv("HELIOS_DB_PATH", str(tmp_path / "helios.db"))
+    persistence.reset_store_for_tests()
+    try:
+        st = persistence.get_store()
+        data.parse_csv(price_csv(days=320), "PURE", "Pure", source_filename="pure.csv")
+        entry = decision_journal.record_decision(
+            target_kind="instrument", target_id="PURE", my_action="BUY")
+        # Backdate so >252 trading days of "future" bars already exist and the
+        # decision is immediately scorable — if GET still refreshed, it would
+        # measure it (decision_date/created_at are stored plaintext).
+        backdated = str(data.get("PURE").df["close"].dropna().index[10].date())
+        st.update_decision_outcomes(entry["decision_id"], {}, "pending", "")
+        with st._connect() as conn:
+            conn.execute(
+                "UPDATE decision_journal SET decision_date = ?, created_at = ? WHERE decision_id = ?",
+                (backdated, backdated + "T00:00:00+00:00", entry["decision_id"]))
+
+        helios.app.config.update(TESTING=True, PROPAGATE_EXCEPTIONS=False)
+        client = helios.app.test_client()
+        resp = client.get("/api/decisions")
+        assert resp.status_code == 200
+        stored = next(e for e in st.decision_journal(limit=10)
+                      if e["decision_id"] == entry["decision_id"])
+        assert stored["outcome_status"] == "pending"   # GET did not score
+
+        assert decision_journal.refresh_pending_outcomes() == 1
+        stored = next(e for e in st.decision_journal(limit=10)
+                      if e["decision_id"] == entry["decision_id"])
+        assert stored["outcome_status"] in {"partial", "measured"}
+        assert stored["outcomes"].get("21") is not None
+    finally:
+        persistence.reset_store_for_tests()
+
+
+def test_macro_get_ignores_refresh_param(monkeypatch):
+    """?refresh=1 on the GET is inert; forcing a re-fetch is POST-only."""
+    import app as helios
+    from engine import macro_events
+
+    forced: list[bool] = []
+
+    def fake_snapshot(force: bool = False):
+        forced.append(force)
+        return {"as_of": "2026-07-12", "status": "ok"}
+
+    monkeypatch.setattr(macro_events, "macro_snapshot", fake_snapshot)
+    monkeypatch.setattr(macro_events, "history_and_changes", lambda: {})
+    helios.app.config.update(TESTING=True, PROPAGATE_EXCEPTIONS=False)
+    client = helios.app.test_client()
+    assert client.get("/api/macro?refresh=1").status_code == 200
+    assert client.post("/api/macro/refresh").status_code == 200
+    assert forced == [False, True]

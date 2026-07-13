@@ -245,6 +245,31 @@ def list_decisions(limit: int = 200, refresh_outcomes: bool = True) -> list[dict
             for e in entries]
 
 
+def refresh_pending_outcomes(limit: int = 250) -> int:
+    """Score pending/partial decisions against the latest price history.
+
+    Runs at data-refresh time (upload, live refresh) beside the signal
+    journal's forward-result refresh — never from GET handlers. Outcomes only
+    change when new price bars arrive, so measuring on data arrival keeps
+    reads pure without ever leaving a measurable decision unmeasured.
+    Returns the number of entries whose outcomes advanced.
+    """
+    refreshed = 0
+    try:
+        entries = persistence.get_store().decision_journal(limit=limit)
+    except Exception:
+        return 0
+    for entry in entries:
+        if entry.get("outcome_status") not in {"pending", "partial"}:
+            continue
+        try:
+            if evaluate_outcomes(entry) is not entry:
+                refreshed += 1
+        except Exception:
+            continue
+    return refreshed
+
+
 # --------------------------------------------------------------------------- #
 # Scoreboard
 # --------------------------------------------------------------------------- #

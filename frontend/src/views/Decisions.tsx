@@ -328,9 +328,9 @@ function LedgerSection() {
       {actual && actual.status === "measured" ? (
         <>
           <div className="stat-grid">
-            <StatTile label="Actual TWR (net)" value={`${fmtNumber(actual.twr_net_pct, 2)}%`}
+            <StatTile label="Return, Dietz est. (net)" value={`${fmtNumber(actual.twr_net_pct, 2)}%`}
               tone={(actual.twr_net_pct ?? 0) >= 0 ? "positive" : "negative"} />
-            <StatTile label="Actual TWR (gross)" value={`${fmtNumber(actual.twr_gross_pct, 2)}%`} />
+            <StatTile label="Return, Dietz est. (gross)" value={`${fmtNumber(actual.twr_gross_pct, 2)}%`} />
             <StatTile label="Fees observed" value={fmtMoney(actual.fees_usd ?? 0)} />
             <StatTile label="Paper (research series)"
               value={paper?.status === "measured" ? `${fmtNumber(paper.return_pct, 2)}%` : paper?.status === "no_model_mapped" ? "map a model" : "—"} />

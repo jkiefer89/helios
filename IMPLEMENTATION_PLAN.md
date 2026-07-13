@@ -296,26 +296,40 @@ from the prospective track now accruing.
 - **CI hardening** (D12): frontend lint + Vitest in CI, coverage floor 80,
   Node pinned (`.nvmrc` 22, engines ≥22.13); context-bar grammar fixed.
 
-## Batch 2 — staged next (verified prescriptions ready)
+## Batch 2 — SHIPPED 2026-07-12
 
-- **Ledger v2 honesty** (D8, M): persist non-trade activity as typed rows with
-  disclosed dollar impact; cash-based reconciliation check per period
-  (ok/mismatch/uncheckable); label Dietz estimates as estimates in the UI;
-  freeze the shortfall anchor at the journaled decision_price; optional
-  exec-id in fill dedupe; fills cap warning.
-- **PIT first+last-of-day slots** (D9, M): schema v9 — (symbol, as_of, slot)
-  with retrieved_at + persisted reconciliation warnings; migration must copy
-  existing rows (they are evidence). Same-day REPLACE currently loses the
-  morning observation.
-- **GET purity where it matters** (D11, M): decisions outcome-refresh moves to
-  the data-refresh hooks; data-quality alert sync becomes idempotent with an
-  explicit ack; macro ?refresh=1 becomes POST. View-triggered idempotent
-  journal capture stays — it is the design.
-- **UX remainder** (D10, M): palette aliases for ledger/actual surfaces;
-  "Fetch missing" recovery action on blocked model rows; "Auto-selected"
-  labeling in the context bar.
-- **Route tests** (D12, M): ledger 26% / decisions 38% coverage → HTTP-level
-  tests for all 8 routes.
+- **Ledger v2 honesty** (D8): non-trade activity persisted as typed rows
+  (dividend/interest/fee/tax/corporate_action) with disclosed dollar impact;
+  per-period cash reconciliation (ok/mismatch/uncheckable, tolerance
+  max(0.5%·V0, $1)); Dietz labeled as an estimate in the UI; shortfall anchor
+  frozen at the journaled decision_price (recomputed anchors labeled as
+  drift-prone); exec-id joins the fill dedupe key when present; fills capped
+  at 20k with a truncation warning.
+- **PIT first+last-of-day slots** (D9): schema v9 — PK (symbol, as_of, slot)
+  with retrieved_at + persisted reconciliation warnings; 'first' is immutable
+  (INSERT OR IGNORE), 'last' is current (INSERT OR REPLACE); migration copied
+  all existing rows as slot='last' (verified live: 52/52 preserved, no
+  leftover tables). Same-day revisions no longer erase the morning
+  observation, and first-vs-last diff exposes intraday flips for free.
+- **GET purity where it matters** (D11): GET /api/decisions is a pure read —
+  outcome scoring runs at the data-refresh choke point
+  (`refresh_pending_outcomes` beside the signal-journal forward refresh);
+  data-quality alert sync is idempotent (occurrence_count counts distinct
+  raisings, not page views); macro force-refresh is POST /api/macro/refresh
+  (GET ignores ?refresh); the contract is documented above
+  _CSRF_SAFE_METHODS. View-triggered idempotent journal capture stays — it
+  is the design.
+- **UX remainder** (D10): palette aliases ("Ledger — Actual vs Paper" →
+  Decision Journal, "Saved report snapshots" → Reports); "Fetch missing"
+  recovery action on blocked model rows (sequential live fetch capped at 10,
+  falls back to revealing data intake); context bar renders a clean empty
+  state instead of comparing against a sentinel string. ("Auto-selected"
+  labeling skipped: selection provenance isn't tracked in App state and the
+  label would be a guess.)
+- **Route tests** (D12): tests/test_web_ledger.py + tests/test_web_decisions.py
+  pin all 6 ledger + 2 decisions route contracts at the HTTP level (status
+  codes, validation, response shapes, idempotent re-import, exact cash
+  reconciliation). Backend suite 551 green.
 
 ## Rescoped or rejected from Deep Review 2 (same single-operator logic)
 

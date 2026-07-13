@@ -271,7 +271,9 @@ def test_data_quality_alerts_track_active_and_resolved_research_readiness(client
     assert second.status_code == 200
     second_alerts = second.get_json()["alerts"]
     assert second_alerts["summary"]["new_count"] == 0
-    assert next(alert for alert in second_alerts["active"] if alert["id"] == readiness_alert["id"])["occurrence_count"] == 2
+    # Idempotent re-sync: an unchanged alert re-observed by a GET keeps its
+    # occurrence_count (it counts distinct raisings, not page views).
+    assert next(alert for alert in second_alerts["active"] if alert["id"] == readiness_alert["id"])["occurrence_count"] == 1
 
     data.parse_csv(price_csv(days=260), "NEEDPRICE", "Need Price", source_filename="need-price.csv")
 

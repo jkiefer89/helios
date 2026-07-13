@@ -710,10 +710,19 @@ def _record_refresh(symbol: str, status: str, rows_added: int, message: str) -> 
 
 
 def _refresh_signal_journal_forward_results() -> None:
+    # Both journals measure forward outcomes when new bars arrive; scoring here
+    # (the single choke point every upload/refresh path already calls) is what
+    # lets the GET handlers stay pure reads.
     try:
         from . import signal_journal
 
         signal_journal.refresh_forward_results()
+    except Exception:
+        pass
+    try:
+        from . import decision_journal
+
+        decision_journal.refresh_pending_outcomes(limit=250)
     except Exception:
         return
 

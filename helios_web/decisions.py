@@ -15,7 +15,9 @@ def list_decisions():
     limit, limit_error = _safe_int_arg("limit", 200, 1, 1000)
     if limit_error:
         return err(limit_error, 400)
-    entries = decision_journal.list_decisions(limit=limit)
+    # Pure read: outcome scoring happens at data-refresh time
+    # (decision_journal.refresh_pending_outcomes), not on GET.
+    entries = decision_journal.list_decisions(limit=limit, refresh_outcomes=False)
     return ok({
         "decisions": entries,
         "scoreboard": decision_journal.scoreboard(entries),

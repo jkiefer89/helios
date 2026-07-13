@@ -567,6 +567,7 @@ def _record_pit_snapshot(result: "Fundamentals") -> None:
             "analyst_rating": result.analyst_rating,
             "n_analysts": result.n_analysts,
             "next_earnings_date": result.next_earnings_date,
+            "reconciliation_warnings": result.reconciliation_warnings,
         })
     except Exception:
         pass

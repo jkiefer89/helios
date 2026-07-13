@@ -43,6 +43,15 @@ _MV_ALIASES = ("market value", "value", "market value ($)", "current value")
 _COST_ALIASES = ("cost basis", "cost", "cost basis total")
 
 _BUY_WORDS = ("buy", "bot", "bought", "purchase", "reinvest")
+# Sub-type resolution for non-trade activity (dividends, interest, account
+# fees, taxes) — persisted as typed rows with their dollar amounts so actual
+# economics are DISCLOSED even before they enter return math (review finding:
+# "classified then skipped" meant net/gross labels could mislead).
+_NON_TRADE_SUBTYPES = (
+    ("dividend", "dividend"), ("interest", "interest"), ("reinvest", "dividend"),
+    ("fee", "fee"), ("tax", "tax"), ("adr", "fee"), ("spin", "corporate_action"),
+    ("split", "corporate_action"),
+)
 _SELL_WORDS = ("sell", "sld", "sold", "sale")
 _DEPOSIT_WORDS = ("deposit", "contribution", "wire in", "transfer in", "journal in", "ach in", "funds received")
 _WITHDRAW_WORDS = ("withdraw", "distribution", "wire out", "transfer out", "journal out", "ach out", "disbursement")
@@ -109,6 +118,7 @@ def parse_fills_csv(raw: bytes, account_id: str, source_filename: str = "") -> d
     amount_col = _pick(cols, _AMOUNT_ALIASES)
     settle_col = _pick(cols, _SETTLE_ALIASES)
     decision_col = _pick(cols, ("decision id", "decision_id", "decision"))
+    exec_col = _pick(cols, ("exec id", "execution id", "order id", "confirm", "confirmation"))
 
     today_plus = pd.Timestamp(datetime.now(timezone.utc).date()) + pd.Timedelta(days=1)
     fills: list[dict[str, Any]] = []
@@ -122,10 +132,14 @@ def parse_fills_csv(raw: bytes, account_id: str, source_filename: str = "") -> d
         if date > today_plus:
             warnings.append(f"Row {index + 2}: future-dated {date.date()} — rejected (broken export?).")
             continue
-        side = _classify_side(str(row[side_col]))
+        raw_side = str(row[side_col])
+        side = _classify_side(raw_side)
+        non_trade_subtype = ""
         if side == "non_trade":
-            skipped_non_trade += 1
-            continue
+            skipped_non_trade += 1   # counter kept: "non-trade rows recorded"
+            text = raw_side.strip().lower()
+            non_trade_subtype = next((sub for word, sub in _NON_TRADE_SUBTYPES
+                                      if word in text), "other")
         if side == "unknown":
             warnings.append(f"Row {index + 2}: unrecognized action '{row[side_col]}' — skipped; "
                             "map it manually if it is a trade or a cash flow.")
@@ -135,6 +149,24 @@ def parse_fills_csv(raw: bytes, account_id: str, source_filename: str = "") -> d
         price = _num(row[price_col]) if price_col else None
         fees = _num(row[fees_col]) if fees_col else None
         amount = _num(row[amount_col]) if amount_col else None
+        if side == "non_trade":
+            nt_ticker = data.clean_symbol(str(row[ticker_col]), fallback="") if ticker_col else ""
+            nt_amount = _num(row[amount_col]) if amount_col else None
+            nt_key = (f"{account_id}|{date.date().isoformat()}|{nt_ticker}|non_trade"
+                      f"|{non_trade_subtype}|{nt_amount if nt_amount is not None else 'na'}|{index}")
+            fills.append({
+                "fill_id": hashlib.sha256((nt_key + "|id").encode()).hexdigest()[:32],
+                "account_id": account_id,
+                "trade_date": date.date().isoformat(),
+                "ticker": nt_ticker,
+                "side": "non_trade",
+                "shares": 0.0, "price": 0.0, "fees": 0.0,
+                "amount": nt_amount,
+                "source_file": source_filename,
+                "metadata": {"subtype": non_trade_subtype, "raw_action": raw_side.strip()[:60]},
+                "dedupe_key": hashlib.sha256(nt_key.encode()).hexdigest()[:40],
+            })
+            continue
         if side in {"buy", "sell"}:
             if not ticker:
                 warnings.append(f"Row {index + 2}: {side} with no ticker — skipped.")
@@ -154,7 +186,10 @@ def parse_fills_csv(raw: bytes, account_id: str, source_filename: str = "") -> d
             amount = abs(float(flow)) * (1 if side == "deposit" else -1)
             shares, price = 0.0, 0.0
         trade_date = date.date().isoformat()
-        key_raw = f"{account_id}|{trade_date}|{ticker}|{side}|{shares or 0:.6f}|{price or 0:.6f}|{amount or 0:.2f}"
+        exec_id = (str(row[exec_col]).strip()
+                   if exec_col is not None and pd.notna(row[exec_col]) else "")
+        key_raw = (f"{account_id}|{trade_date}|{ticker}|{side}|{shares or 0:.6f}"
+                   f"|{price or 0:.6f}|{amount or 0:.2f}|{exec_id}")
         fills.append({
             "fill_id": hashlib.sha256((key_raw + "|id").encode()).hexdigest()[:32],
             "account_id": account_id,
@@ -170,6 +205,7 @@ def parse_fills_csv(raw: bytes, account_id: str, source_filename: str = "") -> d
             "source_file": source_filename,
             "decision_id": (str(row[decision_col]).strip()
                             if decision_col is not None and pd.notna(row[decision_col]) else ""),
+            "metadata": ({"exec_id": exec_id} if exec_id else {}),
             "dedupe_key": hashlib.sha256(key_raw.encode()).hexdigest()[:40],
         })
     if not fills and not warnings:
@@ -182,13 +218,22 @@ def import_fills(raw: bytes, account_id: str, source_filename: str = "") -> dict
     store = persistence.get_store()
     store.upsert_ledger_account(account_id)
     result = store.record_fills(parsed["fills"])
+    warnings = list(parsed["warnings"])
+    if result.get("duplicates", 0) and not any(
+            f.get("metadata", {}).get("exec_id") for f in parsed["fills"]):
+        warnings.append("Duplicates collapsed WITHOUT an execution-id column — identical "
+                        "same-day fills merge; include an Exec/Order Id column if these "
+                        "were distinct executions.")
     return {
         "account_id": account_id,
         "parsed": len(parsed["fills"]),
         "inserted": result.get("inserted", 0),
         "duplicates": result.get("duplicates", 0),
+        # Counter renamed in meaning: these rows are now RECORDED as typed
+        # activity (dividend/interest/fee/tax), not dropped.
         "skipped_non_trade": parsed["skipped_non_trade"],
-        "warnings": parsed["warnings"][:25],
+        "non_trade_recorded": parsed["skipped_non_trade"],
+        "warnings": warnings[:25],
     }
 
 
@@ -288,14 +333,30 @@ def account_performance(account_id: str) -> dict[str, Any]:
             "note": ("At least two dated position/cash snapshots are required to measure an "
                      "actual return — upload a positions CSV per statement period."),
         }
-    fills = store.fills(account_id)
+    fills = store.fills(account_id, limit=20000)
+    warnings: list[str] = []
+    if len(fills) >= 20000:
+        warnings.append("Fill history hit the 20,000-row query cap — older activity is "
+                        "excluded and these results are unreliable; archive or split the account.")
     flows = [f for f in fills if f["side"] in {"deposit", "withdraw"} and f.get("amount") is not None]
     trade_fees = [(f["trade_date"], float(f.get("fees") or 0.0)) for f in fills
                   if f["side"] in {"buy", "sell"}]
+    # Non-trade economics (dividends, interest, account fees, taxes) are
+    # DISCLOSED per period — never silently absent from a "net" label. They
+    # are NOT Dietz flows: income already lands inside the snapshot values.
+    non_trade = [f for f in fills if f["side"] == "non_trade"]
+    span_start, span_end = pd.Timestamp(snaps[0]["as_of"]), pd.Timestamp(snaps[-1]["as_of"])
+    stray = [f for f in fills if not (span_start < pd.Timestamp(f["trade_date"]) <= span_end)
+             and f["side"] in {"buy", "sell", "deposit", "withdraw"}]
+    if stray:
+        warnings.append(f"{len(stray)} fill(s) dated outside the snapshot span "
+                        f"{snaps[0]['as_of']}–{snaps[-1]['as_of']} are excluded from the "
+                        "measured window — upload the covering snapshots.")
 
     periods = []
     net_chain = gross_chain = 1.0
     total_fees = total_flows = 0.0
+    total_income = total_nontrade_costs = 0.0
     for prev, curr in zip(snaps, snaps[1:]):
         t0, t1 = pd.Timestamp(prev["as_of"]), pd.Timestamp(curr["as_of"])
         days = max((t1 - t0).days, 1)
@@ -305,6 +366,14 @@ def account_performance(account_id: str) -> dict[str, Any]:
         flow_sum = sum(amount for _, amount in period_flows)
         weighted = sum(amount * ((t1 - date).days / days) for date, amount in period_flows)
         fees = sum(fee for date, fee in trade_fees if t0 < pd.Timestamp(date) <= t1)
+        nt_rows = [f for f in non_trade if t0 < pd.Timestamp(f["trade_date"]) <= t1
+                   and f.get("amount") is not None]
+        income = sum(float(f["amount"]) for f in nt_rows
+                     if (f.get("metadata") or {}).get("subtype") in {"dividend", "interest"})
+        nt_costs = sum(abs(float(f["amount"])) for f in nt_rows
+                       if (f.get("metadata") or {}).get("subtype") in {"fee", "tax"})
+        total_income += income
+        total_nontrade_costs += nt_costs
         denom = v0 + weighted
         if denom <= 0:
             periods.append({"start": prev["as_of"], "end": curr["as_of"],
@@ -316,11 +385,39 @@ def account_performance(account_id: str) -> dict[str, Any]:
         gross_chain *= 1 + r_gross
         total_fees += fees
         total_flows += flow_sum
+        # Cash reconciliation control: when BOTH snapshots report cash, the
+        # cash delta must be explained by recorded activity — a partial import
+        # producing a "measured" return was the review's sharpest ledger point.
+        reconciliation: dict = {"status": "uncheckable",
+                                "note": "both snapshots need a cash row to reconcile"}
+        if prev.get("cash") is not None and curr.get("cash") is not None:
+            buys = sum(f["shares"] * f["price"] + f["fees"] for f in fills
+                       if f["side"] == "buy" and t0 < pd.Timestamp(f["trade_date"]) <= t1)
+            sells = sum(f["shares"] * f["price"] - f["fees"] for f in fills
+                        if f["side"] == "sell" and t0 < pd.Timestamp(f["trade_date"]) <= t1)
+            expected_delta = flow_sum + sells - buys + income - nt_costs
+            actual_delta = float(curr["cash"]) - float(prev["cash"])
+            diff = actual_delta - expected_delta
+            tolerance = max(abs(v0) * 0.005, 1.0)
+            reconciliation = {
+                "status": "ok" if abs(diff) <= tolerance else "mismatch",
+                "cash_delta_usd": round(actual_delta, 2),
+                "explained_usd": round(expected_delta, 2),
+                "diff_usd": round(diff, 2),
+                "tolerance_usd": round(tolerance, 2),
+            }
+            if reconciliation["status"] == "mismatch":
+                warnings.append(
+                    f"Cash reconciliation mismatch {prev['as_of']}–{curr['as_of']}: "
+                    f"${diff:,.0f} of cash movement is unexplained by recorded activity "
+                    "(missing fills, dividends, or fees?) — the return may be unreliable.")
         periods.append({
             "start": prev["as_of"], "end": curr["as_of"], "days": days,
             "return_net_pct": round(r_net * 100, 4),
             "return_gross_pct": round(r_gross * 100, 4),
             "flows_usd": round(flow_sum, 2), "fees_usd": round(fees, 2),
+            "income_usd": round(income, 2), "nontrade_fees_taxes_usd": round(nt_costs, 2),
+            "reconciliation": reconciliation,
             "start_value": v0, "end_value": v1, "status": "measured",
         })
     measured = [p for p in periods if p["status"] == "measured"]
@@ -340,6 +437,10 @@ def account_performance(account_id: str) -> dict[str, Any]:
         "status": "measured",
         "account_id": account_id,
         "label": "ACTUAL account performance (custodian snapshots + fills)",
+        "method": "snapshot-period Modified-Dietz estimate (chain-linked) — not daily TWR",
+        "income_usd": round(total_income, 2),
+        "nontrade_fees_taxes_usd": round(total_nontrade_costs, 2),
+        "warnings": warnings,
         "period": {"start": snaps[0]["as_of"], "end": snaps[-1]["as_of"], "days": span_days},
         "twr_net_pct": round(twr_net * 100, 4),
         "twr_gross_pct": round((gross_chain - 1) * 100, 4),
@@ -350,8 +451,9 @@ def account_performance(account_id: str) -> dict[str, Any]:
         "n_periods": len(measured),
         "periods": periods,
         "basis": ("Modified-Dietz sub-periods between custodian snapshots, chain-linked; "
-                  "gross adds observed fill fees back. Cash drag is an estimate from "
-                  "snapshot cash weights vs the configured risk-free rate."),
+                  "gross adds back fill commissions only — account-level fees/taxes and "
+                  "income appear as disclosed dollars, not in gross. Cash drag is an "
+                  "estimate from snapshot cash weights vs the configured risk-free rate."),
     }
 
 
@@ -408,7 +510,7 @@ def decision_shortfall(account_id: str = "") -> list[dict[str, Any]]:
     never inferred.
     """
     store = persistence.get_store()
-    fills = [f for f in store.fills(account_id) if f.get("decision_id")
+    fills = [f for f in store.fills(account_id, limit=20000) if f.get("decision_id")
              and f["side"] in {"buy", "sell"}]
     if not fills:
         return []
@@ -423,13 +525,27 @@ def decision_shortfall(account_id: str = "") -> list[dict[str, Any]]:
             out.append({"decision_id": decision_id, "ticker": ticker, "side": side,
                         "status": "decision_not_found"})
             continue
-        inst = data.get(ticker)
+        # FROZEN anchor first: the journal stored decision_price at record
+        # time, and recomputing from current adjusted history let historical
+        # shortfall drift after dividends/revisions (review finding). The
+        # instrument/ticker guard is load-bearing — a model decision_price is
+        # a series level, not this ticker's price.
         anchor_px = None
-        if inst is not None and "close" in inst.df:
-            close = inst.df["close"].dropna()
-            at_or_before = close[close.index <= pd.Timestamp(decision["decision_date"])]
-            if len(at_or_before):
-                anchor_px = float(at_or_before.iloc[-1])
+        anchor_basis = ""
+        if (decision.get("target_kind") == "instrument"
+                and str(decision.get("target_id") or "").upper() == ticker
+                and decision.get("decision_price") is not None):
+            anchor_px = float(decision["decision_price"])
+            anchor_basis = "frozen decision_price (immutable at record time)"
+        if anchor_px is None:
+            inst = data.get(ticker)
+            if inst is not None and "close" in inst.df:
+                close = inst.df["close"].dropna()
+                at_or_before = close[close.index <= pd.Timestamp(decision["decision_date"])]
+                if len(at_or_before):
+                    anchor_px = float(at_or_before.iloc[-1])
+                    anchor_basis = ("recomputed from adjusted close history "
+                                    "(can drift after dividends/revisions)")
         total_shares = sum(f["shares"] for f in rows)
         if not anchor_px or not total_shares:
             out.append({"decision_id": decision_id, "ticker": ticker, "side": side,
@@ -448,6 +564,7 @@ def decision_shortfall(account_id: str = "") -> list[dict[str, Any]]:
             "avg_fill_price": round(avg_fill, 4),
             "decision_date": decision["decision_date"],
             "decision_close": round(anchor_px, 4),
+            "anchor_basis": anchor_basis,
             "shortfall_bps": round(shortfall_bps, 1),
             "fees_usd": round(sum(f["fees"] for f in rows), 2),
             "basis": "avg fill vs decision-date close; positive = paid up / sold cheap",

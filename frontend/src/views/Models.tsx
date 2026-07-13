@@ -39,6 +39,8 @@ export function Models({
   onOpenClinic: (id: string) => void;
 }) {
   const [importing, setImporting] = useState("");
+  const [fetchingMissing, setFetchingMissing] = useState("");
+  const [fetchNotice, setFetchNotice] = useState("");
   const [actor, setActor] = useState("Advisor Console");
   const [committeeIdentity, setCommitteeIdentity] = useState({
     signer_name: "Advisor Console",
@@ -192,6 +194,38 @@ export function Models({
       setEditorBusy("");
     }
   };
+  const FETCH_MISSING_CAP = 10;
+  const fetchMissing = async (model: ModelSummary) => {
+    const missing = (model.missing_tickers || []).slice(0, FETCH_MISSING_CAP);
+    if (!missing.length) return;
+    setFetchingMissing(model.id);
+    setFetchNotice("");
+    let fetched = 0;
+    const failures: string[] = [];
+    // Sequential on purpose: the backend live-fetch path is semaphore-bounded,
+    // and one slow provider call should not fan out into ten.
+    for (const ticker of missing) {
+      try {
+        await api.fetchLive(ticker);
+        fetched += 1;
+      } catch {
+        failures.push(ticker);
+      }
+    }
+    setFetchingMissing("");
+    const capped = (model.missing_tickers?.length || 0) > FETCH_MISSING_CAP
+      ? ` (first ${FETCH_MISSING_CAP} of ${model.missing_tickers?.length})`
+      : "";
+    if (failures.length) {
+      setFetchNotice(
+        `Fetched ${fetched}/${missing.length}${capped}; live fetch failed for ${failures.join(", ")} — upload a price CSV instead.`,
+      );
+      window.dispatchEvent(new Event("helios:reveal-data-intake"));
+    } else {
+      setFetchNotice(`Fetched live history for ${fetched} ticker${fetched === 1 ? "" : "s"}${capped}.`);
+    }
+    await onModelEdited();
+  };
   const editingModel = models.find((model) => model.id === editingId) || null;
   return (
     <div className="view-stack">
@@ -235,6 +269,7 @@ export function Models({
         )}
       </Panel>
       <Panel title="Imported Models" meta={`${models.length} loaded`}>
+        {fetchNotice && <div className="form-feedback" role="status">{fetchNotice}</div>}
         {models.length === 0 ? (
           <EmptyState title="No models imported" body="Upload a model CSV or Excel file to unlock model diagnostics." />
         ) : (
@@ -252,6 +287,16 @@ export function Models({
                   <button type="button" onClick={() => startEdit(model)}>Edit</button>
                   <button type="button" onClick={() => onOpenModel(model.id)}>Analysis</button>
                   <button type="button" onClick={() => onOpenClinic(model.id)}>Clinic</button>
+                  {(model.missing_tickers?.length || 0) > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => fetchMissing(model)}
+                      disabled={fetchingMissing !== ""}
+                      title="Fetch live price history for the holdings blocking research"
+                    >
+                      {fetchingMissing === model.id ? "Fetching..." : "Fetch missing"}
+                    </button>
+                  )}
                 </span>
               </div>
             ))}

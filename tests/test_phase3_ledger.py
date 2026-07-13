@@ -45,14 +45,17 @@ def test_fills_import_is_idempotent_and_honest(store):
         "2099-01-01,JPM,BUY,1,1.00,,",              # future-dated -> rejected
     ])
     first = ledger.import_fills(raw, "ACC-1", "fills.csv")
-    assert first["inserted"] == 3          # buy, sell, deposit
-    assert first["skipped_non_trade"] == 1
+    assert first["inserted"] == 4          # buy, sell, deposit + the dividend
+    assert first["non_trade_recorded"] == 1   # RECORDED as typed activity, not dropped
     assert any("unrecognized action" in w for w in first["warnings"])
     assert any("future-dated" in w for w in first["warnings"])
     second = ledger.import_fills(raw, "ACC-1", "fills.csv")
-    assert second["inserted"] == 0 and second["duplicates"] == 3   # re-import is a no-op
+    assert second["inserted"] == 0 and second["duplicates"] == 4   # re-import is a no-op
     flows = [f for f in store.fills("ACC-1") if f["side"] == "deposit"]
     assert flows and flows[0]["amount"] == pytest.approx(10000.0)
+    dividends = [f for f in store.fills("ACC-1") if f["side"] == "non_trade"]
+    assert dividends and dividends[0]["metadata"]["subtype"] == "dividend"
+    assert dividends[0]["amount"] == pytest.approx(150.0)
 
 
 def test_positions_import_builds_dated_snapshot(store):
@@ -151,13 +154,62 @@ def test_default_fetch_appends_pit_snapshot(store):
         f = fundamentals.fetch("PITX")
         assert f.as_of  # stamped with the fetch date
         history = store.fundamentals_history("PITX")
-        assert len(history) == 1
-        assert history[0]["trailing_pe"] == pytest.approx(15.0)
+        assert [row["slot"] for row in history] == ["first", "last"]
+        assert all(row["trailing_pe"] == pytest.approx(15.0) for row in history)
         fundamentals.fetch("PITX")   # cached — no duplicate write
-        assert len(store.fundamentals_history("PITX")) == 1
+        assert len(store.fundamentals_history("PITX")) == 2
     finally:
         fundamentals.set_default_provider(None)
         fundamentals.invalidate_cache()
+
+
+def test_same_day_refetch_preserves_first_observation(store):
+    """The 'first' slot is immutable: an intraday revision (earnings-day flip)
+    updates only 'last', so what-was-knowable-at-open survives verbatim."""
+    store.record_fundamentals_snapshot({
+        "symbol": "PITY", "as_of": "2026-07-12", "trailing_pe": 15.0, "source": "fmp",
+        "reconciliation_warnings": ["trailing_pe: fmp=15.0 vs yfinance=26.0"]})
+    store.record_fundamentals_snapshot({
+        "symbol": "PITY", "as_of": "2026-07-12", "trailing_pe": 22.0, "source": "yfinance"})
+    rows = store.fundamentals_history("PITY")
+    assert [(r["slot"], r["trailing_pe"]) for r in rows] == [("first", 15.0), ("last", 22.0)]
+    assert "yfinance=26.0" in rows[0]["recon_warnings"]  # warnings frozen with the first slot
+    assert all(r["retrieved_at"] for r in rows)
+
+
+def test_v8_snapshots_survive_slot_migration(tmp_path, monkeypatch):
+    """v8 rows (no slot column) migrate as slot='last' — recorded evidence is
+    never dropped, and new same-day writes still open a fresh 'first' slot."""
+    import sqlite3
+
+    db = tmp_path / "v8.db"
+    conn = sqlite3.connect(db)
+    conn.execute("""CREATE TABLE fundamentals_snapshots (
+        symbol TEXT NOT NULL, as_of TEXT NOT NULL, dividend_yield REAL, forward_pe REAL,
+        trailing_pe REAL, earnings_growth REAL, growth_basis TEXT NOT NULL DEFAULT '',
+        sector TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT '', roe REAL,
+        profit_margin REAL, debt_to_equity REAL, revenue_growth REAL, current_price REAL,
+        target_mean_price REAL, analyst_rating REAL, n_analysts INTEGER,
+        next_earnings_date TEXT NOT NULL DEFAULT '', PRIMARY KEY (symbol, as_of))""")
+    conn.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT)")
+    conn.execute("INSERT INTO schema_version VALUES (8, 'migration-test')")
+    conn.execute("INSERT INTO fundamentals_snapshots(symbol, as_of, trailing_pe, source) "
+                 "VALUES ('AAPL', '2026-07-01', 30.0, 'fmp')")
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setenv("HELIOS_DB_PATH", str(db))
+    persistence.reset_store_for_tests()
+    try:
+        st = persistence.get_store()
+        migrated = st.fundamentals_history("AAPL")
+        assert [(r["slot"], r["trailing_pe"], r["as_of"]) for r in migrated] == [
+            ("last", 30.0, "2026-07-01")]
+        st.record_fundamentals_snapshot(
+            {"symbol": "AAPL", "as_of": "2026-07-12", "trailing_pe": 31.0, "source": "fmp"})
+        assert len(st.fundamentals_history("AAPL")) == 3  # migrated row + new first/last pair
+    finally:
+        persistence.reset_store_for_tests()
 
 
 def test_provider_disagreement_warns_never_blocks():
@@ -181,3 +233,75 @@ def test_delete_account_removes_all_ledger_rows(store):
     assert store.fills("ACC-DEL") == []
     assert store.account_snapshots("ACC-DEL") == []
     assert all(a["account_id"] != "ACC-DEL" for a in store.ledger_accounts())
+
+
+# --------------------------------------------------------------------------- #
+# Ledger v2 (Deep Review 2, D8): reconciliation, frozen anchors, disclosure
+# --------------------------------------------------------------------------- #
+def test_cash_reconciliation_flags_unexplained_movement(store):
+    store.upsert_ledger_account("ACC-R")
+    store.record_account_snapshot({"account_id": "ACC-R", "as_of": "2026-05-01",
+                                   "cash": 50000.0, "total_value": 100000.0})
+    # Cash fell $30k but recorded activity explains only a $10k buy.
+    store.record_account_snapshot({"account_id": "ACC-R", "as_of": "2026-05-31",
+                                   "cash": 20000.0, "total_value": 101000.0})
+    ledger.import_fills(_fills_csv(["2026-05-10,JPM,BUY,50,200.00,0.00,"]), "ACC-R")
+    perf = ledger.account_performance("ACC-R")
+    period = perf["periods"][0]
+    assert period["reconciliation"]["status"] == "mismatch"
+    assert period["reconciliation"]["diff_usd"] == pytest.approx(-20000.0)
+    assert any("unexplained" in w for w in perf["warnings"])
+    assert "Modified-Dietz estimate" in perf["method"]
+
+
+def test_reconciliation_ok_when_activity_explains_cash(store):
+    store.upsert_ledger_account("ACC-OK")
+    store.record_account_snapshot({"account_id": "ACC-OK", "as_of": "2026-05-01",
+                                   "cash": 50000.0, "total_value": 100000.0})
+    # $10,050 buy (incl fees) + $150 dividend in -> cash 50k - 10,050 + 150 = 40,100.
+    store.record_account_snapshot({"account_id": "ACC-OK", "as_of": "2026-05-31",
+                                   "cash": 40100.0, "total_value": 102000.0})
+    ledger.import_fills(_fills_csv([
+        "2026-05-10,JPM,BUY,50,200.00,50.00,",
+        "2026-05-15,JPM,DIVIDEND,,,,150.00",
+    ]), "ACC-OK")
+    perf = ledger.account_performance("ACC-OK")
+    period = perf["periods"][0]
+    assert period["reconciliation"]["status"] == "ok"
+    assert period["income_usd"] == pytest.approx(150.0)
+    assert perf["income_usd"] == pytest.approx(150.0)
+
+
+def test_shortfall_prefers_frozen_decision_price(store):
+    from engine import decision_journal
+    data.parse_csv(price_csv(days=200), "FRZ", "Frozen Co")
+    entry = decision_journal.record_decision(
+        target_kind="instrument", target_id="FRZ", my_action="BUY",
+        signal={"action": "BUY", "score": 0.4})
+    frozen = float(entry["decision_price"])
+    fill_px = frozen * 1.001
+    raw = ("Trade Date,Symbol,Action,Quantity,Price,Fees,Decision Id\n"
+           f"{entry['decision_date']},FRZ,BUY,100,{fill_px:.4f},1.00,{entry['decision_id']}\n").encode()
+    ledger.import_fills(raw, "ACC-F")
+    # Mutate the price history — the anchor must NOT drift with it.
+    shifted = data.get("FRZ").df["close"] * 1.10
+    data.register(data.Instrument("FRZ", "Frozen Co", shifted.to_frame("close"), "upload", []))
+    rows = ledger.decision_shortfall("ACC-F")
+    assert rows[0]["status"] == "measured"
+    assert rows[0]["decision_close"] == pytest.approx(frozen)
+    assert "frozen decision_price" in rows[0]["anchor_basis"]
+    assert rows[0]["shortfall_bps"] == pytest.approx(10.0, abs=0.5)
+
+
+def test_exec_id_column_preserves_distinct_identical_fills(store):
+    raw = ("Trade Date,Symbol,Action,Quantity,Price,Fees,Exec Id\n"
+           "2026-06-01,JPM,BUY,100,200.00,1.00,EX-1\n"
+           "2026-06-01,JPM,BUY,100,200.00,1.00,EX-2\n").encode()
+    result = ledger.import_fills(raw, "ACC-X", "fills.csv")
+    assert result["inserted"] == 2      # distinct executions survive
+    raw_no_id = ("Trade Date,Symbol,Action,Quantity,Price,Fees\n"
+                 "2026-06-02,JPM,BUY,100,200.00,1.00\n"
+                 "2026-06-02,JPM,BUY,100,200.00,1.00\n").encode()
+    collapsed = ledger.import_fills(raw_no_id, "ACC-X", "fills.csv")
+    assert collapsed["inserted"] == 1 and collapsed["duplicates"] == 1
+    assert any("execution" in w.lower() for w in collapsed["warnings"])

@@ -28,7 +28,7 @@ except Exception:  # pragma: no cover - exercised when dependency install is bro
     Fernet = None
     InvalidToken = Exception
 
-SCHEMA_VERSION = 8  # 6: + decision_journal; 7: + macro_history; 8: + ledger (fills/snapshots/positions/accounts) + fundamentals_snapshots (PIT)
+SCHEMA_VERSION = 9  # 7: + macro_history; 8: + ledger + fundamentals_snapshots; 9: PIT first/last-of-day slots + retrieved_at + recon_warnings
 REAL_SOURCES = {"live", "upload"}
 DISABLED_VALUES = {"", "0", "false", "off", "disabled", "none"}
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[1] / ".helios" / "helios.db"
@@ -1122,7 +1122,6 @@ class SQLiteStore:
                     if row:
                         prior_status = self._load_text(row["status"])
                         prior_fingerprint = self._load_text(row["last_fingerprint"])
-                        occurrence_count = int(row["occurrence_count"] or 0) + 1
                         if prior_status == "resolved":
                             state = "reopened"
                         elif prior_fingerprint != fingerprint:
@@ -1130,6 +1129,17 @@ class SQLiteStore:
                         else:
                             state = "active"
                         notification_states[alert_id] = state
+                        if state == "active":
+                            # Unchanged alert re-observed (typically a GET-driven
+                            # sync): touch last_seen_at only. occurrence_count
+                            # counts distinct raisings (new/reopened/changed),
+                            # not page views — GET must not mutate audit state.
+                            conn.execute(
+                                "UPDATE data_quality_alerts SET last_seen_at = ? WHERE alert_id = ?",
+                                (now, alert_id),
+                            )
+                            continue
+                        occurrence_count = int(row["occurrence_count"] or 0) + 1
                         conn.execute(
                             """
                             UPDATE data_quality_alerts
@@ -1782,45 +1792,55 @@ class SQLiteStore:
     # Point-in-time fundamentals: what Helios KNEW on each date
     # ------------------------------------------------------------------ #
     def record_fundamentals_snapshot(self, snap: dict[str, Any]) -> None:
+        """First-of-day is IMMUTABLE (what was knowable at the operator's
+        first observation); last-of-day stays current. The old single-row
+        REPLACE silently destroyed the morning values on earnings days
+        (review finding). Two rows/symbol/day keeps the flush cheap."""
         if not self.available:
             return
+        values = (
+            str(snap["symbol"]).upper()[:16],
+            str(snap["as_of"])[:10],
+            utc_now(),
+            self._store_json(snap.get("reconciliation_warnings") or []),
+            snap.get("dividend_yield"), snap.get("forward_pe"),
+            snap.get("trailing_pe"), snap.get("earnings_growth"),
+            str(snap.get("growth_basis") or "")[:40],
+            str(snap.get("sector") or "")[:60],
+            str(snap.get("source") or "")[:60],
+            snap.get("roe"), snap.get("profit_margin"),
+            snap.get("debt_to_equity"), snap.get("revenue_growth"),
+            snap.get("current_price"), snap.get("target_mean_price"),
+            snap.get("analyst_rating"), snap.get("n_analysts"),
+            str(snap.get("next_earnings_date") or "")[:10],
+        )
+        sql = """
+            INSERT OR {mode} INTO fundamentals_snapshots(
+              symbol, as_of, slot, retrieved_at, recon_warnings,
+              dividend_yield, forward_pe, trailing_pe, earnings_growth, growth_basis,
+              sector, source, roe, profit_margin, debt_to_equity, revenue_growth,
+              current_price, target_mean_price, analyst_rating, n_analysts, next_earnings_date
+            ) VALUES (?, ?, '{slot}', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
         try:
             with self._connect() as conn:
-                conn.execute(
-                    """
-                    INSERT OR REPLACE INTO fundamentals_snapshots(
-                      symbol, as_of, dividend_yield, forward_pe, trailing_pe,
-                      earnings_growth, growth_basis, sector, source, roe,
-                      profit_margin, debt_to_equity, revenue_growth, current_price,
-                      target_mean_price, analyst_rating, n_analysts, next_earnings_date
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        str(snap["symbol"]).upper()[:16],
-                        str(snap["as_of"])[:10],
-                        snap.get("dividend_yield"), snap.get("forward_pe"),
-                        snap.get("trailing_pe"), snap.get("earnings_growth"),
-                        str(snap.get("growth_basis") or "")[:40],
-                        str(snap.get("sector") or "")[:60],
-                        str(snap.get("source") or "")[:60],
-                        snap.get("roe"), snap.get("profit_margin"),
-                        snap.get("debt_to_equity"), snap.get("revenue_growth"),
-                        snap.get("current_price"), snap.get("target_mean_price"),
-                        snap.get("analyst_rating"), snap.get("n_analysts"),
-                        str(snap.get("next_earnings_date") or "")[:10],
-                    ),
-                )
+                conn.execute(sql.format(mode="IGNORE", slot="first"), values)
+                conn.execute(sql.format(mode="REPLACE", slot="last"), values)
         except Exception:
             pass  # PIT capture is best-effort; a write failure never blocks a fetch
 
     def fundamentals_history(self, symbol: str, limit: int = 400) -> list[dict[str, Any]]:
+        """Both slots per day, oldest first. Day-granularity consumers should
+        prefer slot='first' (what was knowable at first observation) and fall
+        back to 'last' for pre-v9 rows; first-vs-last diff exposes intraday
+        revision (earnings-day flips) for free."""
         if not self.available:
             return []
         try:
             with self._connect() as conn:
                 rows = conn.execute(
                     "SELECT * FROM fundamentals_snapshots WHERE symbol = ? "
-                    "ORDER BY as_of ASC LIMIT ?",
+                    "ORDER BY as_of ASC, slot ASC LIMIT ?",
                     (str(symbol).upper(), max(1, min(int(limit), 5000))),
                 ).fetchall()
                 return [dict(row) for row in rows]
@@ -1900,6 +1920,62 @@ class SQLiteStore:
                 return _report_snapshot_row(row, self, include_report=True) if row else None
         except Exception:
             return None
+
+
+def _migrate_fundamentals_snapshots_v9(conn: sqlite3.Connection) -> None:
+    """One-shot in-place migration: v8 (symbol, as_of) -> v9 (+ slot).
+
+    Existing rows were last-write-of-day, so they migrate as slot='last' with
+    empty retrieved_at. The copy happens inside the caller's transaction —
+    a failure rolls back and never drops accumulated PIT evidence."""
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(fundamentals_snapshots)").fetchall()]
+    if not cols or "slot" in cols:
+        return  # table absent (fresh DB) or already migrated
+    conn.execute("ALTER TABLE fundamentals_snapshots RENAME TO fundamentals_snapshots_v8")
+    conn.execute(
+        """
+        CREATE TABLE fundamentals_snapshots (
+          symbol TEXT NOT NULL,
+          as_of TEXT NOT NULL,
+          slot TEXT NOT NULL DEFAULT 'last',
+          retrieved_at TEXT NOT NULL DEFAULT '',
+          recon_warnings TEXT NOT NULL DEFAULT '',
+          dividend_yield REAL,
+          forward_pe REAL,
+          trailing_pe REAL,
+          earnings_growth REAL,
+          growth_basis TEXT NOT NULL DEFAULT '',
+          sector TEXT NOT NULL DEFAULT '',
+          source TEXT NOT NULL DEFAULT '',
+          roe REAL,
+          profit_margin REAL,
+          debt_to_equity REAL,
+          revenue_growth REAL,
+          current_price REAL,
+          target_mean_price REAL,
+          analyst_rating REAL,
+          n_analysts INTEGER,
+          next_earnings_date TEXT NOT NULL DEFAULT '',
+          PRIMARY KEY (symbol, as_of, slot)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO fundamentals_snapshots(
+          symbol, as_of, slot, retrieved_at, recon_warnings,
+          dividend_yield, forward_pe, trailing_pe, earnings_growth, growth_basis,
+          sector, source, roe, profit_margin, debt_to_equity, revenue_growth,
+          current_price, target_mean_price, analyst_rating, n_analysts, next_earnings_date
+        )
+        SELECT symbol, as_of, 'last', '', '',
+               dividend_yield, forward_pe, trailing_pe, earnings_growth, growth_basis,
+               sector, source, roe, profit_margin, debt_to_equity, revenue_growth,
+               current_price, target_mean_price, analyst_rating, n_analysts, next_earnings_date
+        FROM fundamentals_snapshots_v8
+        """
+    )
+    conn.execute("DROP TABLE fundamentals_snapshots_v8")
 
 
 def _create_schema(conn: sqlite3.Connection) -> None:
@@ -2178,11 +2254,19 @@ def _create_schema(conn: sqlite3.Connection) -> None:
         """
     )
     # --- Point-in-time fundamentals: what Helios KNEW on each date --- #
+    # v9: (symbol, as_of, slot) with slot in ('first','last') — the old
+    # single-row-per-day INSERT OR REPLACE destroyed the morning observation
+    # on earnings days, exactly when intraday revision matters (review
+    # finding). The migration COPIES existing rows (they are evidence).
+    _migrate_fundamentals_snapshots_v9(conn)
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS fundamentals_snapshots (
           symbol TEXT NOT NULL,
           as_of TEXT NOT NULL,
+          slot TEXT NOT NULL DEFAULT 'last',
+          retrieved_at TEXT NOT NULL DEFAULT '',
+          recon_warnings TEXT NOT NULL DEFAULT '',
           dividend_yield REAL,
           forward_pe REAL,
           trailing_pe REAL,
@@ -2199,7 +2283,7 @@ def _create_schema(conn: sqlite3.Connection) -> None:
           analyst_rating REAL,
           n_analysts INTEGER,
           next_earnings_date TEXT NOT NULL DEFAULT '',
-          PRIMARY KEY (symbol, as_of)
+          PRIMARY KEY (symbol, as_of, slot)
         )
         """
     )
