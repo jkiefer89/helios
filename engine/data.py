@@ -109,6 +109,9 @@ class Instrument:
     df: pd.DataFrame
     source: str  # "sample" | "upload" | "live"
     headlines: list = field(default_factory=list)
+    # Which price feed produced df ("fmp_eod_adjusted" | "yfinance" | "" for
+    # non-live sources) — persisted so every history stays label-honest.
+    price_provider: str = ""
 
 
 _STORE: dict[str, Instrument] = {}
@@ -508,7 +511,7 @@ def fetch_live(symbol: str, period: str = "2y", persist: bool = True) -> Instrum
         except Exception:
             pass
 
-    inst = Instrument(symbol.upper(), name, df, "live", headlines)
+    inst = Instrument(symbol.upper(), name, df, "live", headlines, price_provider=provider_used)
     register(inst)
     if persist:
         _persist_instrument(inst, adjusted=True,
@@ -547,8 +550,9 @@ def refresh_live_symbol(symbol: str, fetcher=None, refresh_journal: bool = True)
     before_dates = set(pd.to_datetime(current.df.index).normalize())
     try:
         if fetcher is None:
-            if not HAS_YF:
-                raise RuntimeError("yfinance is not installed; live refresh unavailable.")
+            # No HAS_YF pre-check: fetch_live itself fails loudly when neither
+            # the configured price source nor yfinance can serve the symbol —
+            # a hard yfinance requirement here would break FMP-source refreshes.
             inst = fetch_live(sym, persist=False)
         else:
             inst = fetcher(sym)
@@ -559,7 +563,9 @@ def refresh_live_symbol(symbol: str, fetcher=None, refresh_journal: bool = True)
             register(inst)
         after_dates = set(pd.to_datetime(inst.df.index).normalize())
         rows_added = max(0, len(after_dates - before_dates))
-        _persist_instrument(inst, adjusted=True, metadata={"imported_via": "live_refresh"})
+        _persist_instrument(inst, adjusted=True,
+                            metadata={"imported_via": "live_refresh",
+                                      "price_provider": getattr(inst, "price_provider", "")})
         if refresh_journal:
             _refresh_signal_journal_forward_results()
         message = f"Refreshed {len(inst.df)} live rows."
@@ -654,7 +660,9 @@ def ensure_live_symbols(
             after_dates = set(pd.to_datetime(inst.df.index).normalize())
             before_dates = item["before_dates"]
             rows_added = max(0, len(after_dates - before_dates)) if before_dates else len(after_dates)
-            _persist_instrument(inst, adjusted=True, metadata={"period": period, "imported_via": "auto_live"})
+            _persist_instrument(inst, adjusted=True,
+                                metadata={"period": period, "imported_via": "auto_live",
+                                          "price_provider": getattr(inst, "price_provider", "")})
             _record_refresh(symbol, "ok", rows_added, f"Auto live updated {len(inst.df)} rows.")
             results.append({"symbol": symbol, "status": "ok", "rows_added": rows_added, "rows": len(inst.df), "message": f"Auto live updated {len(inst.df)} rows."})
         else:

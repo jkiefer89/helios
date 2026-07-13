@@ -157,3 +157,43 @@ def test_macro_get_ignores_refresh_param(monkeypatch):
     assert client.get("/api/macro?refresh=1").status_code == 200
     assert client.post("/api/macro/refresh").status_code == 200
     assert forced == [False, True]
+
+
+# --------------------------------------------------------------------------- #
+# Data stage 3 — FMP price-source cutover honesty
+# --------------------------------------------------------------------------- #
+def test_price_source_cutover_stamps_provider(monkeypatch, tmp_path):
+    """HELIOS_PRICE_SOURCE=fmp routes fetch_live through the FMP seam and the
+    provider label survives BOTH persist paths (fetch and refresh) — every
+    stored history must say which feed produced it."""
+    import json as _json
+
+    from engine import persistence
+
+    monkeypatch.setenv("HELIOS_DB_PATH", str(tmp_path / "h.db"))
+    persistence.reset_store_for_tests()
+    try:
+        monkeypatch.setenv("HELIOS_PRICE_SOURCE", "fmp")
+        monkeypatch.setattr(data, "HAS_YF", False)   # no yfinance fallback available
+        frame = price_series(days=120).to_frame("close")
+        monkeypatch.setattr(data, "_fmp_price_history", lambda s, p="2y": frame.copy())
+
+        inst = data.fetch_live("FMPX")
+        assert inst.price_provider == "fmp_eod_adjusted"
+
+        result = data.refresh_live_symbol("FMPX")
+        assert result["status"] == "ok"
+        st = persistence.get_store()
+        with st._connect() as conn:
+            row = conn.execute(
+                "SELECT metadata_json FROM instruments WHERE symbol = 'FMPX'").fetchone()
+        meta = _json.loads(st._load_text(row["metadata_json"]) or "{}")
+        assert meta["imported_via"] == "live_refresh"
+        assert meta["price_provider"] == "fmp_eod_adjusted"
+
+        # FMP returning nothing + no yfinance -> loud failure, never a fabricated series.
+        monkeypatch.setattr(data, "_fmp_price_history", lambda s, p="2y": None)
+        with pytest.raises(RuntimeError):
+            data.fetch_live("FMPY")
+    finally:
+        persistence.reset_store_for_tests()

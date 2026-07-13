@@ -170,6 +170,17 @@ Stage 3 shipped with Phase 4 (opt-in behind HELIOS_PRICE_SOURCE=fmp with a
 live reconciliation gate); only the deferred survivorship-vendor decision
 remains open, by design.
 
+**FMP cutover EXECUTED 2026-07-12**: book-wide reconciliation passed — 48/55
+instruments compared over 62 overlapping days, worst mean divergence 0.0079%
+(DTCR), zero above the 0.1% gate; the 7 without FMP EOD coverage (BTC-USD,
+five Fidelity funds, SOIL) fall back to yfinance per fetch. HELIOS_PRICE_SOURCE=fmp
+is set in .env; every persisted history now carries a `price_provider` label
+(threaded through fetch/refresh/auto-live persist paths, locked in
+tests/test_deep_review_2.py). The cutover test also exposed and fixed a
+refresh-path bug: a hard yfinance pre-check that would have broken
+FMP-source refreshes if yfinance were ever absent. Full-book refresh after
+cutover: 55/55 ok, 48 on fmp_eod_adjusted / 7 on yfinance.
+
 **3.1 Minimum viable ledger** *(review #5 — confirmed; Large, 4 slices)*
 - Slice A (S): three tables — `trade_fills` (idempotent dedupe key, optional link
   to `decision_journal.decision_id`), `account_snapshots`, `account_positions`;
