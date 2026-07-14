@@ -29,12 +29,21 @@ import type {
   ReportResponse,
   RiskAnalyticsResponse,
   SignalJournalResponse,
+  SignalRecordResponse,
   StrategyResponse,
   TickersResponse,
   DataJobsResponse,
   LedgerAccount,
   RebalanceProposal,
   LedgerPerformanceResponse,
+  ProspectiveTrial,
+  ProspectiveTrialAssessment,
+  ProspectiveTrialsResponse,
+  TrialProtocol,
+  IndependentValidationResponse,
+  OperationsStatusResponse,
+  ProvidersResponse,
+  SecurityStatusResponse,
 } from "./types";
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
@@ -59,6 +68,7 @@ export const api = {
   commandCenter: () => request<CommandCenterResponse>("/api/command-center"),
   dataStatus: () => request<DataStatusResponse>("/api/data/status"),
   dataQuality: () => request<DataQualityResponse>("/api/data-quality"),
+  syncDataQuality: () => request<DataQualityResponse>("/api/data-quality/sync", { method: "POST" }),
   refreshData: (params: { symbol?: string; all?: boolean } = {}) =>
     request<DataRefreshResponse>("/api/data/refresh", {
       method: "POST",
@@ -164,10 +174,50 @@ export const api = {
     });
     return request<EvidenceLabResponse>(`/api/evidence-lab?${query}`);
   },
+  trials: (params: { kind?: "instrument" | "model"; id?: string } = {}) => {
+    const query = new URLSearchParams();
+    if (params.kind) query.set("target_kind", params.kind);
+    if (params.id) query.set("target_id", params.id);
+    return request<ProspectiveTrialsResponse>(`/api/trials${query.size ? `?${query}` : ""}`);
+  },
+  registerTrial: (body: {
+    target_kind: "instrument" | "model";
+    target_id: string;
+    protocol: TrialProtocol;
+    actor: string;
+  }) => request<{ trial: ProspectiveTrial; disclaimer: string }>("/api/trials", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }),
+  assessTrial: (trialId: string) =>
+    request<{ trial_id: string; assessment: ProspectiveTrialAssessment; disclaimer: string }>(
+      `/api/trials/${encodeURIComponent(trialId)}/assess`, { method: "POST" },
+    ),
+  closeTrial: (trialId: string, body: { status: "completed" | "withdrawn" | "invalidated"; note: string; actor: string }) =>
+    request<{ trial: ProspectiveTrial; disclaimer: string }>(
+      `/api/trials/${encodeURIComponent(trialId)}/close`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
   analyzeInstrument: (symbol: string, horizon: number) =>
     request<AnalysisResponse>(`/api/analyze?ticker=${encodeURIComponent(symbol)}&horizon=${horizon}`),
   analyzeModel: (id: string, horizon: string | number) =>
     request<AnalysisResponse>(`/api/model/analyze?id=${encodeURIComponent(id)}&horizon=${encodeURIComponent(String(horizon))}`),
+  recordInstrumentSignal: (ticker: string, horizon: number) =>
+    request<SignalRecordResponse>("/api/signals/record", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ticker, horizon }),
+    }),
+  recordModelSignal: (id: string, horizon: number) =>
+    request<SignalRecordResponse>("/api/model/signals/record", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, horizon }),
+    }),
   uploadPrice: (file: File, symbol: string) => {
     const form = new FormData();
     form.append("file", file);
@@ -230,6 +280,83 @@ export const api = {
       body: JSON.stringify(body),
     }),
   dataJobs: () => request<DataJobsResponse>("/api/data/jobs"),
+  providers: () => request<ProvidersResponse>("/api/providers"),
+  reconcilePriceSources: (symbol: string, primaryProvider: string, backupProvider: string, period = "3mo") =>
+    request<Record<string, unknown>>(
+      `/api/data/price-reconciliation?ticker=${encodeURIComponent(symbol)}&primary=${encodeURIComponent(primaryProvider)}&backup=${encodeURIComponent(backupProvider)}&period=${encodeURIComponent(period)}`,
+      { method: "POST" },
+    ),
+  recordProviderReconciliation: (payload: {
+    data_domain: string;
+    primary_provider: string;
+    backup_provider: string;
+    symbols: string[];
+    period?: string;
+    note: string;
+  }) => request<{ reconciliation: import("./types").ProviderReconciliation }>("/api/providers/reconciliations", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  }),
+  approveProviderCutover: (payload: {
+    data_domain: string;
+    primary_provider: string;
+    backup_provider: string;
+    reconciliation_id: string;
+    note: string;
+  }) => request<{ cutover: import("./types").ProviderCutover; registry: ProvidersResponse }>("/api/providers/cutovers", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  }),
+  operationsStatus: () => request<OperationsStatusResponse>("/api/operations/status"),
+  syncOperationalIncidents: () => request<{ incident_sync: Record<string, unknown> }>("/api/operations/incidents/sync", { method: "POST" }),
+  updateOperationalIncident: (incidentId: string, payload: { status: string; owner: string; note: string }) =>
+    request<{ incident: import("./types").OperationalIncident }>(`/api/operations/incidents/${encodeURIComponent(incidentId)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
+  verifyBackup: () => request<{ verification: Record<string, unknown> }>("/api/operations/backup/verify", { method: "POST" }),
+  securityStatus: () => request<SecurityStatusResponse>("/api/security/status"),
+  createSession: () => request<{ session: Record<string, unknown> }>("/api/auth/session", { method: "POST" }),
+  deleteSession: () => request<{ revoked: boolean }>("/api/auth/session", { method: "DELETE" }),
+  independentValidation: (modelId: string) =>
+    request<IndependentValidationResponse>(`/api/models/${encodeURIComponent(modelId)}/independent-validation`),
+  recordIndependentValidation: (
+    modelId: string,
+    payload: {
+      model_version?: number;
+      sponsor: string;
+      outcome: string;
+      controls: Record<string, string>;
+      findings?: string[];
+      next_review_due?: string;
+      note?: string;
+    },
+  ) => request<{ review: IndependentValidationResponse["reviews"][number]; status: IndependentValidationResponse["status"] }>(
+    `/api/models/${encodeURIComponent(modelId)}/independent-validation`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) },
+  ),
+  recordValidationException: (
+    modelId: string,
+    payload: {
+      model_version?: number;
+      control_key: string;
+      owner: string;
+      reason: string;
+      compensating_controls: string[];
+      expires_at: string;
+    },
+  ) => request<{ exception: IndependentValidationResponse["exceptions"][number]; status: IndependentValidationResponse["status"] }>(
+    `/api/models/${encodeURIComponent(modelId)}/validation-exceptions`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) },
+  ),
+  resolveValidationException: (modelId: string, exceptionId: string, note: string) =>
+    request<{ exception: IndependentValidationResponse["exceptions"][number]; status: IndependentValidationResponse["status"] }>(
+      `/api/models/${encodeURIComponent(modelId)}/validation-exceptions/${encodeURIComponent(exceptionId)}`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: "resolved", note }) },
+    ),
   ledgerPerformance: (account: string) =>
     request<LedgerPerformanceResponse>(`/api/ledger/performance?account=${encodeURIComponent(account)}`),
   ledgerMapAccount: (body: { account_id: string; model_id: string; display_name?: string }) =>

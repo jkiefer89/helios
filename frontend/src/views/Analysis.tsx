@@ -127,6 +127,19 @@ export function Analysis({
 function AnalysisPayload({ payload }: { payload: AnalysisResponse }) {
   const quality = analysisQuality(payload);
   const eligible = quality.eligible_for_real_research === true;
+  if (!eligible) {
+    return (
+      <>
+        <DataQualityBanner payload={quality} />
+        <Panel title="Research blocked" meta="No calculations exposed">
+          <EmptyState
+            title={quality.display_label || "Research inputs are not eligible"}
+            body={quality.required_action || quality.reason || "Resolve the data provenance gate before running analysis."}
+          />
+        </Panel>
+      </>
+    );
+  }
   const actionClass = eligible ? safeAction(payload.signal.action) : "preview";
   const signalLabel = eligible ? payload.signal.action : "PREVIEW";
   const panelSuffix = eligible ? "" : " preview";
@@ -145,7 +158,7 @@ function AnalysisPayload({ payload }: { payload: AnalysisResponse }) {
         </div>
         {eligible && <SignalTracks signal={payload.signal} />}
         {eligible && <DecisionQuickLog payload={payload} />}
-        {!eligible && <div className="warning-list"><span>{quality.required_action || "Replace demo or mixed inputs before treating this as research evidence."}</span></div>}
+        {!eligible && <div className="warning-list"><span>{quality.required_action || "Replace ineligible or incomplete inputs before treating this as research evidence."}</span></div>}
         {payload.signal.caveats?.length ? <div className="warning-list">{payload.signal.caveats.map((caveat) => <span key={caveat}>{caveat}</span>)}</div> : null}
         {isModel && (
           <p className="forecast-note">
@@ -253,16 +266,33 @@ const QUICK_ACTIONS = ["BUY", "ADD", "HOLD", "TRIM", "SELL"] as const;
 
 /** One-click decision logging with the engine snapshot attached — feeds the
     Decision Journal so agree/override value gets measured. */
-function DecisionQuickLog({ payload }: { payload: AnalysisResponse }) {
+export function DecisionQuickLog({ payload }: { payload: AnalysisResponse }) {
   const [myAction, setMyAction] = useState<string>(payload.signal.action || "HOLD");
   const [rationale, setRationale] = useState("");
   const [state, setState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [message, setMessage] = useState("");
+  const [signalState, setSignalState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [signalMessage, setSignalMessage] = useState("");
   const isModel = Boolean(payload.mandate);
   const targetId = isModel ? String(payload.id || "") : String(payload.symbol || "");
 
   const engineBucket = bucketOf(payload.signal.action);
   const agreement = bucketOf(myAction) === engineBucket ? "agree" : "override";
+  const signalHorizon = tacticalForecast(payload)?.horizon_days || 21;
+
+  const recordSignal = async () => {
+    if (!targetId || signalState === "saving" || signalState === "saved") return;
+    setSignalState("saving");
+    try {
+      if (isModel) await api.recordModelSignal(targetId, signalHorizon);
+      else await api.recordInstrumentSignal(targetId, signalHorizon);
+      setSignalState("saved");
+      setSignalMessage(`Recorded the ${signalHorizon}-day Helios signal for prospective measurement.`);
+    } catch (err) {
+      setSignalState("error");
+      setSignalMessage(err instanceof Error ? err.message : "Could not record the Helios signal.");
+    }
+  };
 
   const log = async () => {
     // "saved" is terminal until an input changes (both onChange handlers reset
@@ -300,16 +330,29 @@ function DecisionQuickLog({ payload }: { payload: AnalysisResponse }) {
 
   return (
     <div className="decision-quicklog">
+      <span className="decision-quicklog__label">Prospective evidence</span>
+      <button type="button" onClick={() => void recordSignal()}
+              disabled={signalState === "saving" || signalState === "saved" || !targetId}>
+        {signalState === "saving" ? "Recording…" : signalState === "saved" ? "Signal recorded" : "Record Helios signal"}
+      </button>
+      {signalState === "saved" && <span className="decision-quicklog__ok">{signalMessage}</span>}
+      {signalState === "error" && <span className="decision-quicklog__err">{signalMessage}</span>}
       <span className="decision-quicklog__label">Log your call</span>
-      <select value={myAction} onChange={(e) => { setMyAction(e.target.value); setState("idle"); }}>
-        {QUICK_ACTIONS.map((a) => <option key={a} value={a}>{a}</option>)}
-      </select>
+      <label className="decision-quicklog__field">
+        <span>Your action</span>
+        <select value={myAction} onChange={(e) => { setMyAction(e.target.value); setState("idle"); }}>
+          {QUICK_ACTIONS.map((a) => <option key={a} value={a}>{a}</option>)}
+        </select>
+      </label>
       <span className={agreement === "override" ? "decision-override" : "decision-agree"}>{agreement}</span>
-      <input
-        value={rationale}
-        onChange={(e) => { setRationale(e.target.value); setState("idle"); }}
-        placeholder="Why? (recorded for the scoreboard)"
-      />
+      <label className="decision-quicklog__field decision-quicklog__field--wide">
+        <span>Rationale</span>
+        <input
+          value={rationale}
+          onChange={(e) => { setRationale(e.target.value); setState("idle"); }}
+          placeholder="Recorded for the scoreboard"
+        />
+      </label>
       <button type="button" onClick={() => void log()}
               disabled={state === "saving" || state === "saved" || !targetId}>
         {state === "saving" ? "Logging…" : state === "saved" ? "Logged" : "Log decision"}
@@ -847,7 +890,7 @@ function safeAction(action?: string) {
 function analysisQuality(payload: AnalysisResponse): ProvenancePayload {
   // The engine's provenance verdict is authoritative: use data_mode,
   // display_label, and eligibility verbatim instead of re-deriving the
-  // demo/real gate client-side. The derivations below remain only as a
+  // eligibility gate client-side. The derivations below remain only as a
   // fallback for older cached responses that lack data_provenance.
   const verdict = payload.data_provenance;
   if (verdict && typeof verdict.data_mode === "string") {
@@ -865,16 +908,16 @@ function analysisQuality(payload: AnalysisResponse): ProvenancePayload {
   if (payload.source) {
     const real = ["live", "upload"].includes(payload.source);
     return {
-      data_mode: real ? "real" : "demo",
-      display_label: real ? "Real/Uploaded Analysis Data" : "Demo Analysis Data",
+      data_mode: real ? "real" : "invalid_for_research",
+      display_label: real ? "Real/Uploaded Analysis Data" : "Research Blocked - Ineligible Data",
       eligible_for_real_research: real,
       reason: real
         ? "This analysis uses a live or uploaded price history."
-        : "This view is using bundled sample data for workflow demonstration only.",
+        : "This history is not an eligible live or uploaded research source.",
       required_action: real ? "" : "Fetch live data or upload client price history before treating this as research evidence.",
       data_provenance: {
         source_counts: { [payload.source]: 1 },
-        data_mode: real ? "real" : "demo",
+        data_mode: real ? "real" : "invalid_for_research",
       },
     };
   }
@@ -891,8 +934,8 @@ function analysisQuality(payload: AnalysisResponse): ProvenancePayload {
     eligible_for_real_research: real,
     reason: real
       ? "Model analysis is based on resolved live or uploaded holding histories."
-      : "Model analysis includes sample, simulated, or excluded holding history and requires verification.",
-    required_action: real ? "" : "Use Portfolio Clinic and reports only after replacing missing or simulated holding history.",
+      : "Model analysis includes ineligible or excluded holding history and requires verification.",
+    required_action: real ? "" : "Use Portfolio Clinic and reports only after replacing missing holding history.",
     data_provenance: {
       ...provenance,
       data_mode: mode,

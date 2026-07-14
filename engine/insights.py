@@ -171,7 +171,7 @@ def generate(model, ps, metrics: dict, sig: dict,
         syms = ", ".join(prov.get("simulated_symbols", [])[:8])
         add("simulated_data_warning", "risk", "high",
             f"{prov['simulated_weight_pct']:.0f}% of portfolio weight uses SIMULATED price history "
-            f"({prov['n_simulated']} of {prov['n_holdings']} holdings had no live/sample data). Forecasts and "
+            f"({prov['n_simulated']} of {prov['n_holdings']} holdings had no eligible retained data). Forecasts and "
             f"metrics are illustrative, not market-calibrated.",
             f"Provide real price history (live data or CSV) for: {syms}. Until then treat every number as a "
             f"structural illustration only.",

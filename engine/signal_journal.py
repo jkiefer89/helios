@@ -4,11 +4,12 @@ The journal records deterministic Helios signal outputs with the exact input
 window used at the time. It never stores raw price histories; it stores compact
 audit facts plus a pending/measured forward result when later data exists.
 
-Recording is VIEW-TRIGGERED and idempotent per (target, input_end, horizon,
-action, score): every signal the engine emits is captured, re-views upsert the
-same row, and measured results are immutable. The deliberate-act channel is
-the decision journal (POST /api/decisions). Evidence aggregation counts each
-forward window once (see _dedupe_forward_windows); raw rows are the audit trail.
+Recording is explicit and idempotent per (target, input_end, horizon, action,
+score): viewing analysis is read-only, while POST signal-recording actions
+capture prospective evidence. Measured results receive a separate immutable
+evidence envelope before the journal row advances. Evidence aggregation counts
+each forward window once (see _dedupe_forward_windows); raw rows are the audit
+trail.
 """
 from __future__ import annotations
 
@@ -18,11 +19,12 @@ from typing import Any
 
 import pandas as pd
 
-from . import costs, data, persistence, portfolio, provenance
+from . import costs, data, evidence, persistence, portfolio, provenance
 from ._common import (
     avg as _avg,
     clean_close as _clean_close,
     finite as _finite,
+    journal_hold_preserved as _hold_preserved,
     journal_paper_hit as _paper_hit,
     pct as _pct,
 )
@@ -79,6 +81,28 @@ def record_signal(
     # markets ahead of UTC, mirroring the ingestion cutoff.
     fresh_enough = -1 <= lag_days <= 7
     measurable = real_eligible and fresh_enough
+    evidence_id = evidence.new_id("signal")
+    event_metadata = dict(metadata or {})
+    event_metadata["evidence"] = evidence.reference(evidence_id)
+    try:
+        from . import trials
+        link_metadata = {**event_metadata, "input_end_date": input_end}
+        trial_id, recording_source = trials.active_link(target_kind, target_id, link_metadata)
+        if link_metadata.get("trial_link_warning"):
+            event_metadata["trial_link_warning"] = link_metadata["trial_link_warning"]
+        if trial_id:
+            trial = persistence.get_store().prospective_trial(trial_id) or {}
+            expected_horizon = int((trial.get("protocol") or {}).get("horizon_days") or 0)
+            if expected_horizon and int(horizon_days) != expected_horizon:
+                event_metadata["trial_link_warning"] = (
+                    f"Scheduled snapshot horizon {int(horizon_days)} did not match "
+                    f"preregistered horizon {expected_horizon}; trial linkage withheld."
+                )
+                trial_id, recording_source = "", "exploratory"
+    except Exception:
+        trial_id, recording_source = "", (
+            "scheduled" if event_metadata.get("endpoint") == "auto_snapshot" else "exploratory"
+        )
     event = {
         "dedupe_key": _dedupe_key(target_kind, target_id, input_end, horizon_days, action, score),
         "target_kind": target_kind,
@@ -94,7 +118,9 @@ def record_signal(
         "data_mode": data_mode,
         "eligible_for_real_research": real_eligible,
         "source_counts": source_counts,
-        "metadata": dict(metadata or {}),
+        "metadata": event_metadata,
+        "trial_id": trial_id,
+        "recording_source": recording_source,
         **(_forward_result(full_close, input_end, horizon_days) if measurable
            else _not_measurable_result()),
     }
@@ -114,8 +140,59 @@ def record_signal(
                 event["alpha_pct"] = round(event["forward_result_pct"] - benchmark_result["benchmark_result_pct"], 4)
         elif benchmark_result.get("benchmark_note"):
             event["metadata"]["benchmark_note"] = benchmark_result["benchmark_note"]
-    result = persistence.get_store().record_signal_event(event)
-    return result.get("entry") or result
+    store = persistence.get_store()
+    if not store.available:
+        return store.record_signal_event(event)
+    with store.transaction(durable=True):
+        result = store.record_signal_event(event)
+        if not result.get("recorded") and not result.get("duplicate"):
+            raise RuntimeError(result.get("warning") or "Signal journal entry could not be persisted.")
+        entry = result.get("entry") or result
+        if result.get("recorded") and isinstance(entry, dict):
+            captured = evidence.capture(
+                evidence_id=evidence_id,
+                artifact_kind="signal",
+                target_kind=target_kind,
+                target_id=target_id,
+                input_payload={
+                    "input_series": evidence.series_payload(clean_input),
+                    "available_series": evidence.series_payload(full_close),
+                    "benchmark_series": _benchmark_series_payload(benchmark),
+                    "signal": signal,
+                    "horizon_days": int(horizon_days),
+                    "benchmark": benchmark,
+                    "source_counts": source_counts,
+                    "eligible_for_real_research": real_eligible,
+                    "data_mode": data_mode,
+                    "trial_id": trial_id,
+                    "recording_source": recording_source,
+                },
+                output_payload=entry,
+                evidence_manifest=evidence.manifest(
+                    series=clean_input,
+                    source=_primary_source(source_counts),
+                    provider=str(event_metadata.get("provider") or ""),
+                    retrieved_at=str(event_metadata.get("retrieved_at") or ""),
+                    transformations=("clean_close", "deterministic_signal"),
+                    extra={"source_counts": source_counts, "horizon_days": int(horizon_days)},
+                ),
+            )
+            if not captured.get("recorded"):
+                raise RuntimeError(captured.get("warning") or "Signal evidence could not be persisted.")
+    return entry
+
+
+def _primary_source(source_counts: dict[str, int]) -> str:
+    if not source_counts:
+        return ""
+    return max(source_counts.items(), key=lambda item: (int(item[1]), item[0]))[0]
+
+
+def _benchmark_series_payload(benchmark: str) -> dict[str, Any]:
+    inst = data.get(benchmark)
+    if inst is None or not provenance.is_real_source(inst.source) or "close" not in inst.df:
+        return evidence.series_payload(pd.Series(dtype=float))
+    return evidence.series_payload(_clean_close(inst.df["close"]))
 
 
 def list_entries(limit: int = 100) -> list[dict[str, Any]]:
@@ -211,42 +288,51 @@ def track_evidence(entries: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def summarize_entries(entries: list[dict[str, Any]]) -> dict[str, Any]:
-    # Headline evidence (hit rate, alpha) aggregates ONLY signals that were
-    # real-eligible at record time; demo/sample signals are counted separately.
+    # Headline evidence aggregates only real-eligible signals recorded before
+    # outcomes. Ineligible legacy entries remain visible but never score.
     real = [entry for entry in entries if _real_eligible(entry)]
-    demo = [entry for entry in entries if not _real_eligible(entry)]
-    measured = [entry for entry in real if entry.get("forward_status") == "measured"]
+    ineligible = [entry for entry in entries if not _real_eligible(entry)]
+    outcomes = [entry for entry in real if entry.get("forward_status") == "measured"]
     pending = [entry for entry in real if entry.get("forward_status") != "measured"]
-    demo_measured = [entry for entry in demo if entry.get("forward_status") == "measured"]
-    hit_flags = [_paper_hit(entry) for entry in measured]
+    ineligible_measured = [entry for entry in ineligible if entry.get("forward_status") == "measured"]
+    hit_flags = [_paper_hit(entry) for entry in outcomes]
     hit_flags = [flag for flag in hit_flags if flag is not None]
+    hold_flags = [_hold_preserved(entry) for entry in outcomes]
+    hold_flags = [flag for flag in hold_flags if flag is not None]
+    directional_alphas = [
+        costs.directional_alpha(entry.get("action_label"), entry.get("alpha_pct"))
+        for entry in outcomes
+    ]
     return {
         "total_count": len(entries),
-        "measured_count": len(measured),
+        "outcome_count": len(outcomes),
+        "measured_count": len(hit_flags),
         "pending_count": len(pending),
         "hit_count": sum(1 for flag in hit_flags if flag),
         "hit_rate_pct": _pct(sum(1 for flag in hit_flags if flag), len(hit_flags)),
+        "hold_measured_count": len(hold_flags),
+        "hold_preserved_count": sum(1 for flag in hold_flags if flag),
+        "hold_preservation_rate_pct": _pct(sum(1 for flag in hold_flags if flag), len(hold_flags)),
         "avg_score": _avg(entry.get("score") for entry in entries),
-        "avg_forward_result_pct": _avg(entry.get("forward_result_pct") for entry in measured),
-        "avg_benchmark_result_pct": _avg(entry.get("benchmark_result_pct") for entry in measured),
-        "avg_alpha_pct": _avg(entry.get("alpha_pct") for entry in measured),
-        "avg_alpha_after_default_costs_pct": costs.net_of_default_costs(
-            _avg(entry.get("alpha_pct") for entry in measured)),
+        "avg_forward_result_pct": _avg(entry.get("forward_result_pct") for entry in outcomes),
+        "avg_benchmark_result_pct": _avg(entry.get("benchmark_result_pct") for entry in outcomes),
+        "avg_alpha_pct": _avg(directional_alphas),
+        "avg_alpha_after_default_costs_pct": costs.net_of_default_costs(_avg(directional_alphas)),
         "alpha_basis": costs.GROSS_LABEL,
         "alpha_cost_basis": costs.NET_ASSUMPTION_LABEL,
         "model_count": len({entry.get("target_id") for entry in entries if entry.get("target_kind") == "model"}),
         "instrument_count": len({entry.get("target_id") for entry in entries if entry.get("target_kind") == "instrument"}),
         "research_ready_count": len(real),
-        "demo_count": len(demo),
-        "demo_measured_count": len(demo_measured),
-        "demo_pending_count": len(demo) - len(demo_measured),
-        "measurement_basis": "Hit rate and alpha aggregate only signals recorded with real-eligible (live/uploaded) data.",
+        "ineligible_count": len(ineligible),
+        "ineligible_measured_count": len(ineligible_measured),
+        "ineligible_pending_count": len(ineligible) - len(ineligible_measured),
+        "measurement_basis": "Hit rate uses only BUY/SELL calls with benchmark alpha; HOLD preservation is reported separately.",
     }
 
 
 def benchmark_comparison(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     groups: dict[str, list[dict[str, Any]]] = {}
-    demo_measured: dict[str, int] = {}
+    ineligible_measured: dict[str, int] = {}
     for entry in entries:
         benchmark = str(entry.get("benchmark") or "").strip()
         if not benchmark or entry.get("forward_status") != "measured":
@@ -254,24 +340,28 @@ def benchmark_comparison(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if _real_eligible(entry):
             groups.setdefault(benchmark, []).append(entry)
         else:
-            # Demo-time measurements (legacy rows) never feed benchmark stats.
-            demo_measured[benchmark] = demo_measured.get(benchmark, 0) + 1
+            # Ineligible legacy measurements never feed benchmark statistics.
+            ineligible_measured[benchmark] = ineligible_measured.get(benchmark, 0) + 1
     rows = []
     for benchmark, rows_for_benchmark in groups.items():
         hit_flags = [_paper_hit(entry) for entry in rows_for_benchmark]
         hit_flags = [flag for flag in hit_flags if flag is not None]
+        directional_alphas = [
+            costs.directional_alpha(entry.get("action_label"), entry.get("alpha_pct"))
+            for entry in rows_for_benchmark
+        ]
         rows.append({
             "benchmark": benchmark,
-            "measured_count": len(rows_for_benchmark),
+            "outcome_count": len(rows_for_benchmark),
+            "measured_count": len(hit_flags),
             "avg_forward_result_pct": _avg(entry.get("forward_result_pct") for entry in rows_for_benchmark),
             "avg_benchmark_result_pct": _avg(entry.get("benchmark_result_pct") for entry in rows_for_benchmark),
-            "avg_alpha_pct": _avg(entry.get("alpha_pct") for entry in rows_for_benchmark),
-            "avg_alpha_after_default_costs_pct": costs.net_of_default_costs(
-                _avg(entry.get("alpha_pct") for entry in rows_for_benchmark)),
+            "avg_alpha_pct": _avg(directional_alphas),
+            "avg_alpha_after_default_costs_pct": costs.net_of_default_costs(_avg(directional_alphas)),
             "hit_rate_pct": _pct(sum(1 for flag in hit_flags if flag), len(hit_flags)),
-            "demo_measured_count": demo_measured.pop(benchmark, 0),
+            "ineligible_measured_count": ineligible_measured.pop(benchmark, 0),
         })
-    for benchmark, count in demo_measured.items():
+    for benchmark, count in ineligible_measured.items():
         rows.append({
             "benchmark": benchmark,
             "measured_count": 0,
@@ -280,7 +370,7 @@ def benchmark_comparison(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "avg_alpha_pct": None,
             "avg_alpha_after_default_costs_pct": None,
             "hit_rate_pct": None,
-            "demo_measured_count": count,
+            "ineligible_measured_count": count,
         })
     return sorted(rows, key=lambda row: (row["measured_count"], row["benchmark"]), reverse=True)
 
@@ -294,22 +384,29 @@ def model_evidence(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for target_id, model_entries in groups.items():
         ordered = sorted(model_entries, key=lambda entry: str(entry.get("created_at") or ""), reverse=True)
         real_entries = [entry for entry in model_entries if _real_eligible(entry)]
-        measured = [entry for entry in real_entries if entry.get("forward_status") == "measured"]
-        hit_flags = [_paper_hit(entry) for entry in measured]
+        outcomes = [entry for entry in real_entries if entry.get("forward_status") == "measured"]
+        directional_alphas = [
+            costs.directional_alpha(entry.get("action_label"), entry.get("alpha_pct"))
+            for entry in outcomes
+        ]
+        hit_flags = [_paper_hit(entry) for entry in outcomes]
         hit_flags = [flag for flag in hit_flags if flag is not None]
+        hold_flags = [_hold_preserved(entry) for entry in outcomes]
+        hold_flags = [flag for flag in hold_flags if flag is not None]
         latest = ordered[0] if ordered else {}
         source_counts = _merge_source_counts(model_entries)
         rows.append({
             "target_id": target_id,
             "target_name": latest.get("target_name") or target_id,
             "signal_count": len(model_entries),
-            "measured_count": len(measured),
-            "pending_count": len(real_entries) - len(measured),
+            "outcome_count": len(outcomes),
+            "measured_count": len(hit_flags),
+            "pending_count": len(real_entries) - len(outcomes),
             "hit_rate_pct": _pct(sum(1 for flag in hit_flags if flag), len(hit_flags)),
+            "hold_preservation_rate_pct": _pct(sum(1 for flag in hold_flags if flag), len(hold_flags)),
             "avg_score": _avg(entry.get("score") for entry in model_entries),
-            "avg_alpha_pct": _avg(entry.get("alpha_pct") for entry in measured),
-            "avg_alpha_after_default_costs_pct": costs.net_of_default_costs(
-                _avg(entry.get("alpha_pct") for entry in measured)),
+            "avg_alpha_pct": _avg(directional_alphas),
+            "avg_alpha_after_default_costs_pct": costs.net_of_default_costs(_avg(directional_alphas)),
             "latest_action_label": latest.get("action_label") or "",
             "latest_score": latest.get("score"),
             "latest_input_end_date": latest.get("input_end_date") or "",
@@ -317,7 +414,7 @@ def model_evidence(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "data_modes": sorted({str(entry.get("data_mode") or "unknown") for entry in model_entries}),
             "source_counts": source_counts,
             "research_ready_count": len(real_entries),
-            "demo_count": len(model_entries) - len(real_entries),
+            "ineligible_count": len(model_entries) - len(real_entries),
         })
     return sorted(rows, key=lambda row: (row["pending_count"], row["signal_count"], row["target_name"]), reverse=True)
 
@@ -327,16 +424,27 @@ def drift_series(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out = []
     measured_count = 0
     hit_count = 0
+    hold_measured_count = 0
+    hold_preserved_count = 0
     alpha_values: list[float] = []
     for index, entry in enumerate(ordered, start=1):
         hit = _paper_hit(entry)
+        hold = _hold_preserved(entry)
         # Cumulative headline evidence only accrues from real-eligible signals.
-        if entry.get("forward_status") == "measured" and _real_eligible(entry):
+        if hit is not None and _real_eligible(entry):
             measured_count += 1
             if hit:
                 hit_count += 1
-            if _finite(entry.get("alpha_pct")) is not None:
-                alpha_values.append(float(entry["alpha_pct"]))
+        if hold is not None and _real_eligible(entry):
+            hold_measured_count += 1
+            if hold:
+                hold_preserved_count += 1
+        if entry.get("forward_status") == "measured" and _real_eligible(entry):
+            directional_alpha = costs.directional_alpha(
+                entry.get("action_label"), entry.get("alpha_pct"),
+            )
+            if directional_alpha is not None:
+                alpha_values.append(float(directional_alpha))
         out.append({
             "index": index,
             "created_at": entry.get("created_at"),
@@ -353,8 +461,11 @@ def drift_series(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "benchmark_result_pct": entry.get("benchmark_result_pct"),
             "alpha_pct": entry.get("alpha_pct"),
             "paper_hit": hit,
+            "hold_preserved": hold,
             "cumulative_measured_count": measured_count,
             "cumulative_hit_rate_pct": _pct(hit_count, measured_count),
+            "cumulative_hold_measured_count": hold_measured_count,
+            "cumulative_hold_preservation_rate_pct": _pct(hold_preserved_count, hold_measured_count),
             "cumulative_avg_alpha_pct": _avg(alpha_values),
             "cumulative_avg_alpha_net_pct": costs.net_of_default_costs(_avg(alpha_values)),
         })
@@ -371,10 +482,19 @@ def refresh_forward_results(limit: int = 250) -> None:
         if not _real_eligible(entry):
             # Demo-time signals must never be scored against later live prices.
             if entry["forward_status"] != NOT_MEASURABLE_STATUS:
-                store.update_signal_forward_result(entry["dedupe_key"], _not_measurable_result())
+                result = _not_measurable_result()
+                with store.transaction(durable=True):
+                    captured = _capture_forward_result(
+                        entry, pd.Series(dtype=float), result, pd.Series(dtype=float),
+                    )
+                    if not captured.get("recorded"):
+                        raise RuntimeError(captured.get("warning") or "Signal result evidence could not be persisted.")
+                    if not store.update_signal_forward_result(entry["dedupe_key"], result):
+                        raise RuntimeError(store.warning or "Signal result could not be advanced.")
             continue
         close = _series_for_entry(entry)
         result = _forward_result(close, entry["input_end_date"], entry["horizon_days"])
+        benchmark_close = _benchmark_close(entry["benchmark"])
         benchmark_result = _benchmark_result(entry["benchmark"], entry["input_end_date"],
                                              entry["horizon_days"],
                                              target_end_date=result.get("forward_end_date"))
@@ -383,7 +503,46 @@ def refresh_forward_results(limit: int = 250) -> None:
         if result.get("forward_result_pct") is not None and result.get("benchmark_result_pct") is not None:
             result["alpha_pct"] = round(result["forward_result_pct"] - result["benchmark_result_pct"], 4)
         if result["forward_status"] == "measured":
-            store.update_signal_forward_result(entry["dedupe_key"], result)
+            with store.transaction(durable=True):
+                captured = _capture_forward_result(entry, close, result, benchmark_close)
+                if not captured.get("recorded"):
+                    raise RuntimeError(captured.get("warning") or "Signal result evidence could not be persisted.")
+                if not store.update_signal_forward_result(entry["dedupe_key"], result):
+                    raise RuntimeError(store.warning or "Signal result could not be advanced.")
+
+
+def _capture_forward_result(
+    entry: dict[str, Any],
+    close: pd.Series,
+    result: dict[str, Any],
+    benchmark_close: pd.Series,
+) -> dict[str, Any]:
+    """Seal each forward-status transition before mutating the journal row."""
+    original_ref = ((entry.get("metadata") or {}).get("evidence") or {})
+    evidence_id = evidence.new_id("signal-result")
+    return evidence.capture(
+        evidence_id=evidence_id,
+        artifact_kind="signal_forward_result",
+        target_kind=str(entry.get("target_kind") or ""),
+        target_id=str(entry.get("target_id") or ""),
+        input_payload={
+            "signal_evidence": original_ref,
+            "dedupe_key": entry.get("dedupe_key"),
+            "input_end_date": entry.get("input_end_date"),
+            "horizon_days": entry.get("horizon_days"),
+            "prior_forward_status": entry.get("forward_status"),
+            "available_series": evidence.series_payload(close),
+            "benchmark": entry.get("benchmark"),
+            "benchmark_series": evidence.series_payload(benchmark_close),
+        },
+        output_payload=result,
+        evidence_manifest=evidence.manifest(
+            series=close if not close.empty else None,
+            source=_primary_source(entry.get("source_counts") or {}),
+            transformations=("forward_return", "benchmark_alpha"),
+            extra={"parent_evidence_id": original_ref.get("evidence_id", "")},
+        ),
+    )
 
 
 def _real_eligible(entry: dict[str, Any]) -> bool:
@@ -427,18 +586,13 @@ def _series_for_entry(entry: dict[str, Any]) -> pd.Series:
 
 def _benchmark_result(benchmark: str, input_end_date: str, horizon_days: int,
                       target_end_date: str | None = None) -> dict[str, Any]:
+    close = _benchmark_close(benchmark)
+    if close.empty:
+        return {"benchmark_note": (
+            f"Benchmark {benchmark} has no eligible live/uploaded price history; "
+            "benchmark result and alpha are withheld."
+        )}
     try:
-        inst = data.get(benchmark)
-        if inst is None:
-            return {}
-        if not provenance.is_real_source(inst.source):
-            # Mirror evidence_lab._benchmark_close: a synthetic sample benchmark
-            # must not supply alpha for real signals.
-            return {"benchmark_note": (
-                f"Benchmark {benchmark} has no live/uploaded price history; "
-                "benchmark result and alpha are withheld."
-            )}
-        close = _clean_close(inst.df["close"])
         if target_end_date:
             # Align to the TARGET's realized calendar window: counting
             # `horizon` benchmark bars compared mismatched periods whenever
@@ -457,6 +611,16 @@ def _benchmark_result(benchmark: str, input_end_date: str, horizon_days: int,
         return {"benchmark_result_pct": result["forward_result_pct"]}
     except Exception:
         return {}
+
+
+def _benchmark_close(benchmark: str) -> pd.Series:
+    try:
+        inst = data.get(benchmark)
+        if inst is None or not provenance.is_real_source(inst.source):
+            return pd.Series(dtype=float)
+        return _clean_close(inst.df["close"])
+    except Exception:
+        return pd.Series(dtype=float)
 
 
 def _forward_result(close: pd.Series, input_end_date: str, horizon_days: int) -> dict[str, Any]:

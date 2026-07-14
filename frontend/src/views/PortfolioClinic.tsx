@@ -71,9 +71,9 @@ export function PortfolioClinic({
       {payload && (
         <>
           {!payload.eligible_for_real_research && (
-            <div className="strategy-demo-warning" role="status">
+            <div className="strategy-blocked-warning" role="status">
               <strong>Clinic result is hypothetical — not an order.</strong>
-              <span>{payload.required_action || payload.reason || "Resolve simulated, sample, or missing holding histories before treating diagnostics as real evidence."}</span>
+              <span>{payload.required_action || payload.reason || "Resolve ineligible or missing holding histories before treating diagnostics as real evidence."}</span>
             </div>
           )}
           {(payload.warnings || []).length > 0 && (
@@ -127,17 +127,19 @@ export function PortfolioClinic({
           </section>
           {payload.suggestions.length > 0 && (
             <Panel title="Suggested Changes Table" meta="hypothetical/not an order">
-              <div className="suggestion-table" tabIndex={0} aria-label="Scrollable hypothetical suggestion table">
-                <div><span>Type</span><span>Ticker</span><span>Current</span><span>Suggested</span><span>Rationale</span></div>
-                {payload.suggestions.map((suggestion) => (
-                  <div key={`${suggestion.type}-${suggestion.ticker || "model"}-${suggestion.suggested_weight}`}>
-                    <strong>{titleCase(suggestion.type)}</strong>
-                    <span>{suggestion.ticker || "Model"}</span>
-                    <span>{fmtPct(suggestion.current_weight * 100)}</span>
-                    <span>{fmtPct(suggestion.suggested_weight * 100)}</span>
-                    <span>{suggestion.rationale}</span>
-                  </div>
-                ))}
+              <div className="suggestion-table terminal-data-table-shell" tabIndex={0} aria-label="Scrollable hypothetical suggestion table">
+                <table className="terminal-data-table suggestion-data-table">
+                  <thead><tr><th scope="col">Type</th><th scope="col">Ticker</th><th scope="col">Current</th><th scope="col">Suggested</th><th scope="col">Rationale</th></tr></thead>
+                  <tbody>{payload.suggestions.map((suggestion) => (
+                    <tr key={`${suggestion.type}-${suggestion.ticker || "model"}-${suggestion.suggested_weight}`}>
+                      <th scope="row">{titleCase(suggestion.type)}</th>
+                      <td>{suggestion.ticker || "Model"}</td>
+                      <td>{fmtPct(suggestion.current_weight * 100)}</td>
+                      <td>{fmtPct(suggestion.suggested_weight * 100)}</td>
+                      <td>{suggestion.rationale}</td>
+                    </tr>
+                  ))}</tbody>
+                </table>
               </div>
             </Panel>
           )}
@@ -172,20 +174,24 @@ function LockedClinicState() {
         </div>
       </Panel>
       <Panel title="Required Evidence" meta="real-data gate">
-        <div className="radar-preview-table gate-checklist-table clinic-gate-table">
-          <div><span>Area</span><span>Status</span><span>Required evidence</span><span>Next step</span></div>
-          <div className="locked-table-row">
-            <strong>Holdings coverage<small>Every analyzed holding needs eligible price history.</small></strong>
-            <span>Pending</span>
-            <span>Imported model plus live/uploaded histories</span>
-            <em>Upload a model, then fetch or upload missing histories.</em>
-          </div>
-          <div className="locked-table-row">
-            <strong>Clinic suggestions<small>Suggestions remain disabled until the model exists.</small></strong>
-            <span>Blocked</span>
-            <span>Mandate-aware model diagnostics</span>
-            <em>Run diagnostics after model coverage is available.</em>
-          </div>
+        <div className="radar-preview-table clinic-gate-table terminal-data-table-shell" tabIndex={0} aria-label="Portfolio Clinic required evidence">
+          <table className="terminal-data-table gate-checklist-data-table">
+            <thead><tr><th scope="col">Area</th><th scope="col">Status</th><th scope="col">Required evidence</th><th scope="col">Next step</th></tr></thead>
+            <tbody>
+              <tr>
+                <th scope="row"><strong>Holdings coverage</strong><small>Every analyzed holding needs eligible price history.</small></th>
+                <td><span className="gate-status">Pending</span></td>
+                <td>Imported model plus live/uploaded histories</td>
+                <td>Upload a model, then fetch or upload missing histories.</td>
+              </tr>
+              <tr>
+                <th scope="row"><strong>Clinic suggestions</strong><small>Suggestions remain disabled until the model exists.</small></th>
+                <td><span className="gate-status">Blocked</span></td>
+                <td>Mandate-aware model diagnostics</td>
+                <td>Run diagnostics after model coverage is available.</td>
+              </tr>
+            </tbody>
+          </table>
         </div>
       </Panel>
     </section>

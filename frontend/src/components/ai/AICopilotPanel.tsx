@@ -60,7 +60,6 @@ export function AICopilotPanel({
   }, [dataMode, payload]);
 
   const modeWarning = useMemo(() => {
-    if (computedDataMode === "demo") return "Demo data only — not real market evidence.";
     if (computedDataMode === "blocked" || computedDataMode === "invalid_for_research") {
       return "Data quality blocked — upload/fetch real data before generating research narrative.";
     }

@@ -8,14 +8,13 @@ import pandas as pd
 from flask import Blueprint, request
 
 from engine import (
-    backtest, cma, costs, data, evidence_lab, forecast, fundamentals, holdings, indicators,
-    macro, macro_events, news, opportunity, portfolio, provenance, regime, sec_events,
-    sentiment, signal_journal, signals, strategy,
+    backtest, cma, costs, data, data_quality, evidence_lab, forecast,
+    fundamentals, holdings, indicators, macro, macro_events, opportunity,
+    persistence, portfolio, provenance, provider_registry, regime, sec_events,
+    sentiment, signal_journal, signals, strategy, trials,
 )
 
-from .core import (
-    ANALYSIS_ONLY_DISCLAIMER, _LIVE_SEMAPHORE, _safe_float_arg, _safe_int_arg, app, err, ok,
-)
+from .core import ANALYSIS_ONLY_DISCLAIMER, _LIVE_SEMAPHORE, _safe_float_arg, _safe_int_arg, app, err, ok
 
 bp = Blueprint("analysis", __name__)
 
@@ -44,6 +43,8 @@ def _quick_instrument_screen(inst: data.Instrument, market: dict | None = None) 
         "symbol": scored["symbol"],
         "name": scored["name"],
         "source": scored["source"],
+        "data_mode": scored.get("data_mode"),
+        "eligible_for_real_research": bool(scored.get("eligible_for_real_research")),
         "action": scored["action"],
         "score": scored["opportunity_score"],
         "risk_score": scored["risk_score"],
@@ -64,7 +65,10 @@ def _command_center_payload() -> dict:
     prov = provenance.universe(instruments)
     market = regime.market_regime(instruments)
     real_instruments = [inst for inst in instruments if provenance.is_real_source(inst.source)]
-    cards = [c for inst in real_instruments if (c := _quick_instrument_screen(inst, market))]
+    cards = [
+        c for inst in real_instruments
+        if (c := _quick_instrument_screen(inst, market)) and c["eligible_for_real_research"]
+    ]
     ranked = sorted(cards, key=lambda c: c["score"], reverse=True)
     risks = sorted(cards, key=lambda c: (c["risk_score"], abs(c["max_drawdown_pct"])), reverse=True)
 
@@ -129,8 +133,8 @@ def _command_center_payload() -> dict:
     if not ranked and not risks:
         research_queue.append({
             "priority": "high",
-            "title": "Demo mode: real research is locked",
-            "detail": provenance.DEMO_ACTION,
+            "title": "Real research is locked",
+            "detail": provenance.RESEARCH_DATA_ACTION,
         })
     if not model_alerts:
         research_queue.append({
@@ -140,6 +144,8 @@ def _command_center_payload() -> dict:
         })
     for warning in market.get("warnings", []):
         research_queue.append({"priority": "medium", "title": "Verify regime proxy", "detail": warning})
+
+    workflow = _command_workflow(prov, real_instruments)
 
     return {
         "data_mode": prov["data_mode"],
@@ -156,9 +162,161 @@ def _command_center_payload() -> dict:
         "top_risks": risks[:5],
         "model_alerts": model_alerts[:5],
         "research_queue": research_queue[:6],
+        "readiness": workflow["readiness"],
+        "blockers": workflow["blockers"],
+        "recent_changes": workflow["recent_changes"],
+        "next_action": workflow["next_action"],
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
     }
+
+
+def _command_workflow(prov: dict, real_instruments: list[data.Instrument]) -> dict:
+    quality = data_quality.dashboard_payload(sync_alerts=False)
+    store = persistence.get_store()
+    model_rows = quality.get("models") if isinstance(quality.get("models"), list) else []
+    provider = provider_registry.domain_readiness("prices") if any(inst.source == "live" for inst in real_instruments) else {
+        "passed": True,
+        "state": "not_applicable",
+        "detail": "No live-provider histories are in the current research universe.",
+        "required_action": "",
+    }
+    persistence_ready = bool(store.available and store.encryption.get("enabled"))
+    checks = [
+        {
+            "key": "real_data",
+            "label": "Eligible histories",
+            "passed": bool(real_instruments),
+            "detail": f"{len(real_instruments)} eligible live/uploaded histories loaded.",
+            "view": "instruments",
+        },
+        {
+            "key": "data_quality",
+            "label": "Data quality",
+            "passed": bool(quality.get("research_ready")),
+            "detail": f"{quality.get('summary', {}).get('blocker_count', 0)} blockers and {quality.get('summary', {}).get('warning_count', 0)} warnings.",
+            "view": "data-quality",
+        },
+        {
+            "key": "model_coverage",
+            "label": "Model coverage",
+            "passed": bool(model_rows) and all(row.get("coverage_state") == "real" for row in model_rows),
+            "detail": (
+                f"{sum(1 for row in model_rows if row.get('coverage_state') == 'real')} of {len(model_rows)} models fully covered."
+                if model_rows else "No model is available for portfolio research."
+            ),
+            "view": "models",
+        },
+        {
+            "key": "provider_control",
+            "label": "Provider controls",
+            "passed": bool(provider.get("passed")),
+            "detail": str(provider.get("detail") or "Provider controls unavailable."),
+            "view": "data-quality",
+        },
+        {
+            "key": "local_persistence",
+            "label": "Encrypted persistence",
+            "passed": persistence_ready,
+            "detail": (
+                "Local encrypted persistence is available."
+                if persistence_ready else "Encrypted local persistence is unavailable or disabled."
+            ),
+            "view": "data-quality",
+        },
+    ]
+    issues = quality.get("issues") if isinstance(quality.get("issues"), list) else []
+    blockers = [
+        {
+            "id": f"{issue.get('category', 'quality')}:{issue.get('target', 'workspace')}",
+            "severity": issue.get("severity") or "warning",
+            "title": str(issue.get("category") or "Data quality").replace("_", " ").title(),
+            "detail": issue.get("detail") or "",
+            "required_action": issue.get("next_step") or "",
+            "view": "data-quality",
+        }
+        for issue in issues[:8]
+    ]
+    for check in checks:
+        if check["passed"] or check["key"] in {"data_quality"}:
+            continue
+        blockers.append({
+            "id": check["key"],
+            "severity": "blocker",
+            "title": check["label"],
+            "detail": check["detail"],
+            "required_action": provider.get("required_action", "") if check["key"] == "provider_control" else "Open the indicated workspace and resolve this control.",
+            "view": check["view"],
+        })
+    recent_changes = _recent_changes(store)
+    if not real_instruments:
+        state = "no_data"
+    elif prov.get("data_mode") == "mixed":
+        state = "mixed"
+    elif any(row.get("is_stale") for row in quality.get("symbols") or []):
+        state = "stale"
+    elif blockers:
+        state = "blocked"
+    elif all(check["passed"] for check in checks):
+        state = "ready"
+    else:
+        state = "invalid"
+    first = blockers[0] if blockers else None
+    next_action = (
+        {
+            "label": f"Resolve {first['title']}",
+            "detail": first["required_action"] or first["detail"],
+            "view": first["view"],
+        }
+        if first else {
+            "label": "Review ranked research evidence",
+            "detail": "Open Opportunity Radar, then validate candidates in Evidence Lab before any decision.",
+            "view": "opportunities",
+        }
+    )
+    return {
+        "readiness": {
+            "state": state,
+            "ready": state == "ready",
+            "checks": checks,
+            "summary": f"{sum(1 for check in checks if check['passed'])} of {len(checks)} readiness checks pass.",
+        },
+        "blockers": blockers[:8],
+        "recent_changes": recent_changes[:8],
+        "next_action": next_action,
+    }
+
+
+def _recent_changes(store: persistence.SQLiteStore) -> list[dict]:
+    rows = []
+    for refresh in store.refresh_log(limit=8):
+        rows.append({
+            "id": f"refresh:{refresh['symbol']}:{refresh['attempted_at']}",
+            "kind": "data_refresh",
+            "title": f"{refresh['symbol']} refresh {refresh['status']}",
+            "detail": refresh.get("message") or "",
+            "created_at": refresh["attempted_at"],
+            "view": "data-quality",
+        })
+    for event in store.model_governance_events(limit=6):
+        rows.append({
+            "id": f"governance:{event['id']}",
+            "kind": "model_governance",
+            "title": f"{event['model_id']} · {event['action']}",
+            "detail": event.get("note") or event.get("approval_status") or "Governance event recorded.",
+            "created_at": event["created_at"],
+            "view": "models",
+        })
+    for report in store.report_snapshots(limit=4):
+        rows.append({
+            "id": f"report:{report['id']}",
+            "kind": "report_snapshot",
+            "title": report.get("title") or "Report snapshot saved",
+            "detail": f"{report.get('target_kind')} · {report.get('target_name')}",
+            "created_at": report["created_at"],
+            "view": "reports",
+        })
+    return sorted(rows, key=lambda row: str(row.get("created_at") or ""), reverse=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -203,7 +361,11 @@ def _series_payload(close, lookback: int = 400, *, markers: bool = False):
 
 def _record_instrument_signal(inst: data.Instrument, close: pd.Series, sig: dict, horizon_days: int) -> dict | None:
     try:
-        p = provenance.instrument(inst.source, len(close.dropna()))
+        p = provenance.instrument(
+            inst.source,
+            len(close.dropna()),
+            price_provider=getattr(inst, "price_provider", ""),
+        )
         return signal_journal.record_signal(
             target_kind="instrument",
             target_id=inst.symbol,
@@ -216,19 +378,34 @@ def _record_instrument_signal(inst: data.Instrument, close: pd.Series, sig: dict
             source_counts={inst.source: 1},
             eligible_for_real_research=p["eligible_for_real_research"],
             data_mode=p["data_mode"],
-            metadata=_signal_evidence_metadata(sig, endpoint="/api/analyze"),
+            metadata=_signal_evidence_metadata(
+                sig,
+                endpoint="/api/analyze",
+                provider=getattr(inst, "price_provider", ""),
+                retrieved_at=getattr(inst, "retrieved_at", ""),
+            ),
         )
     except Exception:
         return None
 
 
-def _signal_evidence_metadata(sig: dict, endpoint: str) -> dict:
+def _signal_evidence_metadata(
+    sig: dict,
+    endpoint: str,
+    *,
+    provider: str = "",
+    retrieved_at: str = "",
+) -> dict:
     """Persist the NEW rating tracks alongside each journal entry so the
     Evidence Lab can score them out-of-sample as forward results measure in —
     the honest, prospective validation of the strategic/macro layers (no
     point-in-time fundamentals exist for a retrospective backtest; pretending
     otherwise would be look-ahead bias)."""
-    meta: dict = {"endpoint": endpoint}
+    meta: dict = {
+        "endpoint": endpoint,
+        "provider": provider,
+        "retrieved_at": retrieved_at,
+    }
     # FULL component breakdown, weights, and dampers: the persisted record
     # was a subset while the UI claimed "exact composite" (review finding).
     # The prose clause is dropped to keep metadata_json compact — everything
@@ -266,6 +443,7 @@ def _signal_evidence_metadata(sig: dict, endpoint: str) -> dict:
 def _record_model_signal(mdl: portfolio.Model, ps: portfolio.PortfolioSeries, close: pd.Series, sig: dict, horizon_days: int) -> dict | None:
     try:
         p = provenance.portfolio(ps.provenance)
+        provider_meta = _model_provider_evidence(mdl)
         return signal_journal.record_signal(
             target_kind="model",
             target_id=mdl.id,
@@ -278,11 +456,31 @@ def _record_model_signal(mdl: portfolio.Model, ps: portfolio.PortfolioSeries, cl
             source_counts={str(k): int(v) for k, v in ps.sources.items()},
             eligible_for_real_research=p["eligible_for_real_research"],
             data_mode=p["data_mode"],
-            metadata={**_signal_evidence_metadata(sig, endpoint="/api/model/analyze"),
+            metadata={**_signal_evidence_metadata(
+                          sig,
+                          endpoint="/api/model/analyze",
+                          **provider_meta,
+                      ),
                       "mandate": mdl.mandate_key},
         )
     except Exception:
         return None
+
+
+def _model_provider_evidence(mdl: portfolio.Model) -> dict[str, str]:
+    instruments = [data.get(holding.ticker) for holding in mdl.holdings]
+    providers = sorted({
+        str(getattr(inst, "price_provider", "") or "")
+        for inst in instruments if inst is not None and getattr(inst, "price_provider", "")
+    })
+    retrieved = sorted({
+        str(getattr(inst, "retrieved_at", "") or "")
+        for inst in instruments if inst is not None and getattr(inst, "retrieved_at", "")
+    })
+    return {
+        "provider": ",".join(providers),
+        "retrieved_at": retrieved[-1] if retrieved else "",
+    }
 
 
 def auto_record_daily_signals(max_targets: int = 200) -> dict:
@@ -315,7 +513,8 @@ def auto_record_daily_signals(max_targets: int = 200) -> dict:
         if len(close) < 60:
             continue
         try:
-            fc = forecast.forecast(close, horizon=21)
+            horizon = trials.scheduled_horizon("instrument", inst.symbol, 21)
+            fc = forecast.forecast(close, horizon=horizon)
             sent = sentiment.score_headlines(list(inst.headlines or []))
             fnd = fundamentals.fetch_cached(inst.symbol) or fundamentals.Fundamentals(
                 ticker=inst.symbol, source="none")
@@ -323,14 +522,21 @@ def auto_record_daily_signals(max_targets: int = 200) -> dict:
             ctx = macro_events.build_macro_context(fwd.get("sector") or "", macro_snap)
             sig = signals.evaluate(close, fc, sent, history_days=len(close),
                                    fundamental_result=fwd, macro_context=ctx)
-            p = provenance.instrument(inst.source, len(close))
+            p = provenance.instrument(
+                inst.source, len(close), price_provider=getattr(inst, "price_provider", ""),
+            )
             signal_journal.record_signal(
                 target_kind="instrument", target_id=inst.symbol, target_name=inst.name,
-                close=close, input_close=close, signal=sig, horizon_days=21,
+                close=close, input_close=close, signal=sig, horizon_days=horizon,
                 benchmark="SPY", source_counts={inst.source: 1},
                 eligible_for_real_research=p["eligible_for_real_research"],
                 data_mode=p["data_mode"],
-                metadata=_signal_evidence_metadata(sig, endpoint="auto_snapshot"),
+                metadata=_signal_evidence_metadata(
+                    sig,
+                    endpoint="auto_snapshot",
+                    provider=getattr(inst, "price_provider", ""),
+                    retrieved_at=getattr(inst, "retrieved_at", ""),
+                ),
             )
             recorded += 1
         except Exception:
@@ -352,7 +558,8 @@ def auto_record_daily_signals(max_targets: int = 200) -> dict:
                 if held and held.headlines:
                     headlines.extend(held.headlines[:2])
             sent = sentiment.score_headlines(headlines)
-            fc = forecast.forecast(close, horizon=21)
+            horizon = trials.scheduled_horizon("model", mdl.id, 21)
+            fc = forecast.forecast(close, horizon=horizon)
             pmeta = {"n_holdings": len(mdl.holdings),
                      "top_weight": mdl.holdings[0].weight if mdl.holdings else 0,
                      "top_ticker": mdl.holdings[0].ticker if mdl.holdings else "?"}
@@ -363,12 +570,16 @@ def auto_record_daily_signals(max_targets: int = 200) -> dict:
             p = provenance.portfolio(ps.provenance)
             signal_journal.record_signal(
                 target_kind="model", target_id=mdl.id, target_name=mdl.name,
-                close=close, input_close=close, signal=sig, horizon_days=21,
+                close=close, input_close=close, signal=sig, horizon_days=horizon,
                 benchmark=signal_journal.benchmark_for_model(mdl),
                 source_counts={str(k): int(v) for k, v in ps.sources.items()},
                 eligible_for_real_research=p["eligible_for_real_research"],
                 data_mode=p["data_mode"],
-                metadata={**_signal_evidence_metadata(sig, endpoint="auto_snapshot"),
+                metadata={**_signal_evidence_metadata(
+                              sig,
+                              endpoint="auto_snapshot",
+                              **_model_provider_evidence(mdl),
+                          ),
                           "mandate": mdl.mandate_key},
             )
             recorded += 1
@@ -416,11 +627,14 @@ def macro_refresh():
 
 
 def _macro_payload(force: bool):
-    snap = macro_events.macro_snapshot(force=force)
+    snap = macro_events.macro_snapshot(force=True) if force else (
+        macro_events.snapshot_cached()
+        or {"available": False, "reason": "No cached macro snapshot is available. Run an explicit macro refresh."}
+    )
     return ok({
         **snap,
         "history": macro_events.history_and_changes(),
-        "rates": macro.rate_context(),
+        "rates": macro.rate_context(cached_only=not force),
         "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
     })
 
@@ -441,70 +655,97 @@ def analyze():
     if len(close) < 60:
         return err("Need at least 60 rows of history to analyze.", 400)
 
+    p = provenance.instrument(
+        inst.source,
+        len(close),
+        price_provider=getattr(inst, "price_provider", ""),
+    )
+    if not p["eligible_for_real_research"]:
+        return err(
+            f"Research blocked: {p['reason']} {p['required_action']}".strip(),
+            409,
+        )
+
     fc = forecast.forecast(close, horizon=horizon)
-    # Outbound-network phase, bounded by the same semaphore as /api/live: only
-    # a couple of analyze requests may fan out to GDELT/FMP/Intrinio/EDGAR/Fed
-    # feeds at once; the rest degrade to cached-only reads instead of pinning
-    # worker threads behind stacks of 10-12s provider timeouts (review
-    # finding: analyze was the most network-heavy route and the only unbounded
-    # one). Every degraded block still reports its own availability honestly.
-    live_slot = _LIVE_SEMAPHORE.acquire(blocking=False)
-    try:
-        # Headlines: yfinance per-ticker plus the free GDELT news wire (deduped;
-        # GDELT is TTL-cached and returns [] offline, so this never blocks honesty).
-        merged_headlines = list(inst.headlines or [])
-        seen_titles = {h.lower() for h in merged_headlines}
-        if live_slot:
-            for title in news.headlines_for(inst.symbol, inst.name):
-                if title.lower() not in seen_titles:
-                    seen_titles.add(title.lower())
-                    merged_headlines.append(title)
-        sent = sentiment.score_headlines(merged_headlines)
-        # Fundamentals (6h-cached) drive the strategic track; offline -> usable=False
-        # and the signal honestly reports a technicals-only rating.
-        if live_slot:
-            fnd = fundamentals.fetch(inst.symbol)
-        else:
-            fnd = fundamentals.fetch_cached(inst.symbol) or fundamentals.Fundamentals(
-                ticker=inst.symbol, source="none")
-        fwd = cma.instrument_forward(inst.symbol, fnd)
-        # Macro layer: Fed stance, White House policy pressure on this sector, and
-        # geopolitical event risk feed the rating as transparent conviction dampers
-        # and caveats (30-min cached; unavailable sources are never assumed calm).
-        macro_snap = macro_events.macro_snapshot() if live_slot else macro_events.snapshot_cached()
-        macro_ctx = macro_events.build_macro_context(fwd.get("sector") or "", macro_snap)
-        sec = (sec_events.events_for(inst.symbol) if live_slot
-               else sec_events.events_cached(inst.symbol)
-               or {"available": False, "reason": "Live provider slots busy; no cached SEC events yet."})
-    finally:
-        if live_slot:
-            _LIVE_SEMAPHORE.release()
+    sent = sentiment.score_headlines(list(inst.headlines or []))
+    fnd = fundamentals.fetch_cached(inst.symbol) or fundamentals.Fundamentals(
+        ticker=inst.symbol, source="none")
+    fwd = cma.instrument_forward(inst.symbol, fnd)
+    macro_snap = macro_events.snapshot_cached()
+    macro_ctx = macro_events.build_macro_context(fwd.get("sector") or "", macro_snap)
+    sec = sec_events.events_cached(inst.symbol) or {
+        "available": False,
+        "reason": "No cached SEC event evidence is available; refresh real-data context explicitly.",
+    }
     sig = signals.evaluate(close, fc, sent, history_days=len(close),
                            fundamental_result=fwd, macro_context=macro_ctx)
     bt = backtest.run(close)
     metrics = indicators.metrics_summary(close)
-    journal_entry = _record_instrument_signal(inst, close, sig, horizon)
-
     return ok({
         "symbol": inst.symbol,
         "name": inst.name,
         "source": inst.source,
         # Same server-side provenance verdict shape /api/live returns.
-        "data_provenance": provenance.instrument(inst.source, len(close)),
+        "data_provenance": p,
         "metrics": metrics,
         "series": _series_payload(close, markers=True),
         "forecast": fc,
         "sentiment": sent,
         "fundamentals": fwd,
-        "rates": macro.rate_context(),
+        "rates": macro.rate_context(cached_only=True),
         # Regulatory event context (8-K material events + Form 4 insider trades).
         # Cached 1h; offline -> {"available": False} rather than fabricated calm.
         "sec_events": sec,
         "macro": macro_events.compact_summary(macro_snap),
         "signal": sig,
-        "signal_journal_entry": journal_entry,
+        "signal_journal_entry": None,
         "backtest": bt,
     })
+
+
+@bp.route("/api/signals/record", methods=["POST"])
+def record_instrument_signal():
+    """Record one prospective instrument signal from persisted evidence.
+
+    This is deliberately separate from GET /api/analyze so viewing or retrying
+    a page cannot mutate the research journal.
+    """
+    payload = request.get_json(silent=True) or {}
+    symbol = data.clean_symbol(str(payload.get("ticker") or ""), fallback="")
+    if not symbol:
+        return err("Provide a ticker symbol.", 400)
+    try:
+        horizon = int(payload.get("horizon") or 21)
+    except (TypeError, ValueError):
+        return err("horizon must be an integer.", 400)
+    if not 5 <= horizon <= 90:
+        return err("horizon must be between 5 and 90.", 400)
+    inst = data.get(symbol)
+    if inst is None:
+        return err(f"Unknown ticker '{symbol}'.", 404)
+    close = inst.df["close"].dropna()
+    if len(close) < 60:
+        return err("Need at least 60 rows of history to record a signal.", 400)
+    p = provenance.instrument(
+        inst.source,
+        len(close),
+        price_provider=getattr(inst, "price_provider", ""),
+    )
+    if not p["eligible_for_real_research"]:
+        return err(
+            f"Signal recording blocked: {p['reason']} {p['required_action']}".strip(),
+            409,
+        )
+    fc = forecast.forecast(close, horizon=horizon)
+    sent = sentiment.score_headlines(list(inst.headlines or []))
+    fnd = fundamentals.fetch_cached(inst.symbol) or fundamentals.Fundamentals(
+        ticker=inst.symbol, source="none")
+    fwd = cma.instrument_forward(inst.symbol, fnd)
+    macro_ctx = macro_events.build_macro_context(fwd.get("sector") or "", macro_events.snapshot_cached())
+    sig = signals.evaluate(close, fc, sent, history_days=len(close),
+                           fundamental_result=fwd, macro_context=macro_ctx)
+    entry = _record_instrument_signal(inst, close, sig, horizon)
+    return ok({"signal_journal_entry": entry, "disclaimer": ANALYSIS_ONLY_DISCLAIMER})
 
 
 @bp.route("/api/lookthrough")
@@ -513,7 +754,10 @@ def lookthrough_instrument():
     symbol = data.clean_symbol(request.args.get("ticker", ""), fallback="")
     if not symbol:
         return err("Provide a fund ticker symbol.", 400)
-    lt = holdings.fetch_lookthrough(symbol)
+    return ok(_lookthrough_payload(symbol, holdings.fetch_lookthrough_cached(symbol)))
+
+
+def _lookthrough_payload(symbol: str, lt) -> dict:
     summary = holdings.summarize(lt)
     # Forward provenance reflects REAL intra-fund coverage: a fund whose listed
     # N-PORT positions only sum to e.g. 60% of NAV is 60% covered, not 100%.
@@ -533,7 +777,7 @@ def lookthrough_instrument():
         "unresolved": [] if lt.resolved else [{"ticker": symbol, "reason": lt.warning}],
         "as_of_range": {"oldest": lt.as_of, "newest": lt.as_of},
     })
-    return ok({
+    return {
         "symbol": lt.symbol,
         "resolved": lt.resolved,
         "kind": lt.kind,
@@ -548,7 +792,23 @@ def lookthrough_instrument():
         "forward": forward,
         "warning": lt.warning,
         "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
-    })
+    }
+
+
+@bp.route("/api/lookthrough/refresh", methods=["POST"])
+def refresh_instrument_lookthrough():
+    """Acquire SEC look-through evidence after an explicit operator action."""
+    payload = request.get_json(silent=True) or {}
+    symbol = data.clean_symbol(str(payload.get("ticker") or request.args.get("ticker") or ""), fallback="")
+    if not symbol:
+        return err("Provide a fund ticker symbol.", 400)
+    if not _LIVE_SEMAPHORE.acquire(blocking=False):
+        return err("Too many provider requests in flight - try again in a moment.", 429)
+    try:
+        lt = holdings.fetch_lookthrough(symbol, use_cache=True)
+    finally:
+        _LIVE_SEMAPHORE.release()
+    return ok(_lookthrough_payload(symbol, lt))
 
 
 @bp.route("/api/strategy/analyze")
@@ -562,22 +822,39 @@ def strategy_analyze():
     cost_bps, slippage_bps, window, arg_error = _strategy_request_args()
     if arg_error:
         return err(arg_error, 400)
+    p = provenance.instrument(
+        inst.source,
+        len(inst.df["close"].dropna()),
+        price_provider=getattr(inst, "price_provider", ""),
+    )
+    if not p["eligible_for_real_research"]:
+        return ok({
+            "series_kind": "instrument",
+            "symbol": inst.symbol,
+            "name": inst.name,
+            "source": inst.source,
+            "data_mode": p["data_mode"],
+            "display_label": p["display_label"],
+            "eligible_for_real_research": False,
+            "reason": p["reason"],
+            "required_action": p["required_action"],
+            "warnings": p["warnings"],
+            "data_provenance": p,
+            "methodology": {"analysis_only": True, "no_lookahead": True},
+            "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+        })
     try:
         result = strategy.analyze_strategy(
             inst.df["close"], cost_bps=cost_bps, slippage_bps=slippage_bps, **window)
     except ValueError as e:
         return err(str(e), 400)
-    p = provenance.instrument(inst.source, len(inst.df["close"].dropna()))
     return ok({
         "series_kind": "instrument",
         "symbol": inst.symbol,
         "name": inst.name,
         "source": inst.source,
         "data_mode": p["data_mode"],
-        "display_label": (
-            "Demo strategy result — synthetic data, not investment evidence."
-            if p["data_mode"] == "demo" else p["display_label"]
-        ),
+        "display_label": p["display_label"],
         "eligible_for_real_research": p["eligible_for_real_research"],
         "reason": p["reason"],
         "required_action": p["required_action"],
@@ -661,7 +938,7 @@ def signal_journal_endpoint():
             "raw_price_history_stored": False,
             "hit_rate_basis": "Measured paper signals are scored against their action intent: BUY/ADD/OVERWEIGHT must beat the benchmark when alpha is available; SELL/REDUCE/UNDERWEIGHT must underperform; HOLD/REVIEW must avoid material benchmark lag.",
             "forward_results": "Pending results resolve only after later live or persisted price history covers the original signal horizon.",
-            "measurement_scope": "Signals recorded from demo/sample data are marked not_measurable and never scored; headline hit rate and alpha aggregate only real-eligible signals.",
+            "measurement_scope": "Signals without eligible live/uploaded evidence are not measurable and never scored; headline hit rate and alpha aggregate only real-eligible signals.",
         },
         "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
     })

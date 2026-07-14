@@ -9,10 +9,13 @@ from datetime import datetime, timezone
 import pandas as pd
 from flask import Blueprint, request
 
-from engine import data, data_quality, persistence, portfolio, provenance
+from engine import data, data_quality, operations, persistence, portfolio, provenance
 from engine._common import dedupe as _dedupe_strings, env_int as _env_int
 
-from .core import _LIVE_SEMAPHORE, _UPLOAD_SEMAPHORE, _safe_int_arg, app, err, ok
+from .core import (
+    _LIVE_SEMAPHORE, _UPLOAD_SEMAPHORE, _safe_int_arg, app, current_actor,
+    defer_privileged_state, err, ok, privileged_transaction_active,
+)
 
 bp = Blueprint("data", __name__)
 
@@ -31,7 +34,7 @@ def _auto_live_config() -> dict:
     symbols = data.expand_live_symbols(raw_symbols)
     return {
         "enabled": bool(symbols),
-        "live_available": data.HAS_YF,
+        "live_available": data.live_provider_available(),
         "symbols": symbols,
         "source": raw_symbols,
         "period": (os.environ.get("HELIOS_AUTO_LIVE_PERIOD") or "2y").strip() or "2y",
@@ -68,6 +71,11 @@ def _auto_live_worker(config: dict) -> None:
         with _AUTO_LIVE_LOCK:
             _AUTO_LIVE_LAST_RUN = started
             _AUTO_LIVE_LAST_RESULT = result
+        try:
+            quality = data_quality.dashboard_payload(sync_alerts=True)
+            operations.sync_incidents(quality.get("issues") or [], actor="auto-live")
+        except Exception:
+            pass
         # Warm the SEC event cache in the background so the radar's cached-only
         # read has data without ever paying EDGAR latency inside a request. The
         # 1h TTL in sec_events makes this a no-op on most 5-minute cycles.
@@ -126,7 +134,7 @@ def _start_auto_live_refresh() -> dict:
                         "symbol": symbol,
                         "status": "error",
                         "rows_added": 0,
-                        "message": "yfinance is not installed; live data unavailable.",
+                        "message": "No configured live price provider is available.",
                     }
                     for symbol in config["symbols"]
                 ],
@@ -259,10 +267,20 @@ def data_jobs():
 
 @bp.route("/api/data-quality")
 def data_quality_dashboard():
-    return ok(data_quality.dashboard_payload())
+    return ok(data_quality.dashboard_payload(sync_alerts=False))
 
 
-@bp.route("/api/data/price-reconciliation")
+@bp.route("/api/data-quality/sync", methods=["POST"])
+def sync_data_quality_dashboard():
+    """Recompute and persist alert occurrences after an explicit operation."""
+    quality = data_quality.dashboard_payload(sync_alerts=True)
+    quality["incident_sync"] = operations.sync_incidents(
+        quality.get("issues") or [], actor=current_actor()
+    )
+    return ok(quality)
+
+
+@bp.route("/api/data/price-reconciliation", methods=["POST"])
 def price_reconciliation():
     """Side-by-side FMP vs yfinance closes for one symbol — the evidence
     gate before HELIOS_PRICE_SOURCE=fmp cutover (never rewrites history)."""
@@ -272,7 +290,12 @@ def price_reconciliation():
     if not _LIVE_SEMAPHORE.acquire(blocking=False):
         return err("Too many live-data requests in flight — try again in a moment.", 429)
     try:
-        return ok(data.reconcile_price_sources(symbol, period=request.args.get("period", "3mo")))
+        return ok(data.reconcile_price_sources(
+            symbol,
+            period=request.args.get("period", "3mo"),
+            primary_provider=request.args.get("primary", "fmp"),
+            backup_provider=request.args.get("backup", "yfinance"),
+        ))
     except ValueError as exc:
         return err(str(exc), 400)
     finally:
@@ -293,11 +316,17 @@ def data_refresh():
         symbols = [symbol]
     if not _LIVE_SEMAPHORE.acquire(blocking=False):
         return err("Too many live-data requests in flight — try again in a moment.", 429)
+    in_memory_before = data.snapshot_instruments()
+    defer_privileged_state(
+        rollback=lambda snapshot=in_memory_before: data.restore_instruments(snapshot)
+    )
     try:
         if refresh_all:
             # Batch refresh: bounded workers (same cap as ensure_live_symbols),
             # one signal-journal forward refresh after the batch instead of 250.
             worker_count = data._live_refresh_worker_count(None, len(symbols))
+            if privileged_transaction_active():
+                worker_count = min(worker_count, 1)
 
             def refresh_one(symbol: str) -> dict:
                 return data.refresh_live_symbol(symbol, refresh_journal=False)
@@ -323,6 +352,10 @@ def data_refresh():
         warnings.append("No persisted live instruments are available to refresh.")
     if failed:
         warnings.append("One or more live refreshes failed; existing stored history was left unchanged.")
+    quality = data_quality.dashboard_payload(sync_alerts=True)
+    incident_sync = operations.sync_incidents(
+        quality.get("issues") or [], actor=current_actor()
+    )
     return ok({
         "requested": "all" if refresh_all else symbols[0],
         "refreshed": refreshed,
@@ -331,6 +364,8 @@ def data_refresh():
         "results": results,
         "warnings": warnings,
         "data_status": _data_status_payload(),
+        "data_quality": quality,
+        "incident_sync": incident_sync,
     })
 
 
@@ -356,7 +391,7 @@ def tickers():
             "eligible_for_real_research": provenance.is_real_source(inst.source) and len(close.dropna()) >= 60,
         })
     out.sort(key=lambda d: d["symbol"])
-    return ok({"tickers": out, "live_available": data.HAS_YF})
+    return ok({"tickers": out, "live_available": data.live_provider_available()})
 
 
 @bp.route("/api/upload", methods=["POST"])
@@ -369,6 +404,10 @@ def upload():
     name = data.clean_name(request.form.get("name"), fallback=symbol)
     if not _UPLOAD_SEMAPHORE.acquire(blocking=False):
         return err("Server busy parsing another upload — try again in a moment.", 429)
+    in_memory_before = data.snapshot_instruments()
+    defer_privileged_state(
+        rollback=lambda snapshot=in_memory_before: data.restore_instruments(snapshot)
+    )
     try:
         inst = data.parse_csv(f.read(), symbol, name, source_filename=f.filename or "")
     except ValueError as e:
@@ -379,7 +418,11 @@ def upload():
         return err("Could not read that file. Expected a CSV with date and price columns.", 400)
     finally:
         _UPLOAD_SEMAPHORE.release()
-    p = provenance.instrument(inst.source, len(inst.df["close"].dropna()))
+    p = provenance.instrument(
+        inst.source,
+        len(inst.df["close"].dropna()),
+        price_provider=getattr(inst, "price_provider", ""),
+    )
     return ok({
         "symbol": inst.symbol,
         "name": inst.name,
@@ -391,14 +434,18 @@ def upload():
 
 @bp.route("/api/live", methods=["POST"])
 def live():
-    if not data.HAS_YF:
-        return err("Live data unavailable (yfinance not installed).", 400)
+    if not data.live_provider_available():
+        return err("Live data unavailable (no configured provider).", 400)
     payload = request.get_json(silent=True) or {}
     symbol = data.clean_symbol(payload.get("symbol", ""), fallback="")
     if not symbol:
         return err("Provide a valid ticker symbol.")
     if not _LIVE_SEMAPHORE.acquire(blocking=False):
         return err("Too many live-data requests in flight — try again in a moment.", 429)
+    in_memory_before = data.snapshot_instruments()
+    defer_privileged_state(
+        rollback=lambda snapshot=in_memory_before: data.restore_instruments(snapshot)
+    )
     try:
         inst = data.fetch_live(symbol)
     except ValueError as e:
@@ -408,7 +455,11 @@ def live():
         return err(f"Could not fetch live data for '{symbol}'.", 502)
     finally:
         _LIVE_SEMAPHORE.release()
-    p = provenance.instrument(inst.source, len(inst.df["close"].dropna()))
+    p = provenance.instrument(
+        inst.source,
+        len(inst.df["close"].dropna()),
+        price_provider=getattr(inst, "price_provider", ""),
+    )
     return ok({
         "symbol": inst.symbol,
         "name": inst.name,

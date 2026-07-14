@@ -1,9 +1,9 @@
 import type { ProvenancePayload } from "../../api/types";
-import { sourceSummary } from "../../utils/format";
+import { ResearchGate } from "../states/ResearchGate";
 
 export function modeTone(mode?: string) {
   if (mode === "real") return "positive";
-  if (mode === "mixed" || mode === "demo") return "warning";
+  if (mode === "mixed") return "warning";
   if (mode === "invalid_for_research") return "negative";
   return "neutral";
 }
@@ -13,35 +13,38 @@ export function DataModeBadge({ mode, label, title }: { mode?: string; label?: s
   return <span className={`badge tone-${modeTone(mode)}`} title={title || text}>{text}</span>;
 }
 
-export function DataQualityBanner({ payload, compact = false }: { payload: ProvenancePayload; compact?: boolean }) {
-  const provenance = payload.data_provenance || {};
-  const summary = sourceSummary(provenance.source_counts, provenance.source_weight_pct);
-  const label = payload.display_label || provenance.display_label || "Data Quality";
-  const body = payload.reason || provenance.reason || payload.required_action || provenance.required_action ||
-    "Source quality determines which research panels can unlock.";
-  const eligible = payload.eligible_for_real_research ?? provenance.eligible_for_real_research;
+export function DataQualityBanner({
+  payload,
+  compact = false,
+  actionLabel,
+  onAction,
+}: {
+  payload: ProvenancePayload;
+  compact?: boolean;
+  actionLabel?: string;
+  onAction?: () => void;
+}) {
+  const blocked = payload.eligible_for_real_research !== true;
+  const defaultAction = blocked
+    ? () => window.dispatchEvent(new Event("helios:reveal-data-intake"))
+    : undefined;
   return (
-    <section className={`quality-banner tone-${modeTone(payload.data_mode || provenance.data_mode)} ${compact ? "compact" : ""}`}>
-      <div>
-        <strong>{label}</strong>
-        <p>{body}</p>
-      </div>
-      <div className="quality-banner__chips">
-        {summary && <span>{summary}</span>}
-        {typeof eligible === "boolean" && <span>{eligible ? "Eligible real research" : "Research locked"}</span>}
-        {Array.isArray(provenance.missing_tickers) && provenance.missing_tickers.length > 0 && (
-          <span>Missing {provenance.missing_tickers.join(", ")}</span>
-        )}
-      </div>
-    </section>
+    <ResearchGate
+      payload={payload}
+      compact={compact}
+      actionLabel={blocked ? actionLabel || "Resolve data gate" : undefined}
+      onAction={blocked ? onAction || defaultAction : undefined}
+    />
   );
 }
 
 export function SourcePill({ source }: { source?: string }) {
-  return <span className={`source-pill source-${sourceTone(source)}`}>{source || "unavailable"}</span>;
+  const excluded = source === "sample" || source === "simulated" || source === "demo";
+  const label = excluded ? "ineligible" : source || "unavailable";
+  return <span className={`source-pill source-${sourceTone(excluded ? "excluded" : source)}`}>{label}</span>;
 }
 
 function sourceTone(source?: string) {
-  if (source === "live" || source === "upload" || source === "model" || source === "demo" || source === "sample" || source === "excluded") return source;
+  if (source === "live" || source === "upload" || source === "model" || source === "excluded") return source;
   return "unknown";
 }

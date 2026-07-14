@@ -165,11 +165,11 @@ def fed_funds_strip(months: int = 5) -> list[dict]:
     return out
 
 
-def rate_context() -> dict:
+def rate_context(cached_only: bool = False) -> dict:
     """Configured-vs-market rate snapshot for payload provenance."""
     curve = {}
     for tenor in ("3m", "5y", "10y", "30y"):
-        val = treasury_yield(tenor)
+        val = cached_treasury_yield(tenor) if cached_only else treasury_yield(tenor)
         if val is not None:
             curve[tenor + "_pct"] = round(val * 100.0, 2)
     live_10y = curve.get("10y_pct")

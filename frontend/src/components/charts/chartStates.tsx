@@ -1,7 +1,7 @@
 type ChartStateProps = {
   title?: string;
   body: string;
-  kind?: "empty" | "loading" | "error" | "locked" | "demo" | "live";
+  kind?: "empty" | "loading" | "error" | "locked" | "live";
   minHeight?: number;
 };
 

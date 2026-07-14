@@ -75,16 +75,19 @@ def _sentiment_score(agg: float) -> float:
 _EDGE_MIN_TEST_N = 40
 
 
-def _forecast_edge_multiplier(quality: dict | None) -> float | None:
-    """[0, 1] weight multiplier from measured directional accuracy, or None
-    when the edge is UNMEASURED (small/absent test window — keep the weight
-    and say so; absence of measurement is not evidence of no edge)."""
+def _forecast_edge_multiplier(quality: dict | None) -> float:
+    """[0, 1] weight multiplier earned from measured directional accuracy.
+
+    Missing or undersized out-of-sample evidence receives zero signal weight.
+    Helios may display the estimate, but it cannot influence an action until
+    the model has enough rolling-origin observations to measure an edge.
+    """
     if not quality:
-        return None
+        return 0.0
     da = quality.get("directional_accuracy")
     n_test = quality.get("n_test")
     if da is None or not isinstance(n_test, (int, float)) or n_test < _EDGE_MIN_TEST_N:
-        return None
+        return 0.0
     return float(np.clip((float(da) - 0.50) / 0.05, 0.0, 1.0))
 
 
@@ -205,10 +208,9 @@ def evaluate(close: pd.Series, forecast_result: dict, sentiment_result: dict,
         eff_w = dict(tech_w)
 
     edge_mult = _forecast_edge_multiplier(forecast_result.get("quality"))
-    if edge_mult is not None:
-        # Weight is EARNED, never redistributed: a gated forecast simply
-        # contributes less (or nothing), it does not inflate the other legs.
-        eff_w["forecast"] = eff_w["forecast"] * edge_mult
+    # Weight is EARNED, never redistributed: a gated forecast simply
+    # contributes less (or nothing), it does not inflate the other legs.
+    eff_w["forecast"] = eff_w["forecast"] * edge_mult
 
     contributions = {k: eff_w[k] * raw[k] for k in raw}
     base_composite = sum(contributions.values())
@@ -237,8 +239,7 @@ def evaluate(close: pd.Series, forecast_result: dict, sentiment_result: dict,
     # weights — this is the horizon-sensitive leg (the Ridge forecast is over
     # the user's chart horizon by construction).
     tactical_w = dict(tech_w)
-    if edge_mult is not None:
-        tactical_w["forecast"] = tactical_w["forecast"] * edge_mult
+    tactical_w["forecast"] = tactical_w["forecast"] * edge_mult
     tactical_composite = sum(tactical_w[k] * raw[k] for k in ("trend", "momentum", "forecast", "sentiment"))
     tactical_score = float(np.clip(tactical_composite * vol_penalty * mandate_fit * event_damper, -1, 1))
     tactical = {
@@ -385,15 +386,20 @@ def _caveats(fc, history_days, data_honesty) -> list:
     da = q.get("directional_accuracy")
     n_test = q.get("n_test")
     edge_mult = _forecast_edge_multiplier(q)
-    if edge_mult is not None and edge_mult < 1.0:
+    if edge_mult < 1.0 and da is not None and isinstance(n_test, (int, float)) and n_test >= _EDGE_MIN_TEST_N:
         out.append(
             f"Forecast weight gated to {edge_mult:.0%} of the mandate weight — measured "
             f"directional accuracy {da*100:.0f}% on {int(n_test)} test windows "
             f"({'no' if edge_mult == 0 else 'thin'} out-of-sample edge; full weight requires ≥55%).")
-    elif da is not None and da <= 0.50 and edge_mult is None:
-        out.append(f"Forecast shown but its edge is UNMEASURED (test window under "
-                   f"{_EDGE_MIN_TEST_N}) and in-sample accuracy is {da*100:.0f}% — "
-                   "treat the forecast contribution skeptically.")
+    elif edge_mult == 0.0:
+        measured = (
+            f"only {int(n_test)} rolling-origin observations" if isinstance(n_test, (int, float))
+            else "no rolling-origin observations"
+        )
+        out.append(
+            f"Forecast is displayed but receives 0% signal weight because its edge is "
+            f"unmeasured ({measured}; at least {_EDGE_MIN_TEST_N} are required)."
+        )
     if history_days is not None and history_days < 252:
         out.append(f"Only {history_days} analyzed trading days of history (<1y); estimates carry wide uncertainty.")
     if data_honesty and data_honesty.get("simulated_weight_pct", 0) > 0:

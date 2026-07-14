@@ -1,9 +1,10 @@
 from io import BytesIO
 
 import pandas as pd
+import pytest
 
 import app as helios
-from engine import data, persistence, portfolio
+from engine import data, model_validation, persistence, portfolio
 from tests.conftest import price_series
 
 
@@ -21,7 +22,7 @@ def _use_db(monkeypatch, tmp_path):
     return store
 
 
-def _csv_for(daily: float, days: int = 430) -> bytes:
+def _csv_for(daily: float, days: int = 760) -> bytes:
     series = price_series(days=days, daily=daily)
     return pd.DataFrame({
         "Date": series.index.strftime("%Y-%m-%d"),
@@ -55,8 +56,8 @@ def test_model_validation_dashboard_ranks_champion_challengers_and_alerts(monkey
         "QQQ": 0.0005,
         "LEADA": 0.0014,
         "LEADB": 0.0012,
-        "DRIFTA": -0.0010,
-        "DRIFTB": -0.0008,
+        "DRIFTA": 0.0009,
+        "DRIFTB": 0.0008,
     }.items():
         _upload_price(client, symbol, daily)
     champion_id = _upload_model(client, "Validation Champion", b"Ticker,Weight\nLEADA,55\nLEADB,45\n")
@@ -120,3 +121,19 @@ def test_model_validation_dashboard_blocks_missing_real_history(monkeypatch, tmp
     assert body["models"][0]["evidence_unavailable"] is True
     assert body["models"][0]["drift_alerts"][0]["severity"] == "blocked"
     assert "real price history" in body["models"][0]["required_action"].lower()
+
+
+def test_false_positive_rate_uses_only_measured_directional_windows():
+    rows = [
+        {"action_label": "BUY", "paper_hit": False, "false_positive": True, "alpha_pct": -1.0},
+        {"action_label": "SELL", "paper_hit": True, "false_positive": False, "alpha_pct": 0.5},
+        {"action_label": "BUY", "paper_hit": None, "false_positive": False, "alpha_pct": None},
+        {"action_label": "HOLD", "paper_hit": None, "false_positive": False, "alpha_pct": None},
+    ]
+
+    stats = model_validation._segment_stats(rows)
+
+    assert stats["directional_signal_count"] == 3
+    assert stats["measured_directional_signal_count"] == 2
+    assert stats["benchmark_coverage_pct"] == pytest.approx(66.67)
+    assert stats["false_positive_rate_pct"] == 50.0

@@ -4,10 +4,14 @@ from __future__ import annotations
 import datetime
 
 REAL_SOURCES = {"live", "upload"}
-DEMO_SOURCES = {"sample", "simulated"}
+INELIGIBLE_SOURCES = {"sample", "simulated"}
 BLOCKED_SOURCES = {"missing", "excluded", "unknown"}
 
-DEMO_ACTION = "Connect live data or upload real price/model files to generate real research."
+RESEARCH_DATA_ACTION = "Connect live data or upload real price/model files to generate real research."
+# Compatibility aliases for older callers and retained database rows. Neither
+# alias creates a runtime data mode.
+DEMO_SOURCES = INELIGIBLE_SOURCES
+DEMO_ACTION = RESEARCH_DATA_ACTION
 
 
 def is_real_source(source: str | None) -> bool:
@@ -15,27 +19,34 @@ def is_real_source(source: str | None) -> bool:
 
 
 def is_demo_source(source: str | None) -> bool:
-    return (source or "").lower() in DEMO_SOURCES
+    return (source or "").lower() in INELIGIBLE_SOURCES
 
 
 def universe(instruments) -> dict:
     counts: dict[str, int] = {}
+    eligibility = []
     for inst in instruments:
         counts[inst.source] = counts.get(inst.source, 0) + 1
-    real_count = sum(counts.get(src, 0) for src in REAL_SOURCES)
-    demo_count = sum(counts.get(src, 0) for src in DEMO_SOURCES)
-    if real_count and demo_count:
+        close = inst.df["close"].dropna() if "close" in inst.df else []
+        eligibility.append(instrument(
+            inst.source,
+            len(close),
+            price_provider=getattr(inst, "price_provider", ""),
+        ))
+    real_count = sum(1 for row in eligibility if row["eligible_for_real_research"])
+    ineligible_count = sum(counts.get(src, 0) for src in INELIGIBLE_SOURCES)
+    if real_count and ineligible_count:
         mode = "mixed"
         label = "Mixed Data Warning"
-        reason = "Some instruments are live/uploaded, while bundled sample data remains present."
+        reason = "Some instruments are live/uploaded, while ineligible histories remain present."
     elif real_count:
         mode = "real"
         label = "Real Research Mode"
         reason = "Research rankings are based on live or user-uploaded price history."
-    elif demo_count:
-        mode = "demo"
-        label = "Demo Mode — Not Real Market Evidence"
-        reason = "Only bundled synthetic sample data is available."
+    elif ineligible_count:
+        mode = "invalid_for_research"
+        label = "Research Blocked - Ineligible Data"
+        reason = "No eligible live or uploaded market history is available."
     else:
         mode = "invalid_for_research"
         label = "Data Quality Blocked"
@@ -45,24 +56,58 @@ def universe(instruments) -> dict:
         "display_label": label,
         "eligible_for_real_research": bool(real_count),
         "reason": reason,
-        "required_action": "" if real_count else DEMO_ACTION,
+        "required_action": "" if real_count else RESEARCH_DATA_ACTION,
         "source_counts": counts,
         "warnings": [] if real_count else [reason],
     }
 
 
-def instrument(source: str, history_days: int, min_history: int = 60) -> dict:
+def instrument(
+    source: str,
+    history_days: int,
+    min_history: int = 60,
+    price_provider: str = "",
+) -> dict:
     source = source or "unknown"
     enough_history = history_days >= min_history
-    eligible = is_real_source(source) and enough_history
+    provider_control = {
+        "passed": True,
+        "state": "not_applicable",
+        "provider": price_provider or "not_applicable",
+        "detail": "Uploaded histories are governed by their retained provenance record.",
+        "required_action": "",
+    }
+    if source == "live":
+        try:
+            from . import provider_registry
+
+            provider_control = provider_registry.provider_usage_readiness(price_provider, "prices")
+        except Exception as exc:
+            provider_control = {
+                "passed": False,
+                "state": "blocked",
+                "provider": price_provider or "unknown",
+                "detail": f"Provider control could not be verified: {exc}",
+                "required_action": "Restore provider-control evidence before institutional research use.",
+            }
+    eligible = is_real_source(source) and enough_history and bool(provider_control["passed"])
     if is_real_source(source):
-        mode = "real"
-        label = "Real Research Mode"
-        reason = "" if enough_history else f"Need at least {min_history} sessions of real price history."
+        if not enough_history:
+            mode = "invalid_for_research"
+            label = "Data Quality Blocked"
+            reason = f"Need at least {min_history} sessions of real price history."
+        elif not provider_control["passed"]:
+            mode = "invalid_for_research"
+            label = "Institutional Provider Gate Blocked"
+            reason = str(provider_control.get("detail") or "Provider controls are incomplete.")
+        else:
+            mode = "real"
+            label = "Real Research Mode"
+            reason = ""
     elif is_demo_source(source):
-        mode = "demo"
-        label = "Demo sample — not real market data"
-        reason = "Bundled sample/synthetic data is for UI demonstration only."
+        mode = "invalid_for_research"
+        label = "Research Blocked - Ineligible Data"
+        reason = "This history is not an eligible live or uploaded research source."
     else:
         mode = "invalid_for_research"
         label = "Data Quality Blocked"
@@ -72,10 +117,13 @@ def instrument(source: str, history_days: int, min_history: int = 60) -> dict:
         "display_label": label,
         "eligible_for_real_research": eligible,
         "reason": reason,
-        "required_action": "" if eligible else DEMO_ACTION,
+        "required_action": (
+            "" if eligible else str(provider_control.get("required_action") or RESEARCH_DATA_ACTION)
+        ),
         "source_counts": {source: 1},
         "history_days": history_days,
         "warnings": [] if eligible else [reason],
+        "provider_control": provider_control,
     }
 
 
@@ -183,11 +231,34 @@ def portfolio(prov: dict, min_real_weight_pct: float = 99.9) -> dict:
     simulated_weight = float(weights.get("simulated", 0.0))
     missing_weight = float(weights.get("missing", 0.0) + weights.get("excluded", 0.0))
     non_real = sample_weight + simulated_weight + missing_weight
-    eligible = real_weight >= min_real_weight_pct and non_real <= (100.0 - min_real_weight_pct + 1e-9)
+    source_eligible = real_weight >= min_real_weight_pct and non_real <= (100.0 - min_real_weight_pct + 1e-9)
+    provider_failures = []
+    try:
+        from . import provider_registry
+
+        if provider_registry.controls_required():
+            source_by_symbol = prov.get("source_by_symbol") or {}
+            for ticker, provider in (prov.get("price_providers") or {}).items():
+                if source_by_symbol.get(ticker) != "live":
+                    continue
+                control = provider_registry.provider_usage_readiness(str(provider or ""), "prices")
+                if not control.get("passed"):
+                    provider_failures.append({
+                        "ticker": ticker,
+                        "provider": control.get("provider") or "unknown",
+                        "detail": control.get("detail") or "Provider control failed.",
+                    })
+    except Exception as exc:
+        provider_failures.append({"ticker": "workspace", "provider": "unknown", "detail": str(exc)})
+    eligible = source_eligible and not provider_failures
     if eligible:
         mode = "real"
         label = "Real Research Mode"
         reason = "All analyzed model weight uses live or uploaded price history."
+    elif source_eligible and provider_failures:
+        mode = "invalid_for_research"
+        label = "Institutional Provider Gate Blocked"
+        reason = "One or more live holding histories are outside the approved provider cutover."
     elif real_weight > 0:
         mode = "mixed"
         label = "Mixed Data Warning"
@@ -199,24 +270,32 @@ def portfolio(prov: dict, min_real_weight_pct: float = 99.9) -> dict:
     missing = list(prov.get("missing_symbols") or [])
     warnings = [] if eligible else [reason]
     if sample_weight:
-        warnings.append(f"{sample_weight:.1f}% of model weight uses bundled sample data.")
+        warnings.append(f"{sample_weight:.1f}% of model weight uses an ineligible fixture source.")
     if simulated_weight:
-        warnings.append(f"{simulated_weight:.1f}% of model weight would require simulated prices.")
+        warnings.append(f"{simulated_weight:.1f}% of model weight lacks retained market prices.")
     if missing:
         warnings.append("Upload real price history for: " + ", ".join(missing))
+    if provider_failures:
+        warnings.append("Provider control blocked: " + ", ".join(
+            f"{row['ticker']} ({row['provider']})" for row in provider_failures
+        ))
     return {
         "data_mode": mode,
         "display_label": label,
         "eligible_for_real_research": eligible,
         "reason": reason,
-        "required_action": "" if eligible else DEMO_ACTION,
+        "required_action": (
+            "" if eligible else
+            "Refresh live holdings through the approved primary or backup provider."
+            if provider_failures else RESEARCH_DATA_ACTION
+        ),
         "source_weight_pct": weights,
         "real_weight_pct": round(real_weight, 1),
         "non_real_weight_pct": round(non_real, 1),
         "missing_tickers": missing,
         "warnings": warnings,
+        "provider_failures": provider_failures,
         # Qualifies even "Real Research Mode": real DATA, constructed SERIES.
         "series_basis": prov.get("series_basis", ""),
         "series_basis_note": prov.get("series_basis_note", ""),
     }
-

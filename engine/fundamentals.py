@@ -498,17 +498,31 @@ def _auto_provider(ticker: str) -> dict:
     try:
         raws: list[tuple[str, dict]] = []
         merged: dict = {}
-        if os.environ.get("HELIOS_FMP_KEY", "").strip():
-            raw = _fmp_provider(ticker)
-            raws.append(("fmp", raw))
+        from . import provider_registry
+
+        if provider_registry.controls_required():
+            readiness = provider_registry.domain_readiness("fundamentals")
+            cutover = readiness.get("cutover") if readiness.get("passed") else None
+            order = [
+                key for key in (
+                    str((cutover or {}).get("primary_provider") or ""),
+                    str((cutover or {}).get("backup_provider") or ""),
+                ) if key
+            ]
+        else:
+            order = ["fmp", "intrinio", "yfinance"]
+        adapters = {
+            "fmp": ("HELIOS_FMP_KEY", _fmp_provider),
+            "intrinio": ("HELIOS_INTRINIO_KEY", _intrinio_provider),
+            "yfinance": ("", _yfinance_provider),
+        }
+        for provider in order:
+            credential, adapter = adapters.get(provider, (None, None))
+            if adapter is None or (credential and not os.environ.get(credential, "").strip()):
+                continue
+            raw = adapter(ticker)
+            raws.append((provider, raw))
             merged = _merge_raw(merged, raw)
-        if os.environ.get("HELIOS_INTRINIO_KEY", "").strip():
-            raw = _intrinio_provider(ticker)
-            raws.append(("intrinio", raw))
-            merged = _merge_raw(merged, raw)
-        raw = _yfinance_provider(ticker)
-        raws.append(("yfinance", raw))
-        merged = _merge_raw(merged, raw)
         recon = _reconcile([(name, r) for name, r in raws if r])
         if recon:
             merged["reconciliation_warnings"] = recon

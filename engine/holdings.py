@@ -105,6 +105,25 @@ def fetch_lookthrough(symbol: str, client=None, use_cache: bool = True) -> LookT
     return result
 
 
+def fetch_lookthrough_cached(symbol: str) -> LookThrough:
+    """Return retained in-process evidence without contacting SEC EDGAR."""
+    sym = (symbol or "").strip().upper()
+    if not sym:
+        return LookThrough(symbol="", resolved=False, kind="unresolved", source="none",
+                           warning="Empty ticker symbol.")
+    with _CACHE_LOCK:
+        cached = _CACHE.get(sym)
+    if cached is not None:
+        return cached
+    return LookThrough(
+        symbol=sym,
+        resolved=False,
+        kind="unresolved",
+        source="none",
+        warning="No retained SEC look-through is available. Refresh look-through explicitly.",
+    )
+
+
 # SEC registrants in the stock ticker map that are NOT operating companies.
 # GLD/SLV/IAU/USO all file under SIC 6221 (commodity contracts); 6799
 # ("Investors, NEC") covers other pooled vehicles. Verified live 2026-07-10.
@@ -256,7 +275,7 @@ def summarize(lt: LookThrough) -> dict:
 # --------------------------------------------------------------------------- #
 # Model-level roll-up
 # --------------------------------------------------------------------------- #
-def model_lookthrough(model, client=None, budget: int = _RESOLVE_BUDGET) -> dict:
+def model_lookthrough(model, client=None, budget: int = _RESOLVE_BUDGET, *, allow_fetch: bool = True) -> dict:
     """Roll every holding's look-through up to a single model exposure.
 
     For each holding (weighted ``w`` of the model):
@@ -268,7 +287,8 @@ def model_lookthrough(model, client=None, budget: int = _RESOLVE_BUDGET) -> dict
     Returns combined exposure plus a ``coverage`` provenance block describing how
     much model weight is transparently characterized vs still opaque.
     """
-    client = client or default_client()
+    if allow_fetch:
+        client = client or default_client()
     holdings = list(getattr(model, "holdings", []) or [])
     total_w = sum(max(0.0, float(h.weight)) for h in holdings) or 1.0
 
@@ -287,7 +307,11 @@ def model_lookthrough(model, client=None, budget: int = _RESOLVE_BUDGET) -> dict
             lt = LookThrough(symbol=h.ticker, resolved=False, kind="unresolved", source="none",
                              warning="Look-through budget reached for this analysis.")
         else:
-            lt = fetch_lookthrough(h.ticker, client=client)
+            lt = (
+                fetch_lookthrough(h.ticker, client=client)
+                if allow_fetch
+                else fetch_lookthrough_cached(h.ticker)
+            )
             resolves += 1
 
         intra = 0.0

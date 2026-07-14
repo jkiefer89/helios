@@ -27,29 +27,27 @@ update the range file *and* regenerate the lock from a clean venv
 (`pip freeze`) so CI keeps testing real pins.
 
 Local development needs Python 3 with `venv`/`pip`; React frontend work also
-needs Node/npm on `PATH`.
+needs Node 22.13+ from the Node 22 line, or Node 24+, with npm on `PATH`.
 
 ```bash
 ./run.sh
 ```
 
-This starts Helios **live on your local network** (production `waitress` server,
-bound to all interfaces) behind a password gate. It prints something like:
+This starts Helios on **localhost** using the production `waitress` server,
+behind a password gate. It prints something like:
 
 ```
-  Reachable on your local network at:
-    • this machine : http://127.0.0.1:5000
-    • on your LAN  : http://192.168.11.245:5000
+    • http://127.0.0.1:5000
   Login (HTTP Basic Auth):
     user     : advisor
-    password : 7Qx-Lp2vK9    (auto-generated — set HELIOS_PASSWORD to choose your own)
+    password : <generated-at-startup>
 ```
 
-Open the **LAN URL** on any device on the same Wi-Fi/office network and log in.
+Open the localhost URL and log in.
 The first run creates `.venv/` and installs runtime Python dependencies,
 including `openpyxl` for Excel model uploads. `yfinance` is installed for
-optional live data, but the app remains fully usable offline with bundled sample
-data. Live/imported price histories and uploaded model metadata are stored in a
+live data. An empty installation is intentionally research-blocked until an
+eligible live or uploaded history is present. Live/imported price histories and uploaded model metadata are stored in a
 local SQLite database at `.helios/helios.db` by default, so real-data work
 survives an app restart without publishing client files to git.
 
@@ -66,7 +64,7 @@ The React app is the only UI. If `frontend/dist/` is absent, `/` serves a
 minimal self-contained page with those build instructions (the JSON API stays
 fully available) until the build exists.
 
-### Going live on your network
+### Runtime and institutional deployment
 
 Use placeholders only in committed docs/config. For local overrides, copy
 `.env.example` to an untracked `.env` or export variables in the shell that
@@ -79,9 +77,15 @@ to disable that.
 | `HELIOS_USER` | `advisor` | Basic-auth username |
 | `HELIOS_PASSWORD` | *auto-generated* | Basic-auth password — **set this** for a stable login (empty counts as unset and still auto-generates) |
 | `HELIOS_PORT` | `5000` | Listen port |
-| `HELIOS_HOST` | `0.0.0.0` | Bind address (`127.0.0.1` = localhost only) |
-| `HELIOS_TLS` | `0` | `1` serves self-signed **HTTPS** (encrypts the login) |
+| `HELIOS_HOST` | `127.0.0.1` | Safe origin bind; institutional mode refuses direct public/LAN binding |
+| `HELIOS_TLS` | `0` | `1` enables direct TLS; self-signed certificates are development-only |
+| `HELIOS_TLS_CERT_PATH` / `HELIOS_TLS_KEY_PATH` | empty | Operator-managed certificate and private-key paths |
+| `HELIOS_TLS_TRUSTED` | `0` | Explicit assertion that the supplied direct-TLS certificate is trusted |
 | `HELIOS_AUTH` | `1` | `0` disables the password gate (localhost dev only) |
+| `HELIOS_INSTITUTIONAL_CONTROLS` | `1` | Fail closed on provider, deployment, approval, export, and validation controls |
+| `HELIOS_TRUSTED_HOSTS` | empty in code | Optional host allowlist; `.env.example` limits it to localhost |
+| `HELIOS_SSO_ENABLED` | `0` | Accept identity headers only from `HELIOS_TRUSTED_PROXY_IPS` |
+| `HELIOS_REQUIRE_MFA` | `0` | Require an MFA-verified principal for privileged operations |
 | `HELIOS_RF` | `0.02` | Risk-free / CD benchmark rate used by mandates, projections, and Sharpe/Sortino metrics |
 | `HELIOS_DB_PATH` | `.helios/helios.db` | Local SQLite store for parsed live/uploaded data (`off` disables persistence) |
 | `HELIOS_DB_ENCRYPTION` | `auto` | Encrypt sensitive local persistence payloads; use `required` to fail closed without a key |
@@ -107,15 +111,18 @@ constants, not configuration.
 HELIOS_USER=jkiefer HELIOS_PASSWORD='choose-a-strong-one' ./run.sh
 ```
 
-- **macOS firewall:** the first launch may prompt *"allow incoming connections"* —
-  click **Allow** so other devices can reach it.
 - **Localhost-only dev** (Flask dev server, no network exposure): `./run.sh --dev`.
-- **Untrusted networks** (cafés, shared Wi-Fi): the app is reachable by anyone on
-  the subnet who has the password. Use a strong `HELIOS_PASSWORD`, or keep it on
-  `HELIOS_HOST=127.0.0.1` and reach it via SSH tunnel instead.
+- **Direct public/LAN bind:** institutional mode refuses it, including the
+  built-in Werkzeug TLS path. That server is for loopback development only.
+- **Reverse proxy / SSO:** keep Helios bound to `127.0.0.1`, keep its waitress port
+  inaccessible to clients, configure exact trusted proxy IPs, and let a
+  user-managed proxy/IdP terminate trusted TLS and assert identity/MFA headers.
+  Helios does not provision an IdP or certificate authority.
 
-The app ships with a synthetic 6-instrument universe (AAPL, MSFT, NVDA, TSLA,
-SPY, BTC-USD) so it works **fully offline** out of the box.
+An empty installation contains no sample market universe, placeholder ranking,
+or generated research. Real research remains blocked until eligible retained
+live or uploaded histories pass provenance and, in institutional mode, approved
+provider controls.
 
 ### Frontend development
 
@@ -129,7 +136,7 @@ npm --prefix frontend run dev
 
 Vite proxies `/api` to Flask. The React app does not contain
 placeholder rankings or mock research rows; unavailable research surfaces render
-the backend's demo, mixed, or blocked provenance state.
+the backend's mixed or blocked provenance state.
 
 ---
 
@@ -149,7 +156,7 @@ the backend's demo, mixed, or blocked provenance state.
 | **Conviction rationale** | Every signal explains itself: per-component clauses with the actual numbers, the mandate tilt, the vol penalty, and honesty caveats |
 | **Signal Journal** | Dedicated paper-performance workspace for signal history, pending/measured forward results, hit rate, benchmark comparison, model-by-model evidence and drift over time |
 | **Evidence Lab** | Walk-forward validation: freezes history at prior dates, replays the causal trend/momentum signal, and measures forward returns vs a benchmark — hit rate, false positives, regime sensitivity, signal decay and confidence bands, plus prospective Signal Journal tracking |
-| **Risk Analytics** | Sector/factor exposure, volatility budget vs mandate, correlation clusters, deterministic scenario stress, historical stress replay, liquidity flags and a client-ready risk pack with break-the-model language |
+| **Risk Analytics** | Sector/factor exposure, volatility budget vs mandate, correlation clusters, deterministic scenario stress, historical stress replay, liquidity flags, internal risk evidence, and externally gated risk packs |
 | **Model Governance** | Versioned audit trail with committee notes, a risk gate that blocks approval while limits are breached, and exportable JSON/HTML/PDF approval packets with optional PIN-verified committee identity |
 | **Model Validation** | Champion/challenger review dashboard scoring each model on walk-forward hit rate, alpha, false positives, signal decay and governance state, with drift alerts |
 | **Native model editor** | Edit holdings in-app with a non-mutating preview, weight normalization, a mandatory change note, and a governance snapshot recorded on every save |
@@ -160,11 +167,10 @@ the backend's demo, mixed, or blocked provenance state.
 
 ### Data quality modes
 
-Helios separates interface demos from advisor-grade research:
+Helios separates eligible market evidence from blocked inputs:
 
 | Mode | Meaning |
 |------|---------|
-| `demo` | Bundled sample data can demonstrate workflow, but cannot populate real rankings or model-level research evidence. |
 | `real` | Live or uploaded history is available for the analyzed surface. |
 | `mixed` | Some evidence is real but some holdings or sources require verification. The UI displays a warning and required action. |
 | `invalid_for_research` | Research is blocked because required live/uploaded history is missing or unsuitable. |
@@ -176,7 +182,7 @@ live/uploaded price history, instrument provenance, uploaded model metadata,
 holdings, live-refresh logs, Signal Journal entries, model-governance events,
 data-quality alert state, and saved advisor report snapshots. It does **not**
 store raw uploaded files, API keys, secrets, browser artifacts, generated
-builds, screenshots, or sample data as real research evidence. The database
+builds, screenshots, or test fixtures as real research evidence. The database
 path is controlled by `HELIOS_DB_PATH`; set `HELIOS_DB_PATH=off` for an
 ephemeral session.
 
@@ -216,8 +222,8 @@ that key, the encrypted local research store cannot be opened.
 The React **Real Data Center** shows database availability, persisted
 instrument/model counts, date ranges, row counts, live-refresh status, model
 coverage, missing tickers, and copyable import templates. Refresh controls only
-refresh symbols already imported as `live`; bundled samples and uploaded CSVs
-are never silently promoted into live market data.
+refresh symbols already imported as `live`; uploaded CSVs are never silently
+promoted into live market data.
 
 The React **Data Quality** workspace adds an institutional readiness screen for
 stale symbols, short histories, missing model holdings, source conflicts,
@@ -258,29 +264,65 @@ HELIOS_AUTO_LIVE_MAX_WORKERS=6 \
 ./run.sh
 ```
 
-`HELIOS_AUTO_LIVE_SYMBOLS=core` fetches a built-in liquid advisor universe from
-yfinance, persists those histories locally, and refreshes them every five
-minutes. Use `HELIOS_AUTO_LIVE_SYMBOLS=starter_models` to cover every holding in
-the example model templates under `examples/models/`. You can also provide a
-comma-separated ticker list. Live polling fetches symbols with bounded parallel
-network workers (`HELIOS_AUTO_LIVE_MAX_WORKERS`, default `6`, max `16`) and then
-persists the validated provider histories sequentially. This is a polling
-workflow using the latest available provider data, not a streaming quote feed;
-failed provider calls leave existing/sample data untouched and logged as failed
+`HELIOS_AUTO_LIVE_SYMBOLS=core` fetches a built-in liquid advisor universe,
+persists those histories locally, and refreshes them every five minutes. Use
+`HELIOS_AUTO_LIVE_SYMBOLS=starter_models` to cover every holding in the governed
+model templates under `examples/models/`, or provide a comma-separated ticker
+list. Outside institutional mode, live polling follows the configured provider
+order. Under institutional controls, polling is fail-closed and uses only the
+approved licensed primary/backup pair; it does not fall through to a public
+interface such as yfinance. Workers are bounded (`HELIOS_AUTO_LIVE_MAX_WORKERS`, default
+`6`, max `16`) and persistence remains sequential. This is a polling workflow
+using the latest available provider data, not a streaming quote feed;
+failed provider calls leave existing validated data untouched and are logged as failed
 refresh attempts. Successful live refreshes also re-check pending Signal Journal
 entries, so paper forward results are measured automatically once refreshed
 history covers the original signal horizon.
 
-The React **Signal Journal** workspace shows logged signal history, pending
+The React **Signal Journal** workspace shows signals deliberately recorded from
+Analysis, pending
 versus measured outcomes, paper hit rate, benchmark-relative alpha,
 model-by-model evidence, and drift over time. Headline hit-rate and alpha
 metrics are computed only from entries that were real-research-eligible when
-recorded (demo entries are counted separately and never measured against
+recorded (ineligible legacy entries are excluded and never measured against
 later live data), and benchmark alpha requires a real-source benchmark
 history. It is paper tracking only and
 never represents live orders, brokerage execution, or a performance guarantee.
 
 Set `HELIOS_AUTO_LIVE_SYMBOLS=off` to disable automatic polling explicitly.
+
+### Institutional operating controls
+
+The **Data Quality** workspace also exposes the provider and operations control
+plane. A data steward can ask the server to fetch real side-by-side adjusted-price
+comparisons for the configured minimum symbol set, record hashed reconciliation
+evidence, approve a currently licensed and
+entitled primary/backup pair, sync monitored data-quality conditions into
+incidents, assign/acknowledge/resolve those incidents, and run an isolated
+encrypted-backup restore test. Provider credentials are never treated as proof
+of contractual rights. The **Models** workspace separately records
+version-specific independent validation and time-bounded exceptions with named
+owners and compensating controls.
+
+The local application cannot supply the external facts those controls represent:
+provider contracts and entitlements, an independently managed SSO/MFA service,
+a trusted certificate authority, WORM/SIEM retention, independent human model
+review, and institutional backup/key custody. Missing controls remain visible
+and fail closed rather than being replaced with defaults.
+
+Institutional research readiness also requires durable encrypted persistence, a
+recent isolated backup-restore verification, intact application and privileged
+audit chains, no unresolved critical incident, a named incident owner,
+authentication, MFA or trusted-proxy SSO, and trusted TLS. These checks gate
+approval and external-facing report export; the rest of the application remains
+available so an operator can remediate the blocker.
+
+Decision-bearing artifacts use immutable evidence envelopes with source/provider,
+retrieval time, transformations, model and calculation versions, series hashes,
+date ranges, and row counts. The replay endpoint independently recalculates
+signals, decisions, forward results, benchmark alpha, governance facts, and report
+HTML. A valid content hash by itself is not reported as a successful calculation
+replay.
 
 ### Evidence Lab (walk-forward validation)
 
@@ -291,12 +333,12 @@ subsequent forward return over 5/21/63-day horizons against a benchmark. The
 payload includes hit rate with a 90% confidence band, false-positive rate on
 directional calls, per-regime (risk-on/neutral/risk-off) sensitivity, and
 signal-decay rows across horizons. Every input is strictly backward-looking —
-no lookahead — and the lab is blocked entirely for demo/simulated data or
+no lookahead — and the lab is blocked entirely for ineligible data or
 histories shorter than the training window plus the longest horizon. A
 prospective-validation panel layers in same-target Signal Journal entries so
 historical walk-forward evidence and live paper tracking sit side by side.
 
-### Risk Analytics and the client risk pack
+### Risk Analytics and governed risk packs
 
 The **Risk Analytics** workspace (`/api/model/risk`) summarizes deterministic
 portfolio risk evidence: sector and factor exposure, volatility budget versus
@@ -304,10 +346,12 @@ the mandate target, marginal risk contribution per holding, correlation
 clusters, drawdown stress, deterministic scenario shocks (equity, rates,
 growth compression, defensive rotation, liquidity), historical stress replay,
 and liquidity flags built from observed live/uploaded dollar volume where
-available. A client-ready risk pack condenses this into advisor language,
-including "what breaks this model" drivers and a risk posture
-(review_ready/watch/elevated). It is analysis-only and never alters signal or
-forecast methodology.
+available. Internal snapshots label this section as analysis-only risk evidence.
+Only an eligible model requested for `client_review` or
+`investment_committee`, with current governance and institutional controls, may
+carry external-ready/client risk-pack branding. The pack includes "what breaks
+this model" drivers and a risk posture (review_ready/watch/elevated); it never
+alters signal or forecast methodology.
 
 ### Model governance, validation, and approval packets
 
@@ -393,8 +437,8 @@ Before any provider call, Helios builds a sanitized payload: client/model names
 are redacted by default, raw uploaded files are omitted, full price histories are
 omitted, and holdings are omitted unless `HELIOS_AI_SEND_HOLDINGS=1`. Payloads
 prefer computed metrics, drivers, warnings, provenance, persistence metadata,
-source/date ranges, row counts, and analysis-only disclaimers. Demo or blocked
-payloads must remain labeled as not real market evidence.
+source/date ranges, row counts, and analysis-only disclaimers. Blocked payloads
+must remain labeled as unavailable for research.
 
 Provider output is parsed into a fixed JSON schema and checked for unsupported
 numeric claims, prohibited assurance phrases, data-mode drift, and attempts to
@@ -410,7 +454,7 @@ rm -rf .helios/
 ```
 
 If `HELIOS_DB_PATH` points somewhere else, delete that file instead. The next
-start recreates an empty schema and reloads only bundled demo samples.
+start recreates an empty, research-blocked schema.
 
 ### Importing a client model (portfolio)
 
@@ -418,9 +462,9 @@ Upload an **Excel (`.xlsx` / `.xlsm`) or CSV/TSV** with a **Ticker** column and
 (optionally) a **Weight** column, pick a **mandate**, and add free-text context.
 Weights given as percentages (summing ~100) or fractions (summing ~1) are both
 accepted; duplicate tickers are merged; missing weights become equal weight.
-Prices for each holding are resolved from samples/uploads/cache, then live
-`yfinance` when available, then deterministic simulation, with every source
-flagged.
+Prices for each holding are resolved only from retained live or uploaded
+histories. Missing holdings remain explicitly blocked; analysis reads never
+trigger provider calls or generate replacement prices.
 
 The React **Models** workspace also includes a governed starter model library:
 AI infrastructure, quality compounders, defense/security, energy/grid,
@@ -458,7 +502,8 @@ If `yfinance` is installed and you have a connection, enter a ticker in the
 **Live market data** box to pull ~2y of history plus recent news headlines.
 Live histories are dividend/split-adjusted total-return prices (`auto_adjust`);
 uploaded CSVs are used exactly as provided. The
-platform degrades gracefully to sample/uploaded data when offline.
+platform keeps the last validated retained histories when offline and blocks
+research where eligible evidence is absent.
 Refresh-all runs on a bounded worker pool, every provider call is
 time-bounded and concurrency-capped, and tickers that fail to resolve are
 not retried for five minutes (a successful upload or fetch clears the
@@ -472,13 +517,17 @@ cooldown immediately).
 serve.py              production entrypoint — waitress on plain HTTP; HELIOS_TLS=1 serves self-signed HTTPS via werkzeug (fails closed)
 app.py                thin entry point: loads the local .env, then wires helios_web.init_app()
 helios_web/           Flask web layer — one blueprint per section
-  core.py             shared app, Basic-Auth gate + lockout, CSRF heuristic, security headers
+  core.py             shared app, auth/RBAC/MFA/session gate, lockout, CSRF and security headers
   localenv.py         repo-local .env loading (before the engine reads the environment)
   data.py             tickers, uploads, live fetch/refresh, data status, data quality
   analysis.py         command center, analyze, strategy, opportunities, evidence lab, journal
   models.py           model list/upload/analysis, library, editor, governance, validation, clinic, risk
   reports.py          advisor reports and saved snapshot exports
   ai.py               optional AI Copilot endpoints
+  evidence.py         immutable evidence-envelope replay endpoint
+  trials.py           preregistered validation-trial endpoints
+  institutional.py    provider cutovers, incidents, backups, independent validation
+  security.py         security posture and expiring local session endpoints
   spa.py              React SPA static serving (build-instructions page when dist is absent)
 frontend/            React + Vite + TypeScript research terminal
   src/api/           typed client for the Flask APIs
@@ -489,7 +538,7 @@ frontend/            React + Vite + TypeScript research terminal
                      Data Quality, Analysis
 engine/
   _common.py          shared deterministic helpers (paper-hit rule, env parsing, series utils)
-  data.py             data store, samples, CSV import, live fetch, holding resolution
+  data.py             data store, CSV import, explicit live fetch, holding resolution
   edgar.py            SEC EDGAR client: ticker→registrant, N-PORT holdings, former names
   holdings.py         fund look-through: see inside ETFs/funds, roll exposures up to a model
   fundamentals.py     per-holding valuation/yield/growth (FMP analyst consensus preferred when HELIOS_FMP_KEY is set; yfinance fallback)
@@ -497,6 +546,13 @@ engine/
   macro.py            forward macro & sector valuation anchors (offline fallbacks for RF/ERP)
   cma.py              building-block forward expected return (yield + growth + valuation reversion)
   persistence.py      encrypted SQLite store, snapshot debounce, startup backups, refresh logs
+  evidence.py         immutable evidence envelopes, content hashes, replay verification
+  research_gate.py    shared provenance/freshness/coverage/validation/provider gates
+  provider_registry.py explicit license, entitlement, SLA, reconciliation and cutover records
+  operations.py       privileged hash chain, incident lifecycle and isolated restore tests
+  independent_validation.py version-specific reviews and controlled exceptions
+  trials.py           preregistered hypotheses, locked parameters and prospective assessments
+  costs.py            paper/proposed/actual cost-layer normalization
   provenance.py       data-provenance gates for real-research (price) and forward (composition) eligibility
   data_quality.py     freshness/coverage diagnostics and persisted alert inputs
   analytics_cache.py  bounded keyed memo cache for per-series analytics
@@ -529,11 +585,16 @@ engine/
 
 | Endpoint | Purpose |
 |----------|---------|
-| `GET /api/command-center` | Pro dashboard payload with regime, real-data opportunities, risks, model alerts and research queue |
+| `GET /api/command-center` | readiness, blockers, recent changes, one next action, regime, opportunities, risks and queue |
 | `GET /api/data/status` | SQLite/database health, real-data counts, model coverage, missing tickers and refresh log |
 | `GET /api/data-quality` | institutional research-readiness dashboard: stale symbols, missing data, short histories, source conflicts, refresh failures and coverage gaps |
 | `GET /api/signal-journal` | local paper-performance journal with recorded signals, summary hit-rate metrics, benchmark comparison, model evidence and drift |
 | `GET /api/evidence-lab` | walk-forward evidence for an instrument or model (`kind`, `id`, optional `horizon`/`train_window`/`step`) |
+| `GET /api/evidence/<id>` | verify an immutable evidence envelope and independently recalculate supported deterministic facts |
+| `GET/POST /api/trials` | list or preregister immutable hypotheses, parameters, variants and ownership |
+| `GET /api/trials/<id>` | retrieve a preregistered trial and linked prospective evidence |
+| `POST /api/trials/<id>/assess` | record paper/proposed/actual net-of-cost assessment layers |
+| `POST /api/trials/<id>/close` | close a trial without rewriting its locked registration |
 | `POST /api/data/refresh` | refresh existing live instruments (`{ "symbol": "AAPL" }` or `{ "all": true }`) |
 | `GET /api/opportunities` | Opportunity Radar rankings; returns no placeholder rows when real data is unavailable |
 | `GET /api/strategy/analyze` | Strategy Lab for a single instrument with no-lookahead evidence |
@@ -541,12 +602,16 @@ engine/
 | `GET /api/model/clinic` | Portfolio Clinic diagnostics and hypothetical, analysis-only suggestions |
 | `GET /api/lookthrough?ticker=SYM` | Fund look-through: real SEC N-PORT holdings of one ETF/mutual fund, with former-name (predecessor) linkage and forward-data provenance — needs no price history |
 | `GET /api/model/lookthrough?id=ID` | Roll every holding's look-through up to a model-level real exposure (asset-class weights, underlying concentration) with composition-coverage provenance |
-| `GET /api/model/forward?id=ID` | Forward expected return from look-through fundamentals via a building-block CMA (yield + earnings growth + valuation reversion), coverage-weighted toward the mandate anchor — needs no price history, with every block and coverage % exposed |
+| `GET /api/model/forward?id=ID` | pure retained-data read of the point-in-time building-block CMA |
+| `POST /api/model/forward?id=ID` | explicitly refresh point-in-time fundamentals, then rebuild the forward CMA |
 | `GET /api/model/risk` | risk and exposure analytics plus the client risk pack for a model |
 | `GET /api/model-governance` | governance workspace: per-model version, approval status, risk gate and recent events |
 | `POST /api/model-governance/<id>/events` | record a governance event; approve/reject requires a committee note (and PIN when configured) |
 | `GET /api/model-governance/<id>/approval-packet` | committee approval packet as JSON (`.html` / `.pdf` variants export the same packet) |
 | `GET /api/model-validation` | champion/challenger validation dashboard with scores, grades and drift alerts |
+| `GET/POST /api/models/<id>/independent-validation` | current status/history or a version-specific independent review |
+| `POST /api/models/<id>/validation-exceptions` | open a time-bounded exception with owner and compensating controls |
+| `POST /api/models/<id>/validation-exceptions/<exception-id>` | resolve an exception through the owning model route |
 | `GET /api/models/<id>/editor` | current editable holdings with a save preview |
 | `POST /api/models/<id>/editor/preview` | non-mutating preview of proposed holdings (normalization, validation, diff) |
 | `POST /api/models/<id>/editor` | save edited holdings with a mandatory change note; records a governance snapshot |
@@ -566,6 +631,14 @@ engine/
 | `GET /api/analyze?ticker=SYM&horizon=N` | single-instrument analysis payload, including the engine's `data_provenance` verdict |
 | `POST /api/upload` | import a single-instrument price CSV (multipart `file`, optional `symbol`) |
 | `POST /api/live` | fetch live data `{ "symbol": "GOOG" }` |
+| `GET /api/providers` | provider configuration, license/entitlement/SLA status and approved cutovers |
+| `POST /api/providers/reconciliations` | server-fetch and record hashed side-by-side primary/backup observations for supplied symbols |
+| `POST /api/providers/cutovers` | approve a current, reconciled, institutionally ready provider pair |
+| `GET /api/operations/status` | incidents, owners, backup state, encryption, and both audit chains |
+| `POST /api/operations/incidents/sync` | reconcile monitored conditions into the incident lifecycle |
+| `POST /api/operations/backup/verify` | isolated in-memory decrypt/restore plus integrity, schema and audit checks |
+| `GET /api/security/status` | principal, roles, MFA, session, transport, and audit posture without secrets |
+| `POST/DELETE /api/auth/session` | create or revoke an expiring HttpOnly local session |
 | `GET /api/ai/status` | AI Copilot provider availability without exposing secrets |
 | `POST /api/ai/opportunity/explain` | explain a sanitized Opportunity Radar payload |
 | `POST /api/ai/opportunity/critique` | red-team a sanitized Opportunity Radar payload |
@@ -586,14 +659,16 @@ Common local commands:
 | Install tested Python pins (CI parity) | `./.venv/bin/python -m pip install -r requirements.lock` |
 | Install by ranges instead (fresh resolve) | `./.venv/bin/python -m pip install -r requirements-dev.txt` |
 | Install frontend deps | `npm --prefix frontend ci` |
-| Local/LAN server | `./run.sh` |
+| Local production server | `./run.sh` |
 | Localhost Flask dev server | `./run.sh --dev` |
 | Vite dev server | `npm --prefix frontend run dev` |
 | Frontend typecheck | `npm --prefix frontend run typecheck` |
 | Frontend lint (ESLint) | `npm --prefix frontend run lint` |
+| Frontend component tests | `npm --prefix frontend run test` |
 | Frontend production build | `npm --prefix frontend run build` |
+| Browser workflow tests | `npm --prefix frontend run test:e2e` (after build and Playwright Chromium install) |
 | Python tests | `./.venv/bin/python -m pytest` |
-| Python tests with coverage (CI flags) | `./.venv/bin/python -m pytest --cov=engine --cov=app --cov=helios_web --cov-report=term-missing` |
+| Python tests with coverage (CI flags) | `./.venv/bin/python -m pytest --cov=engine --cov=app --cov=helios_web --cov-report=term-missing --cov-fail-under=80` |
 | Python syntax compile | `./.venv/bin/python -m compileall app.py serve.py engine helios_web tests` |
 | Design spec JSON validation | `./.venv/bin/python -m json.tool .design_spec.json >/dev/null` |
 
@@ -605,13 +680,17 @@ local ladder is:
 ./.venv/bin/python -m pip install -r requirements.lock
 npm --prefix frontend ci
 npm --prefix frontend run typecheck
+npm --prefix frontend run lint
+npm --prefix frontend run test
 npm --prefix frontend run build
+npx --prefix frontend playwright install chromium
+npm --prefix frontend run test:e2e
 ./.venv/bin/python -m compileall app.py serve.py engine helios_web tests
 ./.venv/bin/python -m json.tool .design_spec.json >/dev/null
-./.venv/bin/python -m pytest --cov=engine --cov=app --cov=helios_web --cov-report=term-missing
+./.venv/bin/python -m pytest --cov=engine --cov=app --cov=helios_web --cov-report=term-missing --cov-fail-under=80
 ```
 
-The test suite is offline-only: it exercises deterministic sample/upload data,
+The test suite is offline-only: it exercises test-only synthetic fixtures and uploaded data,
 portfolio parsing/NAV construction, indicator/sign/forecast output shapes,
 sentiment scoring, Flask JSON API smoke paths, startup env validation, SQLite
 persistence workflow, and AI Copilot behavior with fake/mocked providers. Tests
@@ -620,9 +699,10 @@ cases, and never call Claude, OpenAI, or local model servers. CI runs the ladder
 above on push and pull request using Python 3.13 and Node 22.
 
 No cloud deployment config is present in this repo. The verifiable production
-entrypoint is `serve.py` via `./run.sh`, which serves a local/LAN WSGI app with
-waitress unless `HELIOS_TLS=1` selects the self-signed HTTPS path (served
-by werkzeug's TLS-capable server).
+entrypoint is `serve.py` via `./run.sh`. It defaults to localhost waitress;
+direct TLS uses werkzeug's development TLS server on loopback only.
+Institutional public/LAN binds fail closed and require an external production
+reverse proxy.
 
 ---
 
@@ -631,18 +711,19 @@ by werkzeug's TLS-capable server).
 Going live on a network was reviewed adversarially; the following safeguards are
 built in:
 
-- **Authentication** — HTTP Basic Auth gates *every* route (pages, API, static
-  assets) with a constant-time credential check. Auth, CSRF, and lockout
+- **Authentication and authorization** — Basic Auth or a trusted-proxy SSO
+  principal gates every route. Role permissions separate viewing, research,
+  data operations, sponsorship, independent validation, approval, and admin.
+  MFA can be required for privileged actions. Auth, CSRF, and lockout
   errors return the standard JSON error envelope on `/api/*` paths (plain
   text elsewhere so the browser login prompt still works).
 - **Brute-force throttle** — failed logins are counted per remote IP with a
   short per-attempt delay; ten failures trigger a 60-second lockout (HTTP 429).
 - **CSRF heuristic** — non-GET requests with cross-site browser fetch metadata
   (`Sec-Fetch-Site`/`Origin`) are rejected with 403 before any handler runs.
-- **Encryption (opt-in)** — `HELIOS_TLS=1` serves self-signed HTTPS so the login
-  is not sent in cleartext, and it fails closed: if the certificate cannot be
-  created, startup aborts instead of silently falling back to plain HTTP. On
-  plain HTTP the startup banner warns explicitly.
+- **Trusted transport** — localhost is the default. Institutional mode refuses
+  direct public/LAN binding. A production reverse proxy must terminate trusted
+  TLS while Helios remains on loopback so its origin cannot be bypassed.
 - **XSS-safe rendering** — all user-supplied / external strings (instrument
   names, news headlines) are HTML-escaped before display; a strict
   Content-Security-Policy (`script-src 'self'` on every response, no CDN
@@ -666,13 +747,20 @@ built in:
 - **AI key isolation** — AI provider keys are read from server-side environment
   variables only. They are not exposed through `/api/ai/status`, frontend code,
   SQLite persistence, logs, `.env.example`, or tests.
+- **Immutable operating evidence** — deterministic actions and reports carry
+  canonical inputs, outputs, provenance, model/calculation versions, and series
+  hashes. Supported artifacts are independently recalculated during replay;
+  privileged operations and application audit events are hash-chained. Encrypted
+  backups are decrypted into an isolated in-memory SQLite connection for
+  integrity, schema, count, and audit-chain restore tests.
 
-**Residual notes:** uploaded instruments and portfolio models are a shared local
-advisor workspace backed by SQLite, not a multi-tenant permission system. Keep
-the database local and do not place `.helios/` in source control. The
-self-signed TLS cert triggers a one-time browser warning; delete `certs/` to
-regenerate it (e.g. after your LAN IP changes). On an untrusted network, prefer
-`HELIOS_TLS=1` or bind to `127.0.0.1` and reach it over an SSH tunnel.
+**External controls still required:** contracts and entitlements for primary and
+backup data providers; a separately managed IdP/MFA and trusted reverse proxy;
+CA-issued certificate lifecycle; WORM/SIEM retention for privileged logs;
+independent human model validation; and institutional key/backup custody. Helios
+records and enforces their configuration state but does not fabricate those
+assurances. Keep `.helios/`, keys, certificates, and client data out of source
+control.
 
 ---
 
@@ -703,10 +791,9 @@ regenerate it (e.g. after your LAN IP changes). On an untrusted network, prefer
   mixed-history model analyzable for forward research, but it is **not** a
   performance track record and will differ from a daily-rebalanced common-window
   book or real buy-and-hold/drifting-weight account.
-- **Holding prices may be simulated.** Any ticker that can't be resolved live or
-  from samples falls back to a deterministic simulation, flagged per-holding and
-  with a portfolio-level honesty banner. Simulated numbers are never presented as
-  real market data.
+- **Missing holding history blocks research.** Helios does not fabricate a
+  replacement series. Fetch or upload eligible market history before relying on
+  portfolio evidence.
 - **Insights and the conviction rationale are deterministic and offline** — no
   LLM. Every threshold comes from the mandate config, so identical inputs always
   yield the identical explanation.

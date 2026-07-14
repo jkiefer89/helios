@@ -1,10 +1,8 @@
 """Price-history data layer.
 
-Holds an in-memory store of per-instrument OHLCV DataFrames. Data can come from:
-  1. Bundled synthetic sample series — OPT-IN only (HELIOS_LOAD_SAMPLES=1;
-     a fresh production start shows the honest empty state instead).
-  2. A CSV uploaded by the user (client investment-model export).
-  3. A live pull via yfinance, if the package is installed and the network is up.
+Holds an in-memory store of per-instrument OHLCV DataFrames. Runtime data can
+come only from an uploaded history or an explicit live-provider operation.
+Synthetic series live exclusively in the offline test fixtures.
 
 Every DataFrame is indexed by a DatetimeIndex and exposes at least a 'close'
 column; 'open'/'high'/'low'/'volume' are included when known.
@@ -13,9 +11,9 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 import io
-import hashlib
 import json as _json
 import os
+import urllib.parse
 import urllib.request
 import re
 import threading
@@ -30,7 +28,7 @@ from . import analytics_cache
 
 # Cap user-added instruments so repeated uploads/fetches can't grow memory
 # without bound. Keep it high enough for a serious multi-theme research
-# universe plus model holdings; samples are never counted against this limit.
+# universe plus model holdings.
 MAX_USER_INSTRUMENTS = 250
 DEFAULT_LIVE_REFRESH_WORKERS = 6
 MAX_LIVE_REFRESH_WORKERS = 16
@@ -107,11 +105,12 @@ class Instrument:
     symbol: str
     name: str
     df: pd.DataFrame
-    source: str  # "sample" | "upload" | "live"
+    source: str  # "upload" | "live"
     headlines: list = field(default_factory=list)
     # Which price feed produced df ("fmp_eod_adjusted" | "yfinance" | "" for
     # non-live sources) — persisted so every history stays label-honest.
     price_provider: str = ""
+    retrieved_at: str = ""
 
 
 _STORE: dict[str, Instrument] = {}
@@ -138,12 +137,30 @@ def all_instruments() -> list[Instrument]:
         return list(_STORE.values())
 
 
+def snapshot_instruments() -> dict[str, Instrument]:
+    """Return a cheap mapping snapshot for request-level rollback.
+
+    Ingestion replaces Instrument objects rather than mutating their frames, so
+    copying the mapping is sufficient and avoids duplicating large histories.
+    """
+    with _STORE_LOCK:
+        return dict(_STORE)
+
+
+def restore_instruments(snapshot: dict[str, Instrument]) -> None:
+    """Restore an in-memory mapping after a privileged transaction rolls back."""
+    with _STORE_LOCK:
+        _STORE.clear()
+        _STORE.update(snapshot)
+    analytics_cache.invalidate()
+
+
 def register(inst: Instrument) -> None:
     sym = inst.symbol.upper()
     with _STORE_LOCK:
         prev = _STORE.get(sym)
         _STORE[sym] = inst
-        # Evict oldest user-added instruments (samples are never evicted).
+        # Evict oldest user-added instruments; test-only fixtures remain isolated.
         user_keys = [k for k, v in _STORE.items() if v.source != "sample"]
         for stale in user_keys[:-MAX_USER_INSTRUMENTS] if len(user_keys) > MAX_USER_INSTRUMENTS else []:
             _STORE.pop(stale, None)
@@ -226,99 +243,6 @@ def _record_price_revisions(sym: str, prev: Instrument | None, inst: Instrument)
                 sym, revisions, provider=getattr(inst, "price_provider", ""))
     except Exception:
         return
-
-
-# --------------------------------------------------------------------------- #
-# Synthetic sample data
-# --------------------------------------------------------------------------- #
-# (symbol, name, annual_drift, annual_vol, start_price, regime_flips, seed)
-_SAMPLE_SPEC = [
-    ("AAPL", "Apple Inc.",            0.18, 0.26, 120.0, True,  1),
-    ("MSFT", "Microsoft Corp.",       0.21, 0.24, 240.0, True,  2),
-    ("NVDA", "NVIDIA Corp.",          0.42, 0.52,  45.0, True,  3),
-    ("TSLA", "Tesla Inc.",            0.12, 0.58, 210.0, True,  4),
-    ("SPY",  "S&P 500 ETF",           0.10, 0.16, 380.0, False, 5),
-    ("BTC-USD", "Bitcoin / USD",      0.35, 0.70, 22000.0, True, 6),
-]
-
-# Canned headlines so the news/sentiment panel demonstrates value offline.
-_SAMPLE_NEWS = {
-    "AAPL": [
-        "Apple beats earnings expectations as services revenue hits record",
-        "Analysts upgrade Apple on strong iPhone demand and margin growth",
-        "Supply chain probe weighs on Apple sentiment ahead of launch",
-    ],
-    "MSFT": [
-        "Microsoft cloud growth surges, Azure outperforms estimates",
-        "Microsoft raises guidance on robust AI and enterprise demand",
-        "Regulators open antitrust probe into Microsoft bundling",
-    ],
-    "NVDA": [
-        "NVIDIA rallies to record high on blowout data-center sales",
-        "Analysts bullish as NVIDIA dominates AI accelerator market",
-        "NVIDIA faces export restrictions, shares slip on China weakness",
-    ],
-    "TSLA": [
-        "Tesla deliveries miss estimates, shares plunge in selloff",
-        "Tesla cuts prices again, pressuring margins and profit outlook",
-        "Tesla unveils new model, bulls cheer long-term growth story",
-    ],
-    "SPY": [
-        "Stocks rally as inflation cools and Fed signals rate pause",
-        "Market selloff deepens on recession fears and weak data",
-        "Broad index recovers as earnings beat lowered expectations",
-    ],
-    "BTC-USD": [
-        "Bitcoin surges past resistance on strong institutional inflows",
-        "Crypto selloff accelerates as regulators tighten oversight",
-        "Bitcoin rallies on ETF optimism and bullish on-chain signals",
-    ],
-}
-
-
-def _simulate_series(drift, vol, start, flips, seed, days=760):
-    """Geometric Brownian motion with optional regime shifts -> OHLCV frame."""
-    rng = np.random.default_rng(seed)
-    dt = 1.0 / 252.0
-    mu = drift
-    daily = np.empty(days)
-    # Regime segments give the series realistic trending/choppy stretches.
-    segments = 4 if flips else 1
-    bounds = np.linspace(0, days, segments + 1).astype(int)
-    regime_mult = rng.uniform(-1.2, 1.6, size=segments) if flips else np.array([1.0])
-    for s in range(segments):
-        a, b = bounds[s], bounds[s + 1]
-        seg_mu = mu * (regime_mult[s] if flips else 1.0)
-        seg_vol = vol * (1.0 + 0.4 * rng.standard_normal()) if flips else vol
-        seg_vol = max(seg_vol, 0.05)
-        n = b - a
-        daily[a:b] = (seg_mu - 0.5 * seg_vol**2) * dt + seg_vol * np.sqrt(dt) * rng.standard_normal(n)
-
-    close = start * np.exp(np.cumsum(daily))
-    # Build plausible OHLC around the close path.
-    intraday = np.abs(rng.standard_normal(days)) * vol * np.sqrt(dt) * close
-    open_ = np.empty(days)
-    open_[0] = start
-    open_[1:] = close[:-1]
-    high = np.maximum(open_, close) + 0.5 * intraday
-    low = np.minimum(open_, close) - 0.5 * intraday
-    volume = (rng.lognormal(15.5, 0.6, days)).astype(np.int64)
-
-    end = datetime(2025, 6, 13)
-    idx = pd.bdate_range(end=end, periods=days)
-    return pd.DataFrame(
-        {"open": open_, "high": high, "low": low, "close": close, "volume": volume},
-        index=idx,
-    )
-
-
-def load_samples() -> None:
-    """Populate the store with the synthetic universe. Idempotent."""
-    for symbol, name, drift, vol, start, flips, seed in _SAMPLE_SPEC:
-        if symbol in _STORE:
-            continue
-        df = _simulate_series(drift, vol, start, flips, seed)
-        register(Instrument(symbol, name, df, "sample", list(_SAMPLE_NEWS.get(symbol, []))))
 
 
 # --------------------------------------------------------------------------- #
@@ -423,6 +347,7 @@ _PERIOD_DAYS = {"1mo": 31, "3mo": 93, "6mo": 186, "1y": 366, "2y": 731, "5y": 18
 # HELIOS_PRICE_SOURCE=fmp makes the KEYED paid feed primary (dividend-adjusted,
 # matching yfinance auto_adjust semantics) with yfinance as fallback.
 _FMP_EOD_MAX_BYTES = 16 * 1024 * 1024
+_TIINGO_EOD_MAX_BYTES = 16 * 1024 * 1024
 
 
 def _clean_price_frame(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
@@ -453,13 +378,15 @@ def _fmp_price_history(symbol: str, period: str = "2y") -> pd.DataFrame | None:
            f"?symbol={symbol}&from={start}&apikey={key}")
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Helios Research Terminal"})
-        with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310 (fixed https host)
-            payload = _json.loads(resp.read(_FMP_EOD_MAX_BYTES + 1).decode("utf-8", errors="replace"))
+        with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310 (configured HTTPS provider)
+            raw = resp.read(_FMP_EOD_MAX_BYTES + 1)
+        if len(raw) > _FMP_EOD_MAX_BYTES:
+            return None
+        payload = _json.loads(raw.decode("utf-8", errors="replace"))
     except Exception:
         return None
-    rows = payload if isinstance(payload, list) else []
     records = []
-    for row in rows:
+    for row in payload if isinstance(payload, list) else []:
         if not isinstance(row, dict) or not row.get("date"):
             continue
         records.append({
@@ -470,85 +397,195 @@ def _fmp_price_history(symbol: str, period: str = "2y") -> pd.DataFrame | None:
         })
     if not records:
         return None
-    df = pd.DataFrame(records).set_index("date")
     try:
-        return _clean_price_frame(df, symbol)
+        return _clean_price_frame(pd.DataFrame(records).set_index("date"), symbol)
     except RuntimeError:
         return None
 
 
-def reconcile_price_sources(symbol: str, period: str = "3mo") -> dict:
-    """Side-by-side FMP vs yfinance closes — the evidence that justifies (or
-    blocks) a price-source cutover. Never rewrites persisted history."""
+def _tiingo_price_history(symbol: str, period: str = "2y") -> pd.DataFrame | None:
+    """Adjusted daily history from Tiingo, or None on provider failure."""
+    key = os.environ.get("HELIOS_TIINGO_KEY", "").strip()
+    if not key:
+        return None
+    days = _PERIOD_DAYS.get((period or "2y").lower(), 731)
+    start = (datetime.now() - timedelta(days=days)).date().isoformat()
+    base = os.environ.get("HELIOS_TIINGO_BASE_URL", "https://api.tiingo.com").rstrip("/")
+    quoted_symbol = urllib.parse.quote(symbol, safe="")
+    url = (
+        f"{base}/tiingo/daily/{quoted_symbol}/prices?startDate={start}"
+        f"&resampleFreq=daily&token={urllib.parse.quote(key, safe='')}"
+    )
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Helios Research Terminal"})
+        with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310 (configured HTTPS provider)
+            raw = resp.read(_TIINGO_EOD_MAX_BYTES + 1)
+        if len(raw) > _TIINGO_EOD_MAX_BYTES:
+            return None
+        payload = _json.loads(raw.decode("utf-8", errors="replace"))
+    except Exception:
+        return None
+    records = []
+    for row in payload if isinstance(payload, list) else []:
+        if not isinstance(row, dict) or not row.get("date"):
+            continue
+        records.append({
+            "date": row["date"],
+            "open": row.get("adjOpen"),
+            "high": row.get("adjHigh"),
+            "low": row.get("adjLow"),
+            "close": row.get("adjClose"),
+            "volume": row.get("adjVolume") or row.get("volume"),
+        })
+    if not records:
+        return None
+    try:
+        return _clean_price_frame(pd.DataFrame(records).set_index("date"), symbol)
+    except RuntimeError:
+        return None
+
+
+def _provider_price_history(provider: str, symbol: str, period: str) -> pd.DataFrame | None:
+    key = str(provider or "").strip().lower()
+    if key == "fmp":
+        return _fmp_price_history(symbol, period)
+    if key == "tiingo":
+        return _tiingo_price_history(symbol, period)
+    if key == "yfinance" and HAS_YF:
+        try:
+            with _YF_SEMAPHORE:
+                history = _yf.Ticker(symbol).history(period=period, auto_adjust=True, timeout=10)
+            if history is not None and not history.empty:
+                return _clean_price_frame(history.rename(columns=str.lower)[["open", "high", "low", "close", "volume"]], symbol)
+        except Exception:
+            return None
+    return None
+
+
+def _price_provider_order() -> list[str]:
+    configured = os.environ.get("HELIOS_PRICE_SOURCE", "yfinance").strip().lower()
+    order = [configured] if configured in {"fmp", "tiingo", "yfinance"} else ["yfinance"]
+    try:
+        from . import provider_registry
+
+        readiness = provider_registry.domain_readiness("prices")
+        cutover = readiness.get("cutover") if isinstance(readiness, dict) else None
+        if readiness.get("passed") and isinstance(cutover, dict):
+            return [
+                provider for provider in (
+                    str(cutover.get("primary_provider") or ""),
+                    str(cutover.get("backup_provider") or ""),
+                ) if provider
+            ]
+        if provider_registry.controls_required():
+            # Institutional mode never falls through to an unapproved public
+            # adapter while provider controls are incomplete.
+            return []
+    except Exception:
+        # A broken registry is itself a failed control. Institutional mode
+        # must never turn that outage into permission to use a public fallback.
+        institutional = os.environ.get("HELIOS_INSTITUTIONAL_CONTROLS", "1").strip().lower()
+        if institutional not in {"0", "false", "no", "off"}:
+            return []
+    for provider in ("fmp", "tiingo", "yfinance"):
+        if provider not in order:
+            order.append(provider)
+    return [provider for provider in order if provider]
+
+
+def reconcile_price_sources(
+    symbol: str,
+    period: str = "3mo",
+    primary_provider: str = "fmp",
+    backup_provider: str = "yfinance",
+) -> dict:
+    """Side-by-side adjusted closes; never rewrites persisted history."""
     symbol = clean_symbol(symbol, fallback="")
     if not symbol:
         raise ValueError("Invalid ticker symbol.")
-    fmp = _fmp_price_history(symbol, period)
-    yf_df = None
-    if HAS_YF:
-        try:
-            with _YF_SEMAPHORE:
-                hist = _yf.Ticker(symbol).history(period=period, auto_adjust=True, timeout=10)
-            if hist is not None and not hist.empty:
-                yf_df = _clean_price_frame(hist.rename(columns=str.lower)[["close"]], symbol)
-        except Exception:
-            yf_df = None
-    if fmp is None or yf_df is None:
+    primary_key = str(primary_provider or "").strip().lower()
+    backup_key = str(backup_provider or "").strip().lower()
+    if primary_key == backup_key or primary_key not in {"fmp", "tiingo", "yfinance"} or backup_key not in {"fmp", "tiingo", "yfinance"}:
+        raise ValueError("Choose two different supported price providers.")
+    try:
+        from . import provider_registry
+
+        for provider in (primary_key, backup_key):
+            control = provider_registry.provider_contract_readiness(provider, "prices")
+            if not control["passed"]:
+                raise ValueError(control["detail"])
+    except ValueError:
+        raise
+    except Exception as exc:
+        if os.environ.get("HELIOS_INSTITUTIONAL_CONTROLS", "1").strip().lower() not in {
+            "0", "false", "no", "off",
+        }:
+            raise RuntimeError(f"Provider controls unavailable; reconciliation blocked: {exc}") from exc
+    primary = _provider_price_history(primary_key, symbol, period)
+    backup = _provider_price_history(backup_key, symbol, period)
+    if primary is None or backup is None:
         return {"symbol": symbol, "status": "unavailable",
-                "fmp_rows": int(len(fmp)) if fmp is not None else 0,
-                "yfinance_rows": int(len(yf_df)) if yf_df is not None else 0,
+                "primary_provider": primary_key,
+                "backup_provider": backup_key,
+                "primary_rows": int(len(primary)) if primary is not None else 0,
+                "backup_rows": int(len(backup)) if backup is not None else 0,
                 "note": "Both sources must respond to reconcile — nothing is assumed."}
-    joined = pd.concat({"fmp": fmp["close"], "yfinance": yf_df["close"]}, axis=1).dropna()
+    joined = pd.concat({"primary": primary["close"], "backup": backup["close"]}, axis=1).dropna()
     if len(joined) < 5:
         return {"symbol": symbol, "status": "insufficient_overlap",
                 "overlap_days": int(len(joined))}
-    rel = ((joined["fmp"] - joined["yfinance"]).abs() / joined["yfinance"])
+    rel = ((joined["primary"] - joined["backup"]).abs() / joined["backup"])
     worst_day = rel.idxmax()
     return {
         "symbol": symbol,
         "status": "ok",
+        "primary_provider": primary_key,
+        "backup_provider": backup_key,
         "overlap_days": int(len(joined)),
         "mean_abs_diff_pct": round(float(rel.mean()) * 100, 4),
         "max_abs_diff_pct": round(float(rel.max()) * 100, 4),
         "worst_day": str(worst_day.date()),
-        "fmp_last": round(float(joined["fmp"].iloc[-1]), 4),
-        "yfinance_last": round(float(joined["yfinance"].iloc[-1]), 4),
-        "note": ("Dividend-adjusted closes compared over the overlap window. Cut over "
-                 "(HELIOS_PRICE_SOURCE=fmp) only when diffs stay in adjustment-timing "
-                 "noise (<~0.1% mean) across your book."),
+        "primary_last": round(float(joined["primary"].iloc[-1]), 4),
+        "backup_last": round(float(joined["backup"].iloc[-1]), 4),
+        "observed_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "note": "Adjusted closes compared over the overlap window; approval is recorded separately.",
     }
 
 
 def fetch_live(symbol: str, period: str = "2y", persist: bool = True) -> Instrument:
     """Pull live history (and free news headlines).
 
-    Provider order follows HELIOS_PRICE_SOURCE: 'fmp' prefers the keyed paid
-    EOD feed with yfinance fallback; default stays yfinance-first until a
-    reconciliation window justifies cutover (review roadmap, stage 3)."""
+    Outside institutional mode, provider order follows HELIOS_PRICE_SOURCE.
+    Institutional mode uses only the approved primary/backup pair and fails
+    closed when no current cutover exists."""
     symbol = clean_symbol(symbol, fallback="")
     if not symbol:
         raise ValueError("Invalid ticker symbol.")
     df = None
     provider_used = ""
-    if os.environ.get("HELIOS_PRICE_SOURCE", "yfinance").strip().lower() == "fmp":
-        df = _fmp_price_history(symbol, period)
+    for provider in _price_provider_order():
+        df = _provider_price_history(provider, symbol, period)
         if df is not None:
-            provider_used = "fmp_eod_adjusted"
-    t = _yf.Ticker(symbol) if HAS_YF else None
+            provider_used = {
+                "fmp": "fmp_eod_adjusted",
+                "tiingo": "tiingo_eod_adjusted",
+                "yfinance": "yfinance",
+            }[provider]
+            break
+    institutional = os.environ.get("HELIOS_INSTITUTIONAL_CONTROLS", "1").strip().lower() not in {
+        "0", "false", "no", "off",
+    }
+    # yfinance metadata/news/actions are a separate data use, not an innocent
+    # side effect of an approved FMP/Tiingo price cutover. Keep that adapter
+    # entirely outside governed institutional fetches.
+    t = _yf.Ticker(symbol) if HAS_YF and not institutional else None
     if df is None:
-        if not HAS_YF:
-            raise RuntimeError("yfinance is not installed; live data unavailable.")
-        # Bounded outbound call so a slow/hung upstream can't pin a worker thread.
-        with _YF_SEMAPHORE:
-            hist = t.history(period=period, auto_adjust=True, timeout=10)
-        if hist is None or hist.empty:
-            raise RuntimeError(f"No live data returned for '{symbol}'.")
-        hist = hist.rename(columns=str.lower)
-        df = _clean_price_frame(hist[["open", "high", "low", "close", "volume"]], symbol)
-        provider_used = "yfinance"
+        raise RuntimeError(
+            f"Live data unavailable: no configured price provider returned data for '{symbol}'."
+        )
 
-    # Headlines + display name stay yfinance best-effort regardless of the
-    # price provider (FMP EOD carries neither).
+    # Outside institutional mode, headlines + display name remain yfinance
+    # best-effort. Governed mode keeps the approved provider boundary intact.
     headlines = []
     name = symbol.upper()
     if t is not None:
@@ -568,14 +605,94 @@ def fetch_live(symbol: str, period: str = "2y", persist: bool = True) -> Instrum
         except Exception:
             pass
 
-    inst = Instrument(symbol.upper(), name, df, "live", headlines, price_provider=provider_used)
-    register(inst)
-    _capture_security_facts(inst, t)
+    retrieved_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    inst = Instrument(
+        symbol.upper(), name, df, "live", headlines,
+        price_provider=provider_used, retrieved_at=retrieved_at,
+    )
+    # Keep provider context transiently so batch callers can finish the same
+    # persistence pipeline after concurrent network work completes.
+    setattr(inst, "_provider_ticker", t)
     if persist:
-        _persist_instrument(inst, adjusted=True,
-                            metadata={"period": period, "imported_via": "live_fetch",
-                                      "price_provider": provider_used})
+        before = get(symbol)
+        before_dates = _instrument_dates(before)
+        _commit_live_instrument(
+            inst,
+            before_dates=before_dates,
+            imported_via="live_fetch",
+            period=period,
+            refresh_journal=True,
+            message_prefix="Fetched",
+        )
     return inst
+
+
+def live_provider_available() -> bool:
+    available = {
+        "yfinance": HAS_YF,
+        "fmp": bool(os.environ.get("HELIOS_FMP_KEY", "").strip()),
+        "tiingo": bool(os.environ.get("HELIOS_TIINGO_KEY", "").strip()),
+    }
+    return any(available.get(provider, False) for provider in _price_provider_order())
+
+
+def _instrument_dates(inst: Instrument | None) -> set[pd.Timestamp]:
+    if inst is None or inst.source != "live":
+        return set()
+    return set(pd.to_datetime(inst.df.index).normalize())
+
+
+def _commit_live_instrument(
+    inst: Instrument,
+    *,
+    before_dates: set[pd.Timestamp] | None,
+    imported_via: str,
+    period: str,
+    refresh_journal: bool,
+    message_prefix: str,
+) -> dict:
+    """Single validated persistence path for every provider result."""
+    inst.symbol = clean_symbol(inst.symbol, fallback="")
+    if not inst.symbol:
+        raise ValueError("Live provider returned an invalid ticker symbol.")
+    inst.source = "live"
+    inst.df = _clean_price_frame(inst.df, inst.symbol)
+    inst.retrieved_at = inst.retrieved_at or datetime.now().astimezone().isoformat(timespec="seconds")
+    ticker_obj = getattr(inst, "_provider_ticker", None)
+    if hasattr(inst, "_provider_ticker"):
+        delattr(inst, "_provider_ticker")
+    persisted = _persist_instrument(
+        inst,
+        adjusted=True,
+        metadata={
+            "period": period,
+            "imported_via": imported_via,
+            "price_provider": inst.price_provider,
+            "retrieved_at": inst.retrieved_at,
+            "validated": True,
+            "reconciliation": "overlap_revision_ledger",
+        },
+    )
+    if not persisted.get("persisted"):
+        raise RuntimeError(persisted.get("warning") or "Validated live history could not be persisted.")
+    register(inst)  # promote only after durable validation/persistence succeeds
+    _capture_security_facts(inst, ticker_obj)
+    after_dates = set(pd.to_datetime(inst.df.index).normalize())
+    prior_dates = before_dates or set()
+    rows_added = max(0, len(after_dates - prior_dates)) if prior_dates else len(after_dates)
+    if refresh_journal:
+        _refresh_signal_journal_forward_results()
+    message = f"{message_prefix} {len(inst.df)} validated live rows via {inst.price_provider or 'configured provider'}."
+    _record_refresh(inst.symbol, "ok", rows_added, message, source=inst.price_provider or "live")
+    return {
+        "symbol": inst.symbol,
+        "status": "ok",
+        "rows_added": rows_added,
+        "rows": len(inst.df),
+        "provider": inst.price_provider,
+        "retrieved_at": inst.retrieved_at,
+        "message": message,
+    }
 
 
 def _capture_security_facts(inst: Instrument, ticker_obj) -> None:
@@ -623,8 +740,11 @@ def load_persisted_instruments() -> None:
 
         store = persistence.get_store()
         for item in store.load_instruments():
-            register(Instrument(item.symbol, item.name, item.df, item.source, [],
-                                price_provider=str((item.metadata or {}).get("price_provider") or "")))
+            register(Instrument(
+                item.symbol, item.name, item.df, item.source, [],
+                price_provider=str((item.metadata or {}).get("price_provider") or ""),
+                retrieved_at=str((item.metadata or {}).get("retrieved_at") or ""),
+            ))
     except Exception:
         # Persistence is optional; callers can inspect /api/data/status for the warning.
         return
@@ -644,7 +764,7 @@ def refresh_live_symbol(symbol: str, fetcher=None, refresh_journal: bool = True)
         message = "Refresh skipped: only existing live instruments can be refreshed."
         _record_refresh(sym, "skipped", 0, message)
         return {"symbol": sym, "status": "skipped", "rows_added": 0, "message": message}
-    before_dates = set(pd.to_datetime(current.df.index).normalize())
+    before_dates = _instrument_dates(current)
     try:
         if fetcher is None:
             # No HAS_YF pre-check: fetch_live itself fails loudly when neither
@@ -656,18 +776,14 @@ def refresh_live_symbol(symbol: str, fetcher=None, refresh_journal: bool = True)
             if not isinstance(inst, Instrument):
                 raise RuntimeError("Live refresh provider returned an invalid payload.")
             inst.symbol = sym
-            inst.source = "live"
-            register(inst)
-        after_dates = set(pd.to_datetime(inst.df.index).normalize())
-        rows_added = max(0, len(after_dates - before_dates))
-        _persist_instrument(inst, adjusted=True,
-                            metadata={"imported_via": "live_refresh",
-                                      "price_provider": getattr(inst, "price_provider", "")})
-        if refresh_journal:
-            _refresh_signal_journal_forward_results()
-        message = f"Refreshed {len(inst.df)} live rows."
-        _record_refresh(sym, "ok", rows_added, message)
-        return {"symbol": sym, "status": "ok", "rows_added": rows_added, "rows": len(inst.df), "message": message}
+        return _commit_live_instrument(
+            inst,
+            before_dates=before_dates,
+            imported_via="live_refresh",
+            period="2y",
+            refresh_journal=refresh_journal,
+            message_prefix="Refreshed",
+        )
     except Exception as exc:
         message = str(exc) or "Live refresh failed."
         _record_refresh(sym, "error", 0, message)
@@ -714,9 +830,8 @@ def ensure_live_symbols(
 ) -> dict:
     """Fetch or refresh a configured live universe and persist real provider data.
 
-    Existing sample instruments are intentionally replaced only after the live
-    provider returns a valid series. If a fetch fails, the prior sample/demo row
-    remains in place and is not promoted to real research evidence.
+    A failed fetch never creates or promotes an instrument. Only validated
+    provider histories pass through the persistence commit pipeline.
     """
     requested = expand_live_symbols(list(symbols))
     worker_count = _live_refresh_worker_count(max_workers, len(requested))
@@ -725,18 +840,17 @@ def ensure_live_symbols(
         before = get(symbol)
         before_dates = set()
         if before is not None and before.source == "live":
-            before_dates = set(pd.to_datetime(before.df.index).normalize())
+            before_dates = _instrument_dates(before)
         try:
             if fetcher is None:
-                if not HAS_YF:
-                    raise RuntimeError("yfinance is not installed; live data unavailable.")
+                if not live_provider_available():
+                    raise RuntimeError("No configured live price provider is available.")
                 inst = fetch_live(symbol, period=period, persist=False)
             else:
                 inst = fetcher(symbol, period=period, persist=False)
                 if not isinstance(inst, Instrument):
                     raise RuntimeError("Live provider returned an invalid payload.")
             inst.symbol = symbol
-            inst.source = "live"
             return {"symbol": symbol, "status": "ok", "instrument": inst, "before_dates": before_dates}
         except Exception as exc:
             message = str(exc) or "Auto live update failed."
@@ -753,15 +867,19 @@ def ensure_live_symbols(
         symbol = item["symbol"]
         if item["status"] == "ok":
             inst = item["instrument"]
-            register(inst)
-            after_dates = set(pd.to_datetime(inst.df.index).normalize())
-            before_dates = item["before_dates"]
-            rows_added = max(0, len(after_dates - before_dates)) if before_dates else len(after_dates)
-            _persist_instrument(inst, adjusted=True,
-                                metadata={"period": period, "imported_via": "auto_live",
-                                          "price_provider": getattr(inst, "price_provider", "")})
-            _record_refresh(symbol, "ok", rows_added, f"Auto live updated {len(inst.df)} rows.")
-            results.append({"symbol": symbol, "status": "ok", "rows_added": rows_added, "rows": len(inst.df), "message": f"Auto live updated {len(inst.df)} rows."})
+            try:
+                results.append(_commit_live_instrument(
+                    inst,
+                    before_dates=item["before_dates"],
+                    imported_via="auto_live",
+                    period=period,
+                    refresh_journal=False,
+                    message_prefix="Auto live updated",
+                ))
+            except Exception as exc:
+                message = str(exc) or "Auto live persistence failed."
+                _record_refresh(symbol, "error", 0, message)
+                results.append({"symbol": symbol, "status": "error", "rows_added": 0, "message": message})
         else:
             message = item["message"]
             _record_refresh(symbol, "error", 0, message)
@@ -799,7 +917,7 @@ def _persist_instrument(
         return {"persisted": False, "warning": str(exc)}
 
 
-def _record_refresh(symbol: str, status: str, rows_added: int, message: str) -> None:
+def _record_refresh(symbol: str, status: str, rows_added: int, message: str, source: str = "live") -> None:
     try:
         from . import persistence
 
@@ -808,7 +926,7 @@ def _record_refresh(symbol: str, status: str, rows_added: int, message: str) -> 
             status=status,
             rows_added=rows_added,
             message=message,
-            source="live",
+            source=source,
         )
     except Exception:
         return
@@ -833,139 +951,62 @@ def _refresh_signal_journal_forward_results() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Holding-price resolution for portfolio models
-#
-# A model is a basket of (ticker, weight). We need a price series per ticker but
-# do NOT want every holding cluttering the instrument sidebar, so resolved
-# holding prices live in a separate cache. Resolution order:
-#   sidebar store  ->  cache  ->  live (yfinance)  ->  deterministic simulation
-# The chosen source is reported so the UI can honestly flag simulated data.
+# Holding-price resolution for portfolio models. Only validated, registered
+# live/uploaded histories can enter this cache; reads never call providers.
 # --------------------------------------------------------------------------- #
 _PRICE_CACHE: dict[str, "PriceSeries"] = {}
 _CACHE_LOCK = threading.RLock()
-# Failed live resolutions are negative-cached briefly so every analysis request
-# doesn't retry a dead/unknown ticker against the provider.
-NEGATIVE_RESOLVE_TTL_SECONDS = 300.0
-_NEGATIVE_RESOLVE: dict[str, float] = {}  # symbol -> monotonic retry deadline
-
-
 def _invalidate_resolution_caches(symbol: str) -> None:
-    """Drop cached resolutions (and failed-resolution back-off) for a symbol
-    whose instrument frame was just replaced, so analytics see the new data."""
+    """Drop cached resolutions so analytics see a replaced instrument frame."""
     with _CACHE_LOCK:
         for key in [k for k, v in _PRICE_CACHE.items() if k == symbol or v.symbol == symbol]:
             _PRICE_CACHE.pop(key, None)
-        _NEGATIVE_RESOLVE.pop(symbol, None)
-
-
-def _live_resolution_backed_off(sym: str) -> bool:
-    with _CACHE_LOCK:
-        deadline = _NEGATIVE_RESOLVE.get(sym)
-        if deadline is None:
-            return False
-        if time.monotonic() >= deadline:
-            _NEGATIVE_RESOLVE.pop(sym, None)
-            return False
-        return True
-
-
-def _record_failed_resolution(sym: str) -> None:
-    with _CACHE_LOCK:
-        if sym not in _NEGATIVE_RESOLVE and len(_NEGATIVE_RESOLVE) >= MAX_PRICE_CACHE:
-            _NEGATIVE_RESOLVE.pop(next(iter(_NEGATIVE_RESOLVE)), None)
-        _NEGATIVE_RESOLVE[sym] = time.monotonic() + NEGATIVE_RESOLVE_TTL_SECONDS
 
 
 @dataclass
 class PriceSeries:
     symbol: str
     close: pd.Series  # DatetimeIndex -> close
-    source: str       # "sample" | "upload" | "live" | "simulated"
-
-
-def _ticker_seed(ticker: str) -> int:
-    # Deterministic per-ticker seed (stable across processes; no RNG-at-import).
-    digest = hashlib.sha256(f"helios:{clean_symbol(ticker, fallback='')}".encode("utf-8")).digest()
-    return int.from_bytes(digest[:8], "big") % (2**31)
-
-
-def _simulate_for_ticker(ticker: str) -> pd.Series:
-    """A plausible, deterministic price series for an unresolved ticker so a
-    model stays analyzable offline. Clearly flagged 'simulated' upstream."""
-    seed = _ticker_seed(ticker)
-    rng = np.random.default_rng(seed)
-    drift = rng.uniform(0.04, 0.22)          # 4%-22% annual
-    vol = rng.uniform(0.14, 0.45)            # 14%-45% annual
-    start = rng.uniform(20, 300)
-    df = _simulate_series(drift, vol, start, flips=True, seed=seed)
-    return df["close"]
+    source: str       # "upload" | "live"
 
 
 MAX_PRICE_CACHE = 400
 
 
-def _allowed_source(source: str, allow_sample: bool, allow_simulated: bool) -> bool:
-    if source == "sample":
-        return allow_sample
-    if source == "simulated":
-        return allow_simulated
+def _allowed_source(source: str) -> bool:
     return source in {"upload", "live"}
 
 
 def resolve_series(
     ticker: str,
-    allow_live: bool = True,
-    allow_sample: bool = True,
-    allow_simulated: bool = True,
+    allow_live: bool = False,
+    allow_sample: bool = False,
+    allow_simulated: bool = False,
 ) -> PriceSeries:
-    """Return a close-price series for one holding ticker, with fallback.
+    """Return stored real price history for a holding ticker.
 
-    allow_live=False skips the (potentially slow) yfinance call and goes straight
-    to simulation when the ticker isn't already known — used to budget the number
-    of live fetches a single portfolio analysis can trigger.
+    Provider calls are intentionally excluded from this read path. Callers must
+    use the explicit live-data POST workflow, which validates and persists the
+    result before it can become research evidence. The legacy allow_* arguments
+    remain temporarily source-compatible but cannot enable sample/simulated data.
     """
     sym = clean_symbol(ticker, fallback="")
     if not sym:
         raise ValueError(f"Invalid ticker: {ticker!r}")
 
     with _CACHE_LOCK:
-        if sym in _PRICE_CACHE and _allowed_source(_PRICE_CACHE[sym].source, allow_sample, allow_simulated):
+        if sym in _PRICE_CACHE and _allowed_source(_PRICE_CACHE[sym].source):
             return _PRICE_CACHE[sym]
 
     # 1) a sidebar instrument already has good history
     inst = get(sym)
-    if inst is not None and _allowed_source(inst.source, allow_sample, allow_simulated):
+    if inst is not None and _allowed_source(inst.source):
         ps = PriceSeries(sym, inst.df["close"].dropna(), inst.source)
     else:
-        ps = None
-        # 2) live prices (history only — skip the news/info round-trips).
-        # Recently failed symbols are skipped for NEGATIVE_RESOLVE_TTL_SECONDS
-        # and fall straight through to the same simulated/error path.
-        if HAS_YF and allow_live and not _live_resolution_backed_off(sym):
-            try:
-                with _YF_SEMAPHORE:
-                    hist = _yf.Ticker(sym).history(period="5y", auto_adjust=True, timeout=8)
-                if hist is not None and not hist.empty:
-                    close = hist["Close"].copy()
-                    close.index = pd.to_datetime(close.index).tz_localize(None)
-                    ps = PriceSeries(sym, close.dropna(), "live")
-                else:
-                    _record_failed_resolution(sym)
-            except Exception:
-                ps = None
-                _record_failed_resolution(sym)
-        # 3) deterministic simulation
-        if ps is None and allow_simulated:
-            ps = PriceSeries(sym, _simulate_for_ticker(sym), "simulated")
-            # A simulation forced only by the live budget isn't cached, so a later
-            # (un-budgeted) call can still resolve it live.
-            if not allow_live:
-                return ps
-        if ps is None:
-            raise ValueError(
-                f"No eligible real price history for {sym}. Upload a CSV price history "
-                "or fetch live data before using this ticker in Pro research."
-            )
+        raise ValueError(
+            f"No eligible persisted real price history for {sym}. Use the live-data "
+            "refresh workflow or upload a price history before research can run."
+        )
 
     with _CACHE_LOCK:
         # Bound cache growth (FIFO eviction), mirroring the instrument-store cap.

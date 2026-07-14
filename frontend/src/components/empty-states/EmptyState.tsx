@@ -4,7 +4,7 @@ export function EmptyState({ title, body, actions = [], children }: {
   title: string; body: string; actions?: string[]; children?: ReactNode;
 }) {
   return (
-    <div className="empty-state">
+    <div className="empty-state" role="status" aria-live="polite">
       <strong>{title}</strong>
       <p>{body}</p>
       {actions.length > 0 && (

@@ -23,8 +23,11 @@ describe("workspace navigation mapping", () => {
 });
 
 describe("review prescriptions (deep-review completion)", () => {
-  it("names the output workspace Results", () => {
-    expect(navGroups.map((g) => g.label)).toContain("Results");
-    expect(navGroups.map((g) => g.label)).not.toContain("Output");
+  it("uses the advisor workflow information architecture", () => {
+    expect(navGroups.map((g) => g.label)).toEqual([
+      "Setup", "Research", "Evidence & Risk", "Decisions", "Reports",
+    ]);
+    expect(navGroups.find((g) => g.label === "Decisions")?.ids).toEqual(["journal", "decisions"]);
+    expect(navGroups.find((g) => g.label === "Reports")?.ids).toEqual(["reports"]);
   });
 });

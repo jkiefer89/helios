@@ -21,7 +21,7 @@ from typing import Any
 
 import pandas as pd
 
-from . import costs, data, persistence, portfolio, provenance
+from . import costs, data, evidence, persistence, portfolio, provenance
 from ._common import avg as _avg, clean_close as _clean_close, paper_hit as _paper_hit, pct as _pct
 from .signal_journal import MODEL_BENCHMARKS
 
@@ -57,7 +57,9 @@ def _target_series(target_kind: str, target_id: str) -> tuple[pd.Series, str, st
     if inst is None:
         raise ValueError(f"Unknown ticker '{target_id}'.")
     close = _clean_close(inst.df["close"] if "close" in inst.df else None)
-    prov = provenance.instrument(inst.source, len(close))
+    prov = provenance.instrument(
+        inst.source, len(close), price_provider=getattr(inst, "price_provider", ""),
+    )
     return close, inst.name, str(prov.get("data_mode") or ""), ""
 
 
@@ -85,6 +87,17 @@ def record_decision(
     engine_action = str(sig.get("action") or "").upper()
     mandate_key = (mandate or model_mandate or "").lower()
     benchmark = MODEL_BENCHMARKS.get(mandate_key, "SPY")
+    evidence_id = evidence.new_id("decision")
+    decision_context = dict(context or {})
+    requested_trial_id = str(decision_context.get("trial_id") or "")
+    if requested_trial_id:
+        from . import trials
+        requested_trial_id = trials.validate_decision_link(
+            requested_trial_id,
+            kind,
+            str(target_id).upper() if kind == "instrument" else str(target_id),
+        )
+    decision_context["evidence"] = evidence.reference(evidence_id)
     entry = {
         "decision_id": f"dec-{uuid.uuid4().hex[:20]}",
         "target_kind": kind,
@@ -102,12 +115,46 @@ def record_decision(
         "decision_date": str(close.index[-1].date()),
         "decision_price": float(close.iloc[-1]),
         "data_mode": data_mode,
-        "context": dict(context or {}),
+        "context": decision_context,
         "outcome_status": "pending" if data_mode == "real" else "not_measurable",
         "outcomes": {},
+        "trial_id": requested_trial_id,
     }
-    result = persistence.get_store().record_decision(entry)
-    return result.get("entry") or result
+    store = persistence.get_store()
+    if not store.available:
+        unavailable = store.record_decision(entry)
+        return unavailable.get("entry") or unavailable
+    with store.transaction(durable=True):
+        result = store.record_decision(entry)
+        if not result.get("recorded"):
+            raise RuntimeError(result.get("warning") or "Decision could not be persisted.")
+        recorded = result.get("entry") or result
+        if result.get("recorded") and isinstance(recorded, dict):
+            captured = evidence.capture(
+                evidence_id=evidence_id,
+                artifact_kind="decision",
+                target_kind=kind,
+                target_id=entry["target_id"],
+                input_payload={
+                    "series": evidence.series_payload(close),
+                    "engine_signal": sig,
+                    "operator_action": action,
+                    "rationale": entry["rationale"],
+                    "mandate": mandate_key,
+                    "benchmark": benchmark,
+                    "data_mode": data_mode,
+                },
+                output_payload=recorded,
+                evidence_manifest=evidence.manifest(
+                    series=close,
+                    source=data_mode,
+                    transformations=("clean_close", "operator_decision_record"),
+                    extra={"benchmark": benchmark, "mandate": mandate_key},
+                ),
+            )
+            if not captured.get("recorded"):
+                raise RuntimeError(captured.get("warning") or "Decision evidence could not be persisted.")
+    return recorded
 
 
 def _forward_return(close: pd.Series, start_date: str, horizon_days: int) -> dict[str, Any] | None:
@@ -176,13 +223,26 @@ def evaluate_outcomes(entry: dict[str, Any]) -> dict[str, Any]:
         except ValueError:
             lag = None
         if lag is not None and lag > 7:
+            evaluated_at = datetime.now(timezone.utc).isoformat()
+            blocked_result = {
+                "outcome_status": "not_measurable",
+                "outcomes": {},
+                "evaluated_at": evaluated_at,
+                "not_measurable_reason": (
+                    f"price history was {lag} days stale at record time — scoring it would grant hindsight"
+                ),
+            }
+            _capture_outcome_evidence(
+                entry,
+                pd.Series(dtype=float),
+                blocked_result,
+                pd.Series(dtype=float),
+                str(entry.get("decision_date") or ""),
+            )
             persistence.get_store().update_decision_outcomes(
                 entry["decision_id"], {}, "not_measurable",
-                datetime.now(timezone.utc).isoformat())
-            return {**entry, "outcome_status": "not_measurable",
-                    "outcomes": {},
-                    "not_measurable_reason": (f"price history was {lag} days stale at record "
-                                              "time — scoring it would grant hindsight")}
+                evaluated_at)
+            return {**entry, **blocked_result}
     try:
         close, _, data_mode, _ = _target_series(entry["target_kind"], entry["target_id"])
     except ValueError:
@@ -231,10 +291,54 @@ def evaluate_outcomes(entry: dict[str, Any]) -> dict[str, Any]:
     if changed:
         status = "measured" if len(outcomes) == len(OUTCOME_HORIZONS_D) else "partial"
         evaluated_at = datetime.now(timezone.utc).isoformat()
-        persistence.get_store().update_decision_outcomes(
-            entry["decision_id"], outcomes, status, evaluated_at)
-        entry = {**entry, "outcomes": outcomes, "outcome_status": status, "evaluated_at": evaluated_at}
+        result = {"outcome_status": status, "outcomes": outcomes, "evaluated_at": evaluated_at}
+        store = persistence.get_store()
+        with store.transaction(durable=True):
+            captured = _capture_outcome_evidence(entry, close, result, bench_close, score_anchor)
+            if not captured.get("recorded"):
+                raise RuntimeError(captured.get("warning") or "Decision outcome evidence could not be persisted.")
+            if not store.update_decision_outcomes(entry["decision_id"], outcomes, status, evaluated_at):
+                raise RuntimeError(store.warning or "Decision outcomes could not be advanced.")
+        entry = {**entry, **result}
     return entry
+
+
+def _capture_outcome_evidence(
+    entry: dict[str, Any],
+    close: pd.Series,
+    result: dict[str, Any],
+    benchmark_close: pd.Series,
+    score_anchor: str,
+) -> dict[str, Any]:
+    """Seal each decision outcome transition before the mutable status advances."""
+    original_ref = ((entry.get("context") or {}).get("evidence") or {})
+    evidence_id = evidence.new_id("decision-result")
+    return evidence.capture(
+        evidence_id=evidence_id,
+        artifact_kind="decision_forward_outcome",
+        target_kind=str(entry.get("target_kind") or ""),
+        target_id=str(entry.get("target_id") or ""),
+        input_payload={
+            "decision_evidence": original_ref,
+            "decision_id": entry.get("decision_id"),
+            "decision_date": entry.get("decision_date"),
+            "score_anchor": score_anchor,
+            "outcome_horizons": list(OUTCOME_HORIZONS_D),
+            "my_action": entry.get("my_action"),
+            "engine_action": entry.get("engine_action"),
+            "benchmark": entry.get("benchmark"),
+            "prior_outcome_status": entry.get("outcome_status"),
+            "available_series": evidence.series_payload(close),
+            "benchmark_series": evidence.series_payload(benchmark_close),
+        },
+        output_payload=result,
+        evidence_manifest=evidence.manifest(
+            series=close if not close.empty else None,
+            source=str(entry.get("data_mode") or ""),
+            transformations=("forward_return", "benchmark_alpha", "paper_hit"),
+            extra={"parent_evidence_id": original_ref.get("evidence_id", "")},
+        ),
+    )
 
 
 def list_decisions(limit: int = 200, refresh_outcomes: bool = True) -> list[dict[str, Any]]:
@@ -293,28 +397,35 @@ def _bucket_stats(entries: list[dict[str, Any]]) -> dict[str, Any]:
     # its own window; the headline stays as the labeled mixed-window view.
     by_horizon: dict[str, Any] = {}
     for horizon in OUTCOME_HORIZONS_D:
-        rows = [o for o in ((e.get("outcomes") or {}).get(str(horizon)) for e in entries)
-                if o and o.get("hit") is not None]
+        rows = [(entry, outcome) for entry in entries
+                for outcome in [(entry.get("outcomes") or {}).get(str(horizon))]
+                if outcome and outcome.get("hit") is not None]
         if not rows:
             continue
+        directional_alphas = [
+            costs.directional_alpha(entry.get("my_action"), outcome.get("alpha_pct"))
+            for entry, outcome in rows
+        ]
         by_horizon[str(horizon)] = {
             "measured_count": len(rows),
-            "hit_count": sum(1 for o in rows if o.get("hit")),
-            "hit_rate_pct": _pct(sum(1 for o in rows if o.get("hit")), len(rows)),
-            "avg_target_return_pct": _avg(o.get("target_return_pct") for o in rows),
-            "avg_alpha_pct": _avg(o.get("alpha_pct") for o in rows),
-            "avg_alpha_after_default_costs_pct": costs.net_of_default_costs(
-                _avg(o.get("alpha_pct") for o in rows)),
+            "hit_count": sum(1 for _, outcome in rows if outcome.get("hit")),
+            "hit_rate_pct": _pct(sum(1 for _, outcome in rows if outcome.get("hit")), len(rows)),
+            "avg_target_return_pct": _avg(outcome.get("target_return_pct") for _, outcome in rows),
+            "avg_alpha_pct": _avg(directional_alphas),
+            "avg_alpha_after_default_costs_pct": costs.net_of_default_costs(_avg(directional_alphas)),
         }
+    primary_directional_alphas = [
+        costs.directional_alpha(entry.get("my_action"), outcome.get("alpha_pct"))
+        for entry, outcome in measured
+    ]
     return {
         "count": len(entries),
         "measured_count": len(measured),
         "hit_count": sum(1 for h in hits if h),
         "hit_rate_pct": _pct(sum(1 for h in hits if h), len(hits)),
         "avg_target_return_pct": _avg(o.get("target_return_pct") for _, o in measured),
-        "avg_alpha_pct": _avg(o.get("alpha_pct") for _, o in measured),
-        "avg_alpha_after_default_costs_pct": costs.net_of_default_costs(
-            _avg(o.get("alpha_pct") for _, o in measured)),
+        "avg_alpha_pct": _avg(primary_directional_alphas),
+        "avg_alpha_after_default_costs_pct": costs.net_of_default_costs(_avg(primary_directional_alphas)),
         "alpha_basis": costs.GROSS_LABEL,
         "alpha_cost_basis": costs.NET_ASSUMPTION_LABEL,
         "headline_basis": "longest measured horizon per decision (mixed windows) — "

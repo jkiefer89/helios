@@ -13,7 +13,7 @@ describe("modeTone", () => {
   it("maps every data mode to its honest tone", () => {
     expect(modeTone("real")).toBe("positive");
     expect(modeTone("mixed")).toBe("warning");
-    expect(modeTone("demo")).toBe("warning");
+    expect(modeTone("demo")).toBe("neutral");
     expect(modeTone("invalid_for_research")).toBe("negative");
     expect(modeTone(undefined)).toBe("neutral");
     expect(modeTone("something_new")).toBe("neutral"); // unknown is never green
@@ -33,7 +33,7 @@ describe("DataModeBadge", () => {
 });
 
 describe("DataQualityBanner", () => {
-  it("shows the research-locked chip and missing tickers when ineligible", () => {
+  it("shows the mixed gate and missing tickers when ineligible", () => {
     render(
       <DataQualityBanner
         payload={{
@@ -48,9 +48,9 @@ describe("DataQualityBanner", () => {
         }}
       />,
     );
-    expect(screen.getByText("Research locked")).toBeTruthy();
+    expect(screen.getByText("Mixed")).toBeTruthy();
     expect(screen.getByText(/Missing ZZZT, QQQX/)).toBeTruthy();
-    expect(screen.getByText("Mixed Data Warning").closest("section")?.className).toContain("tone-warning");
+    expect(screen.getByText("Mixed Data Warning").closest("section")?.className).toContain("research-gate--mixed");
   });
 
   it("shows the eligible chip for fully real data", () => {
@@ -59,7 +59,7 @@ describe("DataQualityBanner", () => {
         payload={{ data_mode: "real", display_label: "Real Research Mode", eligible_for_real_research: true }}
       />,
     );
-    expect(screen.getByText("Eligible real research")).toBeTruthy();
+    expect(screen.getByText("Ready")).toBeTruthy();
   });
 });
 

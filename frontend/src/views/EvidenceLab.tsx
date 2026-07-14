@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
-import type { EvidenceLabResponse, ModelSummary, TickerSummary } from "../api/types";
+import type { EvidenceLabResponse, ModelSummary, ProspectiveTrial, TickerSummary, TrialProtocol } from "../api/types";
 import { DataQualityBanner } from "../components/badges/DataModeBadge";
 import { Panel, StatTile } from "../components/cards/Panel";
 import { ChartSummary, LineChart, MiniBars } from "../components/charts/Charts";
@@ -35,6 +35,9 @@ export function EvidenceLab({
   const [target, setTarget] = useState(defaultTarget);
   const [horizon, setHorizon] = useState("21");
   const [trainWindow, setTrainWindow] = useState("252");
+  const [trial, setTrial] = useState<ProspectiveTrial | null>(null);
+  const [trialLoading, setTrialLoading] = useState(false);
+  const [trialError, setTrialError] = useState("");
   const { payload, error, isLoading, load, isCurrentTarget } = useViewFetch<EvidenceLabResponse>({ failureMessage: "Evidence Lab failed." });
 
   const targetOptions = [
@@ -42,6 +45,24 @@ export function EvidenceLab({
     ...tickers.map((ticker) => ({ value: `instrument:${ticker.symbol}`, label: `${ticker.symbol} · ${ticker.name}` })),
   ];
   const selected = parseTarget(target);
+
+  const loadTrial = useCallback(async (requestedTarget: string) => {
+    const parsed = parseTarget(requestedTarget);
+    if (!parsed) {
+      setTrial(null);
+      return;
+    }
+    setTrialLoading(true);
+    setTrialError("");
+    try {
+      const response = await api.trials({ kind: parsed.kind, id: parsed.id });
+      setTrial(response.trials.find((row) => row.status === "open") || response.trials[0] || null);
+    } catch (caught) {
+      setTrialError(caught instanceof Error ? caught.message : "Trial registry unavailable.");
+    } finally {
+      setTrialLoading(false);
+    }
+  }, []);
 
   const run = useCallback((requestedTarget: string) => {
     const parsed = parseTarget(requestedTarget);
@@ -62,6 +83,58 @@ export function EvidenceLab({
     setTarget(defaultTarget);
     run(defaultTarget);
   }, [defaultTarget, isCurrentTarget, run]);
+
+  useEffect(() => {
+    if (!target) return;
+    void loadTrial(target);
+  }, [loadTrial, target]);
+
+  const registerTrial = useCallback(async (owner: string, hypothesis: string) => {
+    const parsed = parseTarget(target);
+    if (!parsed) return;
+    setTrialLoading(true);
+    setTrialError("");
+    try {
+      const response = await api.registerTrial({
+        target_kind: parsed.kind,
+        target_id: parsed.id,
+        actor: owner,
+        protocol: trialProtocol(parsed, parseBoundedInt(horizon, 21), owner, hypothesis),
+      });
+      setTrial(response.trial);
+    } catch (caught) {
+      setTrialError(caught instanceof Error ? caught.message : "Trial registration failed.");
+    } finally {
+      setTrialLoading(false);
+    }
+  }, [horizon, target]);
+
+  const assessTrial = useCallback(async () => {
+    if (!trial) return;
+    setTrialLoading(true);
+    setTrialError("");
+    try {
+      await api.assessTrial(trial.trial_id);
+      await loadTrial(target);
+    } catch (caught) {
+      setTrialError(caught instanceof Error ? caught.message : "Trial assessment failed.");
+      setTrialLoading(false);
+    }
+  }, [loadTrial, target, trial]);
+
+  const closeTrial = useCallback(async (status: "completed" | "withdrawn" | "invalidated", note: string, actor: string) => {
+    if (!trial) return;
+    setTrialLoading(true);
+    setTrialError("");
+    try {
+      const response = await api.closeTrial(trial.trial_id, { status, note, actor });
+      setTrial(response.trial);
+    } catch (caught) {
+      setTrialError(caught instanceof Error ? caught.message : "Trial close failed.");
+    } finally {
+      setTrialLoading(false);
+    }
+  }, [trial]);
 
   const labels = useMemo(() => payload?.windows.map((row) => row.signal_date) || [], [payload]);
   const chartSeries = useMemo(() => payload ? [
@@ -99,6 +172,17 @@ export function EvidenceLab({
         </Panel>
       )}
       {payload && <DataQualityBanner payload={payload} />}
+      {selected && (
+        <ProspectiveTrialPanel
+          trial={trial}
+          loading={trialLoading}
+          error={trialError}
+          eligible={Boolean(payload && !payload.evidence_unavailable && payload.eligible_for_real_research)}
+          onRegister={registerTrial}
+          onAssess={assessTrial}
+          onClose={closeTrial}
+        />
+      )}
       {payload?.evidence_unavailable && (
         <Panel title="Walk-Forward Evidence Locked" meta="real data required">
           <EmptyState title={payload.display_label || "Evidence unavailable"} body={payload.required_action || payload.reason || "Real price history is required before running walk-forward evidence."} actions={payload.missing_tickers?.slice(0, 5) || []} />
@@ -151,6 +235,21 @@ export function EvidenceLab({
             <LineChart labels={labels} series={chartSeries} height={230} />
           </Panel>
 
+          <Panel title="Out-of-Sample Methods" meta="rolling + anchored">
+            <div className="metric-grid compact-metrics">
+              <StatTile label="Rolling windows" value={fmtNumber(payload.validation_methods.rolling.summary.window_count, 0)} />
+              <StatTile label="Rolling net alpha" value={fmtPct(payload.validation_methods.rolling.summary.avg_alpha_after_default_costs_pct)} tone={toneForSigned(payload.validation_methods.rolling.summary.avg_alpha_after_default_costs_pct)} />
+              <StatTile label="Anchored windows" value={fmtNumber(payload.validation_methods.anchored.summary.window_count, 0)} />
+              <StatTile label="Anchored net alpha" value={fmtPct(payload.validation_methods.anchored.summary.avg_alpha_after_default_costs_pct)} tone={toneForSigned(payload.validation_methods.anchored.summary.avg_alpha_after_default_costs_pct)} />
+              <StatTile label="Regime robustness" value={titleCase(payload.regime_robustness.status)} tone={payload.regime_robustness.passed ? "positive" : "warning"} />
+              <StatTile label="Multiplicity" value={`${payload.multiplicity.evaluated_horizons} horizons`} />
+            </div>
+            <p className="muted">{payload.validation_methods.rolling.training_policy}</p>
+            <p className="muted">{payload.validation_methods.anchored.training_policy}</p>
+            <p className="forecast-note">{payload.regime_robustness.basis}</p>
+            {payload.multiplicity.selection_warning && <p className="report-disclaimer">{payload.multiplicity.selection_warning}</p>}
+          </Panel>
+
           <ProspectiveValidationPanel payload={payload} />
 
           <section className="dashboard-grid">
@@ -160,17 +259,19 @@ export function EvidenceLab({
               ) : (
                 <>
                   <MiniBars rows={decayRows} />
-                  <div className="terminal-table evidence-decay-table" tabIndex={0} aria-label="Signal decay table">
-                    <div className="terminal-table__head"><span>Horizon</span><span>Hit Rate</span><span>Alpha</span><span>FP Rate</span><span>IC</span></div>
-                    {payload.decay.map((row) => (
-                      <div className="table-row" key={row.horizon_days}>
-                        <strong>{row.horizon_days}d</strong>
-                        <span>{fmtPct(row.hit_rate_pct)}</span>
-                        <span className={toneClass(row.avg_alpha_pct)}>{fmtPct(row.avg_alpha_pct)}</span>
-                        <span>{fmtPct(row.false_positive_rate_pct)}</span>
-                        <span>{fmtNumber(row.information_coefficient, 2)}</span>
-                      </div>
-                    ))}
+                  <div className="terminal-table terminal-data-table-shell" tabIndex={0} aria-label="Scrollable signal decay evidence">
+                    <table className="terminal-data-table evidence-decay-data-table">
+                      <thead><tr><th scope="col">Horizon</th><th scope="col">Hit Rate</th><th scope="col">Alpha</th><th scope="col">FP Rate</th><th scope="col">IC</th></tr></thead>
+                      <tbody>{payload.decay.map((row) => (
+                      <tr key={row.horizon_days}>
+                        <th scope="row">{row.horizon_days}d</th>
+                        <td>{fmtPct(row.hit_rate_pct)}</td>
+                        <td className={toneClass(row.avg_alpha_pct)}>{fmtPct(row.avg_alpha_pct)}</td>
+                        <td>{fmtPct(row.false_positive_rate_pct)}</td>
+                        <td>{fmtNumber(row.information_coefficient, 2)}</td>
+                      </tr>
+                    ))}</tbody>
+                    </table>
                   </div>
                 </>
               )}
@@ -180,17 +281,19 @@ export function EvidenceLab({
               {payload.regime_sensitivity.length === 0 ? (
                 <EmptyState title="No regime buckets" body="Regime sensitivity appears once walk-forward windows are available." />
               ) : (
-                <div className="terminal-table evidence-regime-table" tabIndex={0} aria-label="Regime sensitivity table">
-                  <div className="terminal-table__head"><span>Regime</span><span>Windows</span><span>Hit Rate</span><span>Alpha</span><span>FP Rate</span></div>
-                  {payload.regime_sensitivity.map((row) => (
-                    <div className="table-row" key={row.regime}>
-                      <strong>{titleCase(row.regime)}</strong>
-                      <span>{fmtNumber(row.count, 0)}</span>
-                      <span>{fmtPct(row.hit_rate_pct)}</span>
-                      <span className={toneClass(row.avg_alpha_pct)}>{fmtPct(row.avg_alpha_pct)}</span>
-                      <span>{fmtPct(row.false_positive_rate_pct)}</span>
-                    </div>
-                  ))}
+                <div className="terminal-table terminal-data-table-shell" tabIndex={0} aria-label="Scrollable regime sensitivity evidence">
+                  <table className="terminal-data-table evidence-regime-data-table">
+                    <thead><tr><th scope="col">Regime</th><th scope="col">Windows</th><th scope="col">Hit Rate</th><th scope="col">Alpha</th><th scope="col">FP Rate</th></tr></thead>
+                    <tbody>{payload.regime_sensitivity.map((row) => (
+                    <tr key={row.regime}>
+                      <th scope="row">{titleCase(row.regime)}</th>
+                      <td>{fmtNumber(row.count, 0)}</td>
+                      <td>{fmtPct(row.hit_rate_pct)}</td>
+                      <td className={toneClass(row.avg_alpha_pct)}>{fmtPct(row.avg_alpha_pct)}</td>
+                      <td>{fmtPct(row.false_positive_rate_pct)}</td>
+                    </tr>
+                  ))}</tbody>
+                  </table>
                 </div>
               )}
             </Panel>
@@ -198,11 +301,15 @@ export function EvidenceLab({
 
           <section className="dashboard-grid">
             <Panel title="Confidence Bands" meta="historical paper windows">
-              <div className="terminal-table evidence-confidence-table" tabIndex={0} aria-label="Evidence confidence bands">
-                <div className="terminal-table__head"><span>Metric</span><span>Mean</span><span>P05</span><span>P50</span><span>P95</span><span>CI90</span></div>
-                <BandRow label="Forward" band={payload.confidence_bands.forward_result_pct} />
-                <BandRow label="Alpha" band={payload.confidence_bands.alpha_pct} />
-                <BandRow label="Hit rate" band={payload.confidence_bands.hit_rate_pct} isPct={false} />
+              <div className="terminal-table terminal-data-table-shell" tabIndex={0} aria-label="Scrollable evidence confidence bands">
+                <table className="terminal-data-table evidence-confidence-data-table">
+                  <thead><tr><th scope="col">Metric</th><th scope="col">Mean</th><th scope="col">P05</th><th scope="col">P50</th><th scope="col">P95</th><th scope="col">CI90</th></tr></thead>
+                  <tbody>
+                    <BandRow label="Forward" band={payload.confidence_bands.forward_result_pct} />
+                    <BandRow label="Alpha" band={payload.confidence_bands.alpha_pct} />
+                    <BandRow label="Hit rate" band={payload.confidence_bands.hit_rate_pct} isPct={false} />
+                  </tbody>
+                </table>
               </div>
             </Panel>
 
@@ -218,20 +325,22 @@ export function EvidenceLab({
           </section>
 
           <Panel title="Walk-Forward Windows" meta={`${payload.windows.length} measured`}>
-            <div className="terminal-table evidence-window-table" tabIndex={0} aria-label="Walk-forward evidence windows">
-              <div className="terminal-table__head"><span>Signal Date</span><span>Action</span><span>Score</span><span>Forward</span><span>Benchmark</span><span>Alpha</span><span>Regime</span><span>Hit</span></div>
-              {payload.windows.slice(0, 80).map((row) => (
-                <div className="table-row" key={`${row.signal_date}-${row.horizon_days}-${row.action_label}`}>
-                  <span>{row.signal_date}<small>{row.input_rows} rows to {row.forward_end_date}</small></span>
-                  <strong>{row.action_label}</strong>
-                  <span>{fmtNumber(row.signal_score, 2)}</span>
-                  <span className={toneClass(row.forward_result_pct)}>{fmtPct(row.forward_result_pct)}</span>
-                  <span>{fmtPct(row.benchmark_result_pct)}</span>
-                  <span className={toneClass(row.alpha_pct)}>{fmtPct(row.alpha_pct)}</span>
-                  <span>{titleCase(row.regime)}</span>
-                  <span className={row.paper_hit ? "tone-positive" : row.paper_hit === false ? "tone-negative" : ""}>{row.paper_hit == null ? "N/A" : row.paper_hit ? "Hit" : "Miss"}</span>
-                </div>
-              ))}
+            <div className="terminal-table terminal-data-table-shell" tabIndex={0} aria-label="Scrollable walk-forward evidence windows">
+              <table className="terminal-data-table evidence-window-data-table">
+                <thead><tr><th scope="col">Signal Date</th><th scope="col">Action</th><th scope="col">Score</th><th scope="col">Forward</th><th scope="col">Benchmark</th><th scope="col">Alpha</th><th scope="col">Regime</th><th scope="col">Hit</th></tr></thead>
+                <tbody>{payload.windows.slice(0, 80).map((row) => (
+                <tr key={`${row.signal_date}-${row.horizon_days}-${row.action_label}`}>
+                  <th scope="row">{row.signal_date}<small>{row.input_rows} rows to {row.forward_end_date}</small></th>
+                  <td><strong>{row.action_label}</strong></td>
+                  <td>{fmtNumber(row.signal_score, 2)}</td>
+                  <td className={toneClass(row.forward_result_pct)}>{fmtPct(row.forward_result_pct)}</td>
+                  <td>{fmtPct(row.benchmark_result_pct)}</td>
+                  <td className={toneClass(row.alpha_pct)}>{fmtPct(row.alpha_pct)}</td>
+                  <td>{titleCase(row.regime)}</td>
+                  <td className={row.paper_hit ? "tone-positive" : row.paper_hit === false ? "tone-negative" : ""}>{row.paper_hit == null ? "N/A" : row.paper_hit ? "Hit" : "Miss"}</td>
+                </tr>
+              ))}</tbody>
+              </table>
             </div>
           </Panel>
           <p className="report-disclaimer">{payload.disclaimer}</p>
@@ -267,19 +376,21 @@ function ProspectiveValidationPanel({ payload }: { payload: EvidenceLabResponse 
             2026-07-12 onward also carry the full component breakdown, weights, and dampers.
             Model entries have no fundamentals leg (technicals-only) — recorded, not hidden.
           </p>
-          <div className="terminal-table evidence-prospective-table" tabIndex={0} aria-label="Prospective Signal Journal evidence">
-            <div className="terminal-table__head"><span>Input End</span><span>Action</span><span>Score</span><span>Status</span><span>Forward</span><span>Alpha</span><span>Hit</span></div>
-            {prospective.latest_entries.slice(0, 8).map((entry) => (
-              <div className="table-row" key={`${entry.id}-${entry.input_end_date}-${entry.horizon_days}`}>
-                <span>{entry.input_end_date || "Pending"}<small>{fmtNumber(entry.input_rows, 0)} rows · {fmtNumber(entry.horizon_days, 0)}d</small></span>
-                <strong>{entry.action_label || "HOLD"}</strong>
-                <span>{fmtNumber(entry.score, 2)}</span>
-                <span>{titleCase(entry.forward_status || "pending")}</span>
-                <span className={toneClass(entry.forward_result_pct)}>{fmtPct(entry.forward_result_pct)}</span>
-                <span className={toneClass(entry.alpha_pct)}>{fmtPct(entry.alpha_pct)}</span>
-                <span className={entry.paper_hit ? "tone-positive" : entry.paper_hit === false ? "tone-negative" : ""}>{entry.paper_hit == null ? "Pending" : entry.paper_hit ? "Hit" : "Miss"}</span>
-              </div>
-            ))}
+          <div className="terminal-table terminal-data-table-shell" tabIndex={0} aria-label="Scrollable prospective Signal Journal evidence">
+            <table className="terminal-data-table evidence-prospective-data-table">
+              <thead><tr><th scope="col">Input End</th><th scope="col">Action</th><th scope="col">Score</th><th scope="col">Status</th><th scope="col">Forward</th><th scope="col">Alpha</th><th scope="col">Hit</th></tr></thead>
+              <tbody>{prospective.latest_entries.slice(0, 8).map((entry) => (
+              <tr key={`${entry.id}-${entry.input_end_date}-${entry.horizon_days}`}>
+                <th scope="row">{entry.input_end_date || "Pending"}<small>{fmtNumber(entry.input_rows, 0)} rows · {fmtNumber(entry.horizon_days, 0)}d</small></th>
+                <td><strong>{entry.action_label || "HOLD"}</strong></td>
+                <td>{fmtNumber(entry.score, 2)}</td>
+                <td>{titleCase(entry.forward_status || "pending")}</td>
+                <td className={toneClass(entry.forward_result_pct)}>{fmtPct(entry.forward_result_pct)}</td>
+                <td className={toneClass(entry.alpha_pct)}>{fmtPct(entry.alpha_pct)}</td>
+                <td className={entry.paper_hit ? "tone-positive" : entry.paper_hit === false ? "tone-negative" : ""}>{entry.paper_hit == null ? "Pending" : entry.paper_hit ? "Hit" : "Miss"}</td>
+              </tr>
+            ))}</tbody>
+            </table>
           </div>
           <p className="report-disclaimer">{prospective.caveat}</p>
         </>
@@ -288,17 +399,157 @@ function ProspectiveValidationPanel({ payload }: { payload: EvidenceLabResponse 
   );
 }
 
+function ProspectiveTrialPanel({
+  trial,
+  loading,
+  error,
+  eligible,
+  onRegister,
+  onAssess,
+  onClose,
+}: {
+  trial: ProspectiveTrial | null;
+  loading: boolean;
+  error: string;
+  eligible: boolean;
+  onRegister: (owner: string, hypothesis: string) => Promise<void>;
+  onAssess: () => Promise<void>;
+  onClose: (status: "completed" | "withdrawn" | "invalidated", note: string, actor: string) => Promise<void>;
+}) {
+  const [owner, setOwner] = useState("Research Committee");
+  const [hypothesis, setHypothesis] = useState("Positive directional alpha persists after implementation costs.");
+  const [closeStatus, setCloseStatus] = useState<"completed" | "withdrawn" | "invalidated">("completed");
+  const [closeNote, setCloseNote] = useState("");
+
+  if (!trial) {
+    return (
+      <Panel title="Prospective Trial" meta={eligible ? "registration ready" : "real-data gate"}>
+        {error && <div className="notice danger" role="alert">{error}</div>}
+        <div className="form-grid">
+          <label>Owner<input value={owner} onChange={(event) => setOwner(event.currentTarget.value)} /></label>
+          <label className="span-two">Preregistered hypothesis<textarea value={hypothesis} onChange={(event) => setHypothesis(event.currentTarget.value)} rows={2} /></label>
+        </div>
+        <p className="muted">Protocol: 21-session horizon and step, SPY benchmark, 5-observation minimum, 90% familywise confidence, all three price regimes, full fee/spread/slippage/impact/tax/idle-cash stack, and $1B expected AUM capacity review.</p>
+        <button
+          type="button"
+          disabled={!eligible || loading || owner.trim().length < 2 || hypothesis.trim().length < 12}
+          onClick={() => void onRegister(owner.trim(), hypothesis.trim())}
+        >
+          {loading ? "Registering..." : "Register immutable trial"}
+        </button>
+        {!eligible && <p className="report-disclaimer">Eligible live or uploaded history is required before trial registration.</p>}
+      </Panel>
+    );
+  }
+
+  const assessment = trial.assessment;
+  const layers = assessment.implementation_evidence;
+  return (
+    <Panel title="Prospective Trial" meta={`${trial.trial_id} · ${titleCase(trial.status)}`}>
+      {error && <div className="notice danger" role="alert">{error}</div>}
+      <div className="metric-grid compact-metrics">
+        <StatTile label="Assessment" value={titleCase(assessment.state)} tone={assessment.passed ? "positive" : "warning"} />
+        <StatTile label="Scheduled" value={fmtNumber(assessment.observations.scheduled_count, 0)} />
+        <StatTile label="Measured" value={fmtNumber(assessment.observations.measured_directional_count, 0)} />
+        <StatTile label="Net alpha" value={fmtPct(assessment.metrics.avg_net_directional_alpha_pct)} tone={toneForSigned(assessment.metrics.avg_net_directional_alpha_pct)} />
+        <StatTile label="Adjusted confidence" value={fmtPct(assessment.multiplicity.adjusted_confidence_pct)} />
+        <StatTile label="Regime coverage" value={assessment.regime_robustness.coverage_passed ? "Passed" : "Collecting"} tone={assessment.regime_robustness.coverage_passed ? "positive" : "warning"} />
+      </div>
+      <p><strong>{trial.protocol.hypothesis}</strong></p>
+      <p className="muted">Owner: {trial.protocol.owner} · registered {trial.starts_on} · protocol {trial.protocol_hash.slice(0, 12)} · expected AUM ${fmtNumber(trial.protocol.expected_aum_usd, 0)}</p>
+      <section className="dashboard-grid three">
+        <ImplementationLayer title="Paper" layer={layers.paper} />
+        <ImplementationLayer title="Proposed" layer={layers.proposed} />
+        <ImplementationLayer title="Actual" layer={layers.actual} />
+      </section>
+      <div className="button-row">
+        <button type="button" disabled={loading} onClick={() => void onAssess()}>{loading ? "Refreshing..." : "Refresh assessment"}</button>
+      </div>
+      {trial.status === "open" && (
+        <div className="form-grid">
+          <label>Close status
+            <TerminalSelect
+              ariaLabel="Trial close status"
+              value={closeStatus}
+              onChange={(value) => setCloseStatus(value as typeof closeStatus)}
+              options={[
+                { value: "completed", label: "Completed" },
+                { value: "withdrawn", label: "Withdrawn" },
+                { value: "invalidated", label: "Invalidated" },
+              ]}
+            />
+          </label>
+          <label className="span-two">Required close note<input value={closeNote} onChange={(event) => setCloseNote(event.currentTarget.value)} /></label>
+          <button type="button" disabled={loading || closeNote.trim().length < 5} onClick={() => void onClose(closeStatus, closeNote.trim(), owner.trim())}>Close trial</button>
+        </div>
+      )}
+      <p className="report-disclaimer">Prospective paper research and implementation evidence only. Helios does not execute orders or guarantee outcomes.</p>
+    </Panel>
+  );
+}
+
+function ImplementationLayer({ title, layer }: { title: string; layer: ProspectiveTrial["assessment"]["implementation_evidence"]["paper"] }) {
+  return (
+    <article className="data-card">
+      <div className="panel-title"><span>{title}</span><small>{titleCase(layer.status)}</small></div>
+      <strong>{fmtPct(layer.avg_net_directional_alpha_pct)}</strong>
+      <p>{fmtNumber(layer.measured_count, 0)} measured</p>
+      {layer.linked_fill_count != null && <p>{fmtNumber(layer.linked_fill_count, 0)} linked fills · ${fmtNumber(layer.observed_fees_usd, 2)} fees</p>}
+      {layer.cost_basis && <small>{layer.cost_basis}</small>}
+    </article>
+  );
+}
+
+function trialProtocol(
+  target: { kind: TargetKind; id: string },
+  horizonDays: number,
+  owner: string,
+  hypothesis: string,
+): TrialProtocol {
+  return {
+    hypothesis,
+    primary_metric: "net_directional_alpha_pct",
+    horizon_days: horizonDays,
+    step_days: horizonDays,
+    benchmark: "SPY",
+    cost_assumptions: {
+      commission_bps_per_side: 1,
+      spread_bps_per_side: 2,
+      slippage_bps_per_side: 3,
+      market_impact_bps_per_side: 4,
+      tax_drag_bps: 5,
+      idle_cash_pct: 2,
+    },
+    success_thresholds: {
+      min_observations: 5,
+      min_hit_rate_pct: 50,
+      min_net_alpha_pct: 0,
+      max_false_positive_rate_pct: 50,
+      confidence_level_pct: 90,
+    },
+    regimes: ["risk_on", "neutral", "risk_off"],
+    owner,
+    allowed_sources: ["live", "upload"],
+    freshness_days: 3,
+    expected_aum_usd: 1_000_000_000,
+    max_position_pct: target.kind === "model" ? 20 : 100,
+    max_adv_participation_pct: 10,
+    planned_variants: ["Registered deterministic Helios composite"],
+    deleted_variants: [],
+  };
+}
+
 function BandRow({ label, band, isPct = true }: { label: string; band: EvidenceLabResponse["confidence_bands"]["alpha_pct"]; isPct?: boolean }) {
   const format = isPct ? fmtPct : (value: unknown) => fmtNumber(value, 2);
   return (
-    <div className="table-row">
-      <strong>{label}<small>{fmtNumber(band.count, 0)} windows</small></strong>
-      <span>{format(band.mean)}</span>
-      <span>{format(band.p05)}</span>
-      <span>{format(band.p50)}</span>
-      <span>{format(band.p95)}</span>
-      <span>{format(band.ci90_low)} - {format(band.ci90_high)}</span>
-    </div>
+    <tr>
+      <th scope="row"><strong>{label}<small>{fmtNumber(band.count, 0)} windows</small></strong></th>
+      <td>{format(band.mean)}</td>
+      <td>{format(band.p05)}</td>
+      <td>{format(band.p50)}</td>
+      <td>{format(band.p95)}</td>
+      <td>{format(band.ci90_low)} - {format(band.ci90_high)}</td>
+    </tr>
   );
 }
 

@@ -17,14 +17,6 @@ from engine import data, persistence
 from tests.conftest import price_csv, price_series
 
 
-@pytest.fixture(autouse=True)
-def reset_negative_resolve_cache():
-    # getattr keeps the fixture importable on builds without the negative cache.
-    getattr(data, "_NEGATIVE_RESOLVE", {}).clear()
-    yield
-    getattr(data, "_NEGATIVE_RESOLVE", {}).clear()
-
-
 def _client():
     helios.app.config.update(TESTING=True, PROPAGATE_EXCEPTIONS=False)
     return helios.app.test_client()
@@ -58,9 +50,9 @@ def _csv_bytes(dates, closes):
 # --------------------------------------------------------------------------- #
 def test_register_invalidates_stale_price_cache_after_upload(monkeypatch):
     monkeypatch.setattr(data, "HAS_YF", False)
-    stale = data.resolve_series("CACHEUP")
-    assert stale.source == "simulated"
-    assert "CACHEUP" in data._PRICE_CACHE
+    with pytest.raises(ValueError, match="No eligible persisted real price history"):
+        data.resolve_series("CACHEUP")
+    assert "CACHEUP" not in data._PRICE_CACHE
 
     data.parse_csv(price_csv(days=90), "CACHEUP", "Cache Upload")
 
@@ -71,7 +63,8 @@ def test_register_invalidates_stale_price_cache_after_upload(monkeypatch):
     assert len(permissive.close) == 90
 
 
-def test_register_invalidates_price_cache_after_live_refresh(monkeypatch):
+def test_register_invalidates_price_cache_after_live_refresh(monkeypatch, tmp_path):
+    _use_db(monkeypatch, tmp_path)
     monkeypatch.setattr(data, "HAS_YF", False)
     data.register(data.Instrument("CACHELV", "Cache Live", _ohlcv(days=90, start=100.0), "live", []))
     before = data.resolve_series("CACHELV", allow_sample=False, allow_simulated=False)
@@ -178,7 +171,8 @@ def test_normalise_price_frame_drops_non_finite_closes():
 # --------------------------------------------------------------------------- #
 # Fix 3: refresh-all batches with bounded workers and one journal refresh
 # --------------------------------------------------------------------------- #
-def test_refresh_all_runs_concurrently_with_single_journal_refresh(monkeypatch):
+def test_refresh_all_runs_concurrently_with_single_journal_refresh(monkeypatch, tmp_path):
+    _use_db(monkeypatch, tmp_path)
     symbols = [f"BATCH{i}" for i in range(8)]
     for symbol in symbols:
         data.register(data.Instrument(symbol, symbol, _ohlcv(days=90), "live", []))
@@ -216,7 +210,8 @@ def test_refresh_all_runs_concurrently_with_single_journal_refresh(monkeypatch):
     assert len(journal_calls) == 1  # forward refresh ran once for the batch
 
 
-def test_single_symbol_refresh_keeps_per_symbol_journal_refresh(monkeypatch):
+def test_single_symbol_refresh_keeps_per_symbol_journal_refresh(monkeypatch, tmp_path):
+    _use_db(monkeypatch, tmp_path)
     data.register(data.Instrument("SOLO1", "Solo One", _ohlcv(days=90), "live", []))
     journal_calls = []
     monkeypatch.setattr(data, "_refresh_signal_journal_forward_results", lambda: journal_calls.append(1))
@@ -233,8 +228,31 @@ def test_single_symbol_refresh_keeps_per_symbol_journal_refresh(monkeypatch):
     assert len(journal_calls) == 1  # skipped when the caller batches
 
 
+def test_live_persistence_failure_does_not_promote_provider_result(monkeypatch, tmp_path):
+    _use_db(monkeypatch, tmp_path)
+    original = data.Instrument("ATOMIC", "Original", _ohlcv(days=90, start=100), "upload", [])
+    data.register(original)
+
+    def fake_fetch(symbol):
+        return data.Instrument(symbol, "Replacement", _ohlcv(days=120, start=250), "live", [])
+
+    monkeypatch.setattr(
+        data,
+        "_persist_instrument",
+        lambda *args, **kwargs: {"persisted": False, "warning": "simulated disk failure"},
+    )
+    result = data.ensure_live_symbols(
+        ["ATOMIC"], fetcher=lambda *args, **kwargs: fake_fetch("ATOMIC"),
+    )
+
+    assert result["failed"] == 1
+    assert "disk failure" in result["results"][0]["message"]
+    assert data.get("ATOMIC") is original
+    assert data.get("ATOMIC").source == "upload"
+
+
 # --------------------------------------------------------------------------- #
-# Fix 4: failed live resolutions are negative-cached with a TTL
+# Fix 4: read-time resolution never calls a live provider
 # --------------------------------------------------------------------------- #
 class _FailingYF:
     def __init__(self):
@@ -245,41 +263,29 @@ class _FailingYF:
         raise RuntimeError("provider down")
 
 
-def test_failed_live_resolution_is_negative_cached(monkeypatch):
+def test_missing_resolution_never_calls_provider(monkeypatch):
     fake = _FailingYF()
     monkeypatch.setattr(data, "HAS_YF", True)
     monkeypatch.setattr(data, "_yf", fake)
 
-    with pytest.raises(ValueError, match="No eligible real price history"):
-        data.resolve_series("NEGT", allow_sample=False, allow_simulated=False)
-    assert fake.calls == 1
-
-    with pytest.raises(ValueError, match="No eligible real price history"):
-        data.resolve_series("NEGT", allow_sample=False, allow_simulated=False)
-    assert fake.calls == 1  # inside the TTL the provider is not retried
-
-    # After the TTL expires the live attempt is retried.
-    data._NEGATIVE_RESOLVE["NEGT"] = time.monotonic() - 1.0
-    with pytest.raises(ValueError, match="No eligible real price history"):
-        data.resolve_series("NEGT", allow_sample=False, allow_simulated=False)
-    assert fake.calls == 2
+    with pytest.raises(ValueError, match="No eligible persisted real price history"):
+        data.resolve_series("NEGT", allow_live=True)
+    assert fake.calls == 0
 
 
-def test_register_clears_negative_resolution_cache(monkeypatch):
+def test_register_makes_missing_resolution_available_without_provider(monkeypatch):
     fake = _FailingYF()
     monkeypatch.setattr(data, "HAS_YF", True)
     monkeypatch.setattr(data, "_yf", fake)
 
-    with pytest.raises(ValueError, match="No eligible real price history"):
+    with pytest.raises(ValueError, match="No eligible persisted real price history"):
         data.resolve_series("NEGREG", allow_sample=False, allow_simulated=False)
-    assert "NEGREG" in data._NEGATIVE_RESOLVE
 
     data.register(data.Instrument("NEGREG", "Neg Reg", _ohlcv(days=90), "upload", []))
 
-    assert "NEGREG" not in data._NEGATIVE_RESOLVE
     ps = data.resolve_series("NEGREG", allow_sample=False, allow_simulated=False)
     assert ps.source == "upload"
-    assert fake.calls == 1  # resolved from the store, no further provider calls
+    assert fake.calls == 0
 
 
 # --------------------------------------------------------------------------- #

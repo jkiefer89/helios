@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 import app as helios
-from engine import data, persistence, portfolio
+from engine import data, evidence, persistence, portfolio
 from tests.conftest import price_csv, price_series
 
 SQLITE_HEADER = b"SQLite format 3\x00"
@@ -35,8 +35,125 @@ def test_sqlite_schema_is_created_with_version(monkeypatch, tmp_path):
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
 
-    assert {"instruments", "price_history", "models", "holdings", "refresh_log", "signal_journal"} <= tables
+    assert {
+        "instruments", "price_history", "models", "holdings", "refresh_log",
+        "signal_journal", "account_snapshot_revisions", "evidence_snapshots",
+    } <= tables
     assert version == persistence.SCHEMA_VERSION
+
+
+def test_account_snapshot_corrections_are_append_only(monkeypatch, tmp_path):
+    store = _use_db(monkeypatch, tmp_path)
+    initial = {
+        "account_id": "ACC-LINEAGE", "as_of": "2026-07-10", "cash": 1000,
+        "total_value": 5000, "source": "custodian_upload",
+    }
+    first = store.record_account_snapshot(initial, [{"ticker": "AAPL", "shares": 10, "price": 400}])
+    duplicate = store.record_account_snapshot(initial, [{"ticker": "AAPL", "shares": 10, "price": 400}])
+    corrected = store.record_account_snapshot(
+        {**initial, "total_value": 5100, "correction_reason": "Custodian restatement."},
+        [{"ticker": "AAPL", "shares": 10, "price": 410}],
+    )
+
+    revisions = store.account_snapshot_revisions("ACC-LINEAGE", "2026-07-10")
+    assert first["revision"] == 1
+    assert duplicate["duplicate"] is True
+    assert corrected["revision"] == 2
+    assert [row["revision"] for row in revisions] == [2, 1]
+    assert revisions[0]["supersedes_snapshot_id"] == revisions[1]["snapshot_id"]
+    assert revisions[0]["correction_reason"] == "Custodian restatement."
+    assert revisions[0]["content_hash"] != revisions[1]["content_hash"]
+    assert store.account_snapshots("ACC-LINEAGE")[0]["total_value"] == 5100
+
+    persistence.reset_store_for_tests()
+    reopened = persistence.get_store()
+    restarted = reopened.account_snapshot_revisions("ACC-LINEAGE", "2026-07-10")
+    assert [(row["revision"], row["content_hash"]) for row in restarted] == [
+        (row["revision"], row["content_hash"]) for row in revisions
+    ]
+    assert restarted[0]["positions"] == revisions[0]["positions"]
+    assert restarted[1]["positions"] == revisions[1]["positions"]
+
+
+def test_evidence_snapshot_replays_and_detects_tampering(monkeypatch, tmp_path):
+    store = _use_db(monkeypatch, tmp_path)
+    evidence_id = evidence.new_id("test")
+    result = evidence.capture(
+        evidence_id=evidence_id,
+        artifact_kind="test",
+        target_kind="instrument",
+        target_id="AAPL",
+        input_payload={"rows": [["2026-07-10", "100"]]},
+        output_payload={"action": "HOLD", "score": 0.25},
+        evidence_manifest=evidence.manifest(
+            source="upload", transformations=("unit_test",),
+        ),
+    )
+    assert result["recorded"] is True
+    verified = evidence.verify(evidence_id)
+    assert verified["status"] == "verified"
+    assert verified["manifest"]["calculation_version"] == evidence.CALCULATION_VERSION
+
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE evidence_snapshots SET output_json = ? WHERE evidence_id = ?",
+            (store._store_json({"action": "BUY", "score": 99}), evidence_id),
+        )
+    assert evidence.verify(evidence_id)["status"] == "hash_mismatch"
+
+
+def test_evidence_envelope_detects_manifest_tampering_and_redacts_secrets(monkeypatch, tmp_path):
+    store = _use_db(monkeypatch, tmp_path)
+    evidence_id = evidence.new_id("secret-test")
+    secret_shaped_sentinel = "sk-" + "ant-api03-should-never-persist"
+    result = evidence.capture(
+        evidence_id=evidence_id,
+        artifact_kind="test",
+        target_kind="instrument",
+        target_id="AAPL",
+        input_payload={
+            "api_key": "must-not-persist",
+            "nested": {"authorization": "Bearer must-not-persist"},
+            "note": f"credential {secret_shaped_sentinel}",
+        },
+        output_payload={"status": "ok"},
+        evidence_manifest=evidence.manifest(source="upload", provider="licensed-primary"),
+    )
+    assert result["recorded"] is True
+    stored = store.get_evidence_snapshot(evidence_id)
+    assert stored["input"]["api_key"] == "[redacted]"
+    assert stored["input"]["nested"]["authorization"] == "[redacted]"
+    assert "must-not-persist" not in evidence.canonical_text(stored)
+    assert secret_shaped_sentinel not in evidence.canonical_text(stored)
+
+    with store._connect() as conn:
+        manifest = store._store_json({**stored["manifest"], "provider": "tampered-provider"})
+        conn.execute(
+            "UPDATE evidence_snapshots SET manifest_json = ? WHERE evidence_id = ?",
+            (manifest, evidence_id),
+        )
+    assert evidence.verify(evidence_id)["status"] == "hash_mismatch"
+
+
+def test_point_in_time_inputs_never_read_later_revisions(monkeypatch, tmp_path):
+    store = _use_db(monkeypatch, tmp_path)
+    monkeypatch.setattr(persistence, "utc_now", lambda: "2026-07-13T12:00:00+00:00")
+    store.record_fundamentals_snapshot({
+        "symbol": "PITX", "as_of": "2026-07-12", "forward_pe": 20,
+        "source": "provider-a",
+    })
+    store.record_fundamentals_snapshot({
+        "symbol": "PITX", "as_of": "2026-07-13", "forward_pe": 30,
+        "source": "provider-a",
+    })
+    store.record_corporate_actions("PITX", [
+        {"action_type": "dividend", "ex_date": "2026-07-12", "value": 0.5, "source": "provider-a"},
+        {"action_type": "split", "ex_date": "2026-07-14", "value": 2.0, "source": "provider-a"},
+    ])
+
+    assert store.fundamentals_as_of("PITX", "2026-07-12")["forward_pe"] == 20
+    assert store.fundamentals_as_of("PITX", "2026-07-13")["forward_pe"] == 30
+    assert [row["action_type"] for row in store.corporate_actions_as_of("PITX", "2026-07-13")] == ["dividend"]
 
 
 def test_uploaded_price_history_survives_process_store_reload(monkeypatch, tmp_path):
@@ -587,6 +704,26 @@ def test_encrypted_snapshot_writes_are_debounced_until_flush(monkeypatch, tmp_pa
     assert {inst.symbol for inst in reloaded.load_instruments()} == {"BATCH0", "BATCH1", "BATCH2"}
 
 
+def test_required_encrypted_write_rolls_back_when_snapshot_cannot_persist(monkeypatch, tmp_path):
+    store = _use_encrypted_db(monkeypatch, tmp_path)
+    baseline = store.path.read_bytes()
+    original = store._persist_encrypted_snapshot
+
+    def fail_snapshot():
+        raise OSError("simulated durable snapshot failure")
+
+    monkeypatch.setattr(store, "_persist_encrypted_snapshot", fail_snapshot)
+    with pytest.raises(RuntimeError, match="Could not persist encrypted snapshot"):
+        store.audit_append("critical.test", {"state": "must-not-survive"}, required=True)
+
+    assert store.audit_verify()["entries"] == 0
+    assert store.path.read_bytes() == baseline
+
+    monkeypatch.setattr(store, "_persist_encrypted_snapshot", original)
+    persistence.reset_store_for_tests()
+    assert persistence.get_store().audit_verify()["entries"] == 0
+
+
 def test_dirty_snapshot_flushes_after_max_age(monkeypatch, tmp_path):
     monkeypatch.setattr(persistence, "SNAPSHOT_FLUSH_MAX_AGE_SECONDS", 0.05)
     store = _use_encrypted_db(monkeypatch, tmp_path)
@@ -595,7 +732,7 @@ def test_dirty_snapshot_flushes_after_max_age(monkeypatch, tmp_path):
     store.persist_instrument(symbol="AGED1", name="Aged One", source="live", frame=_ohlcv(days=90))
 
     deadline = time.time() + 5
-    while time.time() < deadline and store.path.read_bytes() == stale:
+    while time.time() < deadline and (store.path.read_bytes() == stale or store._snapshot_dirty):
         time.sleep(0.02)
     assert store.path.read_bytes() != stale
     assert store._snapshot_dirty is False

@@ -128,25 +128,37 @@ export function Decisions() {
         <Panel title="Log a decision">
             <div className="decision-form">
               <div className="decision-form__row">
-                <select value={targetKind} onChange={(e) => setTargetKind(e.target.value)}>
-                  <option value="instrument">Instrument</option>
-                  <option value="model">Model</option>
-                </select>
-                <input
-                  value={targetId}
-                  onChange={(e) => setTargetId(e.target.value)}
-                  placeholder={targetKind === "model" ? "Model id (e.g. ULTRA-CORE)" : "Ticker (e.g. JPM)"}
-                />
-                <select value={myAction} onChange={(e) => setMyAction(e.target.value)}>
-                  {ACTIONS.map((a) => <option key={a} value={a}>{a}</option>)}
-                </select>
+                <label className="decision-form__field">
+                  <span>Target type</span>
+                  <select value={targetKind} onChange={(e) => setTargetKind(e.target.value)}>
+                    <option value="instrument">Instrument</option>
+                    <option value="model">Model</option>
+                  </select>
+                </label>
+                <label className="decision-form__field decision-form__field--wide">
+                  <span>{targetKind === "model" ? "Model ID" : "Ticker"}</span>
+                  <input
+                    value={targetId}
+                    onChange={(e) => setTargetId(e.target.value)}
+                    placeholder={targetKind === "model" ? "e.g. ULTRA-CORE" : "e.g. JPM"}
+                  />
+                </label>
+                <label className="decision-form__field">
+                  <span>Your action</span>
+                  <select value={myAction} onChange={(e) => setMyAction(e.target.value)}>
+                    {ACTIONS.map((a) => <option key={a} value={a}>{a}</option>)}
+                  </select>
+                </label>
               </div>
-              <textarea
-                value={rationale}
-                rows={2}
-                onChange={(e) => setRationale(e.target.value)}
-                placeholder="Why? (your rationale becomes the record you learn from)"
-              />
+              <label className="decision-form__field">
+                <span>Decision rationale</span>
+                <textarea
+                  value={rationale}
+                  rows={2}
+                  onChange={(e) => setRationale(e.target.value)}
+                  placeholder="Your rationale becomes the record you learn from"
+                />
+              </label>
               <button type="button" onClick={() => void record()} disabled={saving || !targetId.trim()}>
                 {saving ? "Recording…" : "Record decision"}
               </button>
@@ -170,24 +182,24 @@ export function Decisions() {
             body="Log your first call — from here or the Analysis quick-log — and Helios starts building your personal evidence base."
           />
         ) : (
-          <div className="decision-table">
-            <div className="decision-table__head">
-              <span>When</span><span>Target</span><span>Engine</span><span>You</span>
-              <span>Stance</span><span>21d</span><span>63d</span><span>252d</span><span>Rationale</span>
-            </div>
-            {decisions.map((d) => (
-              <div key={d.decision_id} className="decision-table__row">
-                <span>{fmtTimestamp(d.created_at)}</span>
-                <span><b>{d.target_id}</b></span>
-                <span className={`signal-action action-${(d.engine_action || "review").toLowerCase()}`}>{d.engine_action || "—"}</span>
-                <span className={`signal-action action-${bucketClass(d.my_action)}`}>{d.my_action}</span>
-                <span className={d.agreement === "override" ? "decision-override" : "decision-agree"}>
-                  {d.agreement || "—"}
-                </span>
-                {["21", "63", "252"].map((h) => <span key={h}>{outcomeCell(d, h)}</span>)}
-                <span className="decision-rationale" title={d.rationale}>{d.rationale || "—"}</span>
-              </div>
-            ))}
+          <div className="decision-table terminal-data-table-shell" tabIndex={0} aria-label="Scrollable decision history">
+            <table className="terminal-data-table decision-data-table">
+              <thead><tr>
+                <th scope="col">When</th><th scope="col">Target</th><th scope="col">Engine</th><th scope="col">You</th>
+                <th scope="col">Stance</th><th scope="col">21d</th><th scope="col">63d</th><th scope="col">252d</th><th scope="col">Rationale</th>
+              </tr></thead>
+              <tbody>{decisions.map((d) => (
+                <tr key={d.decision_id}>
+                  <td>{fmtTimestamp(d.created_at)}</td>
+                  <th scope="row"><b>{d.target_id}</b></th>
+                  <td><span className={`signal-action action-${(d.engine_action || "review").toLowerCase()}`}>{d.engine_action || "—"}</span></td>
+                  <td><span className={`signal-action action-${bucketClass(d.my_action)}`}>{d.my_action}</span></td>
+                  <td><span className={d.agreement === "override" ? "decision-override" : "decision-agree"}>{d.agreement || "—"}</span></td>
+                  {["21", "63", "252"].map((h) => <td key={h}>{outcomeCell(d, h)}</td>)}
+                  <td className="decision-rationale" title={d.rationale}>{d.rationale || "—"}</td>
+                </tr>
+              ))}</tbody>
+            </table>
           </div>
         )}
       </Panel>
@@ -230,15 +242,17 @@ function LedgerSection() {
   const [busy, setBusy] = useState(false);
   const [asOf, setAsOf] = useState("");
   const [newAccount, setNewAccount] = useState("");
+  const [accountsError, setAccountsError] = useState("");
 
   const refreshAccounts = useCallback(async () => {
     try {
       const [acct, mods] = await Promise.all([api.ledgerAccounts(), api.models()]);
       setAccounts(acct.accounts);
       setModels(mods.models);
+      setAccountsError("");
       if (!accountId && acct.accounts.length) setAccountId(acct.accounts[0].account_id);
-    } catch {
-      // accounts list is optional context; uploads surface their own errors
+    } catch (err) {
+      setAccountsError(err instanceof Error ? err.message : "Ledger accounts and model mappings are unavailable.");
     }
   }, [accountId]);
 
@@ -297,6 +311,9 @@ function LedgerSection() {
 
   return (
     <Panel title="Ledger — Actual vs Paper" meta="custodian fills + snapshots · Modified-Dietz TWR">
+      {accountsError && (
+        <div className="notice warning" role="alert">{accountsError} <button type="button" onClick={() => void refreshAccounts()}>Retry ledger setup</button></div>
+      )}
       <div className="decision-form">
         <div className="decision-form__row">
           <select value={accountId} onChange={(e) => setAccountId(e.target.value)} aria-label="Ledger account">
@@ -353,18 +370,20 @@ function LedgerSection() {
       )}
 
       {shortfall.length > 0 && (
-        <div className="terminal-table" tabIndex={0} aria-label="Implementation shortfall table">
-          <div className="terminal-table__head"><span>Decision</span><span>Ticker</span><span>Side</span><span>Avg fill</span><span>Decision close</span><span>Shortfall</span></div>
-          {shortfall.slice(0, 8).map((row) => (
-            <div className="table-row" key={`${row.decision_id}-${row.ticker}-${row.side}`}>
-              <span>{row.decision_date}<small>{row.decision_id.slice(0, 12)}</small></span>
-              <strong>{row.ticker}</strong>
-              <span>{row.side}</span>
-              <span>{fmtNumber(row.avg_fill_price, 2)}</span>
-              <span>{fmtNumber(row.decision_close, 2)}</span>
-              <span className={(row.shortfall_bps ?? 0) > 0 ? "tone-negative" : "tone-positive"}>{fmtNumber(row.shortfall_bps, 0)} bps</span>
-            </div>
-          ))}
+        <div className="terminal-table terminal-data-table-shell" tabIndex={0} aria-label="Scrollable implementation shortfall">
+          <table className="terminal-data-table implementation-shortfall-data-table">
+            <thead><tr><th scope="col">Decision</th><th scope="col">Ticker</th><th scope="col">Side</th><th scope="col">Avg fill</th><th scope="col">Decision close</th><th scope="col">Shortfall</th></tr></thead>
+            <tbody>{shortfall.slice(0, 8).map((row) => (
+            <tr key={`${row.decision_id}-${row.ticker}-${row.side}`}>
+              <th scope="row">{row.decision_date}<small>{row.decision_id.slice(0, 12)}</small></th>
+              <td><strong>{row.ticker}</strong></td>
+              <td>{row.side}</td>
+              <td>{fmtNumber(row.avg_fill_price, 2)}</td>
+              <td>{fmtNumber(row.decision_close, 2)}</td>
+              <td className={(row.shortfall_bps ?? 0) > 0 ? "tone-negative" : "tone-positive"}>{fmtNumber(row.shortfall_bps, 0)} bps</td>
+            </tr>
+          ))}</tbody>
+          </table>
         </div>
       )}
 
@@ -437,20 +456,20 @@ function RebalancePanel({ accountId, modelId }: { accountId: string; modelId: st
             </div>
           )}
           {(proposal.trades || []).length > 0 && (
-            <div className="terminal-table" tabIndex={0} aria-label="Proposed trades table">
-              <div className="terminal-table__head">
-                <span>Ticker</span><span>Side</span><span>Now → Target</span><span>Proposed</span><span>Trade</span><span>Days @ cap</span>
-              </div>
-              {(proposal.trades || []).slice(0, 20).map((t) => (
-                <div className="table-row" key={t.ticker}>
-                  <strong>{t.ticker}</strong>
-                  <span className={t.side === "BUY" ? "tone-positive" : "tone-negative"}>{t.side}</span>
-                  <span>{fmtNumber(t.current_weight_pct, 1)}% → {fmtNumber(t.target_weight_pct, 1)}%</span>
-                  <span>{fmtNumber(t.proposed_weight_pct, 1)}%</span>
-                  <span>{fmtMoney(t.trade_usd)}<small>≈{fmtNumber(t.est_shares, 0)} sh @ {fmtNumber(t.price_used, 2)}</small></span>
-                  <span>{t.est_days_to_trade != null ? fmtNumber(t.est_days_to_trade, 1) : "ADV n/a"}</span>
-                </div>
-              ))}
+            <div className="terminal-table terminal-data-table-shell" tabIndex={0} aria-label="Scrollable proposed trades">
+              <table className="terminal-data-table proposed-trades-data-table">
+                <thead><tr><th scope="col">Ticker</th><th scope="col">Side</th><th scope="col">Now → Target</th><th scope="col">Proposed</th><th scope="col">Trade</th><th scope="col">Days @ cap</th></tr></thead>
+                <tbody>{(proposal.trades || []).slice(0, 20).map((t) => (
+                <tr key={t.ticker}>
+                  <th scope="row">{t.ticker}</th>
+                  <td className={t.side === "BUY" ? "tone-positive" : "tone-negative"}>{t.side}</td>
+                  <td>{fmtNumber(t.current_weight_pct, 1)}% → {fmtNumber(t.target_weight_pct, 1)}%</td>
+                  <td>{fmtNumber(t.proposed_weight_pct, 1)}%</td>
+                  <td>{fmtMoney(t.trade_usd)}<small>≈{fmtNumber(t.est_shares, 0)} sh @ {fmtNumber(t.price_used, 2)}</small></td>
+                  <td>{t.est_days_to_trade != null ? fmtNumber(t.est_days_to_trade, 1) : "ADV n/a"}</td>
+                </tr>
+              ))}</tbody>
+              </table>
             </div>
           )}
           <p className="forecast-note">{proposal.basis} {proposal.disclaimer}</p>

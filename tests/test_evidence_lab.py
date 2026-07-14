@@ -61,7 +61,8 @@ def test_walk_forward_evidence_engine_reports_oos_metrics_for_real_model():
     assert result["target"]["kind"] == "model"
     assert result["benchmark"]["symbol"] == "QQQ"
     assert result["summary"]["window_count"] >= 8
-    assert result["summary"]["measured_count"] == result["summary"]["window_count"]
+    assert 0 < result["summary"]["measured_count"] <= result["summary"]["window_count"]
+    assert result["summary"]["benchmark_coverage_pct"] == 100.0
     assert result["summary"]["hit_rate_pct"] is not None
     assert "avg_alpha_pct" in result["summary"]
     assert result["false_positives"]["count"] >= 0
@@ -69,8 +70,17 @@ def test_walk_forward_evidence_engine_reports_oos_metrics_for_real_model():
     assert result["confidence_bands"]["alpha_pct"]["p05"] <= result["confidence_bands"]["alpha_pct"]["p95"]
     assert {5, 21, 63} <= {row["horizon_days"] for row in result["decay"]}
     assert result["regime_sensitivity"]
+    assert result["regime_robustness"]["required_regimes"] == 3
+    assert result["multiplicity"]["evaluated_horizons"] == 3
+    rolling = result["validation_methods"]["rolling"]
+    anchored = result["validation_methods"]["anchored"]
+    assert rolling["summary"]["window_count"] == anchored["summary"]["window_count"]
+    assert rolling["mode"] == "rolling"
+    assert anchored["mode"] == "anchored"
     assert result["windows"]
-    assert {"signal_date", "signal_score", "action_label", "forward_result_pct", "alpha_pct", "regime", "paper_hit"} <= set(result["windows"][0])
+    assert {"signal_date", "signal_score", "action_label", "forward_result_pct", "alpha_pct", "regime", "paper_hit", "hold_preserved", "validation_method"} <= set(result["windows"][0])
+    assert {row["input_rows"] for row in result["windows"]} == {126}
+    assert anchored["summary"]["window_count"] > 1
     assert result["methodology"]["no_lookahead"] is True
     assert result["methodology"]["analysis_only"] is True
 
@@ -106,6 +116,7 @@ def test_evidence_lab_endpoint_returns_real_model_walk_forward_payload():
     assert body["decay"]
     assert body["regime_sensitivity"]
     assert body["confidence_bands"]["forward_result_pct"]
+    assert set(body["validation_methods"]) == {"rolling", "anchored"}
 
 
 def test_evidence_lab_endpoint_blocks_missing_real_model_data(monkeypatch):

@@ -45,7 +45,7 @@ export function SignalJournal() {
         <div>
           <div className="section-label">Signal Journal</div>
           <h1>Paper performance tracking</h1>
-          <p>Every deterministic Helios signal is tracked with input range, action, benchmark, pending or measured forward result, and analysis-only caveats.</p>
+          <p>Deliberately recorded Helios signals are tracked with input range, action, benchmark, pending or measured forward result, and analysis-only caveats.</p>
         </div>
         <form className="toolbar" onSubmit={(event) => { event.preventDefault(); void load(); }}>
           <button type="submit">{loading ? "Refreshing..." : "Refresh journal"}</button>
@@ -56,13 +56,14 @@ export function SignalJournal() {
       {!payload ? (
         <EmptyState title="Signal Journal unavailable" body="The backend did not return paper-performance journal data." />
       ) : payload.entries.length === 0 ? (
-        <EmptyState title="No signal history yet" body="Run instrument or model analysis to start logging paper results. Helios stores compact audit facts, not raw price histories." />
+        <EmptyState title="No signal history yet" body="Open Analysis and choose Record Helios signal to begin prospective paper measurement. Viewing analysis never writes to the journal." />
       ) : (
         <>
           <section className="dashboard-grid three">
-            <Panel title="Hit Rate" meta={`${payload.summary.measured_count} measured`}>
+            <Panel title="Directional Evidence" meta={`${payload.summary.measured_count} benchmark-measured`}>
               <div className="metric-grid">
                 <StatTile label="Paper hit rate" value={fmtPct(payload.summary.hit_rate_pct)} tone={toneForPositive(payload.summary.hit_rate_pct)} />
+                <StatTile label="HOLD preservation" value={fmtPct(payload.summary.hold_preservation_rate_pct)} tone={toneForPositive(payload.summary.hold_preservation_rate_pct)} />
                 <StatTile label="Avg alpha (gross)" value={fmtPct(payload.summary.avg_alpha_pct)} tone={toneForSigned(payload.summary.avg_alpha_pct)} />
                 <StatTile
                   label="Alpha net of default costs"
@@ -76,7 +77,7 @@ export function SignalJournal() {
             <Panel title="Pending Forward Results" meta={`${payload.summary.pending_count} pending`}>
               <div className="metric-grid compact-metrics">
                 <StatTile label="Signals" value={fmtNumber(payload.summary.total_count, 0)} />
-                <StatTile label="Measured" value={fmtNumber(payload.summary.measured_count, 0)} tone="positive" />
+                <StatTile label="Completed outcomes" value={fmtNumber(payload.summary.outcome_count, 0)} tone="positive" />
                 <StatTile label="Pending" value={fmtNumber(payload.summary.pending_count, 0)} tone={payload.summary.pending_count ? "warning" : "positive"} />
                 <StatTile label="Research-ready" value={fmtNumber(payload.summary.research_ready_count, 0)} />
               </div>
@@ -125,18 +126,20 @@ function BenchmarkComparison({ rows }: { rows: SignalJournalBenchmarkComparison[
       {rows.length === 0 ? (
         <EmptyState title="No measured benchmark rows" body="Benchmark comparison appears after measured forward results include benchmark data." />
       ) : (
-        <div className="terminal-table journal-benchmark-table" tabIndex={0} aria-label="Signal Journal benchmark comparison">
-          <div className="terminal-table__head"><span>Benchmark</span><span>Measured</span><span>Forward</span><span>Benchmark</span><span>Alpha</span><span>Hit Rate</span></div>
-          {rows.map((row) => (
-            <div className="table-row" key={row.benchmark}>
-              <span><strong>{row.benchmark}</strong></span>
-              <span>{fmtNumber(row.measured_count, 0)}</span>
-              <span>{fmtPct(row.avg_forward_result_pct)}</span>
-              <span>{fmtPct(row.avg_benchmark_result_pct)}</span>
-              <span className={toneClass(row.avg_alpha_pct)}>{fmtPct(row.avg_alpha_pct)}</span>
-              <span>{fmtPct(row.hit_rate_pct)}</span>
-            </div>
-          ))}
+        <div className="terminal-table terminal-data-table-shell" tabIndex={0} aria-label="Scrollable Signal Journal benchmark comparison">
+          <table className="terminal-data-table journal-benchmark-data-table">
+            <thead><tr><th scope="col">Benchmark</th><th scope="col">Measured</th><th scope="col">Forward</th><th scope="col">Benchmark</th><th scope="col">Alpha</th><th scope="col">Hit Rate</th></tr></thead>
+            <tbody>{rows.map((row) => (
+              <tr key={row.benchmark}>
+                <th scope="row"><strong>{row.benchmark}</strong></th>
+                <td>{fmtNumber(row.measured_count, 0)}</td>
+                <td>{fmtPct(row.avg_forward_result_pct)}</td>
+                <td>{fmtPct(row.avg_benchmark_result_pct)}</td>
+                <td className={toneClass(row.avg_alpha_pct)}>{fmtPct(row.avg_alpha_pct)}</td>
+                <td>{fmtPct(row.hit_rate_pct)}</td>
+              </tr>
+            ))}</tbody>
+          </table>
         </div>
       )}
     </Panel>
@@ -149,18 +152,20 @@ function ModelEvidence({ rows }: { rows: SignalJournalModelEvidence[] }) {
       {rows.length === 0 ? (
         <EmptyState title="No model-level signals yet" body="Run model analysis to build model-by-model evidence and forward result history." />
       ) : (
-        <div className="terminal-table journal-model-table" tabIndex={0} aria-label="Model-by-model signal journal evidence">
-          <div className="terminal-table__head"><span>Model</span><span>Signals</span><span>Latest</span><span>Hit Rate</span><span>Alpha</span><span>Sources</span></div>
-          {rows.map((row) => (
-            <div className="table-row" key={row.target_id}>
-              <span><strong>{row.target_name}</strong><small>{row.target_id} · {row.data_modes.map(titleCase).join(", ")}</small></span>
-              <span>{row.measured_count}/{row.signal_count}<small>{row.pending_count} pending</small></span>
-              <span>{row.latest_action_label}<small>{row.latest_input_end_date} · score {fmtNumber(row.latest_score, 2)}</small></span>
-              <span>{fmtPct(row.hit_rate_pct)}</span>
-              <span className={toneClass(row.avg_alpha_pct)}>{fmtPct(row.avg_alpha_pct)}</span>
-              <span>{sourceSummary(row.source_counts)}</span>
-            </div>
-          ))}
+        <div className="terminal-table terminal-data-table-shell" tabIndex={0} aria-label="Scrollable model-by-model signal journal evidence">
+          <table className="terminal-data-table journal-model-data-table">
+            <thead><tr><th scope="col">Model</th><th scope="col">Signals</th><th scope="col">Latest</th><th scope="col">Hit Rate</th><th scope="col">Alpha</th><th scope="col">Sources</th></tr></thead>
+            <tbody>{rows.map((row) => (
+              <tr key={row.target_id}>
+                <th scope="row"><strong>{row.target_name}</strong><small>{row.target_id} · {row.data_modes.map(titleCase).join(", ")}</small></th>
+                <td>{row.measured_count}/{row.signal_count}<small>{row.pending_count} pending</small></td>
+                <td>{row.latest_action_label}<small>{row.latest_input_end_date} · score {fmtNumber(row.latest_score, 2)}</small></td>
+                <td>{fmtPct(row.hit_rate_pct)}</td>
+                <td className={toneClass(row.avg_alpha_pct)}>{fmtPct(row.avg_alpha_pct)}</td>
+                <td>{sourceSummary(row.source_counts)}</td>
+              </tr>
+            ))}</tbody>
+          </table>
         </div>
       )}
     </Panel>
@@ -173,17 +178,19 @@ function PendingResults({ rows }: { rows: SignalJournalEntry[] }) {
       {rows.length === 0 ? (
         <EmptyState title="No pending paper results" body="All logged signals currently have measured forward results." />
       ) : (
-        <div className="terminal-table journal-pending-table" tabIndex={0} aria-label="Pending signal forward results">
-          <div className="terminal-table__head"><span>Target</span><span>Action</span><span>Input Range</span><span>Horizon</span><span>Benchmark</span></div>
-          {rows.slice(0, 12).map((entry) => (
-            <div className="table-row" key={entry.id}>
-              <span><strong>{entry.target_name}</strong><small>{entry.target_kind} · {entry.target_id}</small></span>
-              <span>{entry.action_label}<small>score {fmtNumber(entry.score, 2)}</small></span>
-              <span>{entry.input_start_date} to {entry.input_end_date}<small>{entry.input_rows} rows</small></span>
-              <span>{entry.horizon_days}d</span>
-              <span>{entry.benchmark || "none"}</span>
-            </div>
-          ))}
+        <div className="terminal-table terminal-data-table-shell" tabIndex={0} aria-label="Scrollable pending signal forward results">
+          <table className="terminal-data-table journal-pending-data-table">
+            <thead><tr><th scope="col">Target</th><th scope="col">Action</th><th scope="col">Input Range</th><th scope="col">Horizon</th><th scope="col">Benchmark</th></tr></thead>
+            <tbody>{rows.slice(0, 12).map((entry) => (
+              <tr key={entry.id}>
+                <th scope="row"><strong>{entry.target_name}</strong><small>{entry.target_kind} · {entry.target_id}</small></th>
+                <td>{entry.action_label}<small>score {fmtNumber(entry.score, 2)}</small></td>
+                <td>{entry.input_start_date} to {entry.input_end_date}<small>{entry.input_rows} rows</small></td>
+                <td>{entry.horizon_days}d</td>
+                <td>{entry.benchmark || "none"}</td>
+              </tr>
+            ))}</tbody>
+          </table>
         </div>
       )}
     </Panel>
@@ -193,19 +200,21 @@ function PendingResults({ rows }: { rows: SignalJournalEntry[] }) {
 function SignalHistory({ rows }: { rows: SignalJournalEntry[] }) {
   return (
     <Panel title="Signal History" meta={`${rows.length} logged`}>
-      <div className="terminal-table journal-history-table" tabIndex={0} aria-label="Signal history">
-        <div className="terminal-table__head"><span>Date</span><span>Target</span><span>Action</span><span>Score</span><span>Benchmark</span><span>Forward</span><span>Alpha</span></div>
-        {rows.slice(0, 40).map((entry) => (
-          <div className="table-row" key={entry.id}>
-            <span>{fmtTimestamp(entry.created_at)}</span>
-            <span><strong>{entry.target_name}</strong><small>{entry.target_kind} · {entry.input_end_date}</small></span>
-            <span>{entry.action_label}</span>
-            <span>{fmtNumber(entry.score, 2)}</span>
-            <span>{entry.benchmark || "none"}</span>
-            <span>{entry.forward_status === "measured" ? fmtPct(entry.forward_result_pct) : "Pending"}<small>{entry.forward_end_date || ""}</small></span>
-            <span className={toneClass(entry.alpha_pct)}>{fmtPct(entry.alpha_pct)}</span>
-          </div>
-        ))}
+      <div className="terminal-table terminal-data-table-shell" tabIndex={0} aria-label="Scrollable signal history">
+        <table className="terminal-data-table journal-history-data-table">
+          <thead><tr><th scope="col">Date</th><th scope="col">Target</th><th scope="col">Action</th><th scope="col">Score</th><th scope="col">Benchmark</th><th scope="col">Forward</th><th scope="col">Alpha</th></tr></thead>
+          <tbody>{rows.slice(0, 40).map((entry) => (
+            <tr key={entry.id}>
+              <td>{fmtTimestamp(entry.created_at)}</td>
+              <th scope="row"><strong>{entry.target_name}</strong><small>{entry.target_kind} · {entry.input_end_date}</small></th>
+              <td>{entry.action_label}</td>
+              <td>{fmtNumber(entry.score, 2)}</td>
+              <td>{entry.benchmark || "none"}</td>
+              <td>{entry.forward_status === "measured" ? fmtPct(entry.forward_result_pct) : "Pending"}<small>{entry.forward_end_date || ""}</small></td>
+              <td className={toneClass(entry.alpha_pct)}>{fmtPct(entry.alpha_pct)}</td>
+            </tr>
+          ))}</tbody>
+        </table>
       </div>
     </Panel>
   );

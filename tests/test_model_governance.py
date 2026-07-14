@@ -1,5 +1,10 @@
+import numpy as np
+import pandas as pd
+import pytest
+from io import BytesIO
+
 import app as helios
-from engine import persistence, portfolio
+from engine import data, model_governance, persistence, portfolio
 
 
 def _use_db(monkeypatch, tmp_path):
@@ -18,6 +23,22 @@ def _client():
     return helios.app.test_client()
 
 
+def _make_research_ready(model, *extra_symbols):
+    symbols = [holding.ticker for holding in model.holdings]
+    symbols.extend(extra_symbols)
+    symbols.extend(["SPY", "QQQ"])
+    idx = pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=760)
+    for offset, symbol in enumerate(dict.fromkeys(symbols)):
+        if symbol in {"SPY", "QQQ"}:
+            pattern = np.array([0.006, -0.003, 0.005, -0.002, 0.004, -0.001])
+        else:
+            scale = 1.0 + offset * 0.03
+            pattern = np.array([0.012, -0.004, 0.009, -0.003, 0.007, -0.002]) * scale
+        returns = np.resize(pattern, len(idx))
+        close = pd.Series(100.0 * np.cumprod(1.0 + returns), index=idx, name="close")
+        data.register(data.Instrument(symbol, symbol, close.to_frame(), "upload", []))
+
+
 def test_model_governance_tracks_versions_approval_risk_limits_and_history(monkeypatch, tmp_path):
     _use_db(monkeypatch, tmp_path)
     model = portfolio.parse_model_file(
@@ -27,6 +48,7 @@ def test_model_governance_tracks_versions_approval_risk_limits_and_history(monke
         "balanced",
         "Advisor-created model for governance review.",
     )
+    _make_research_ready(model)
     client = _client()
 
     initial = client.get("/api/model-governance").get_json()
@@ -55,7 +77,7 @@ def test_model_governance_tracks_versions_approval_risk_limits_and_history(monke
     event = resp.get_json()["event"]
     assert event["version"] == 2
     assert event["approval_status"] == "approved"
-    assert event["actor"] == "Advisor Console"
+    assert event["actor"] == "local-operator"
     assert event["snapshot"]["model"]["id"] == model.id
     assert event["snapshot"]["holdings"][0]["ticker"] == "AAPL"
 
@@ -63,14 +85,14 @@ def test_model_governance_tracks_versions_approval_risk_limits_and_history(monke
     governed = next(item for item in updated["models"] if item["id"] == model.id)
     assert governed["version"] == 2
     assert governed["approval_status"] == "approved"
-    assert governed["approved_by"] == "Advisor Console"
+    assert governed["approved_by"] == "local-operator"
     assert governed["latest_change_note"] == "Initial investment committee approval after reducing concentration."
     assert governed["rebalance_status"] == "recorded"
     assert governed["snapshot_count"] == 1
     assert governed["change_note_count"] == 1
     assert updated["snapshots"][0]["version"] == 2
     assert updated["rebalance_history"][0]["model_id"] == model.id
-    assert updated["change_log"][0]["actor"] == "Advisor Console"
+    assert updated["change_log"][0]["actor"] == "local-operator"
     assert updated["summary"]["approved_count"] == 1
 
 
@@ -83,6 +105,7 @@ def test_model_governance_blocks_approval_when_risk_limits_breach_and_allows_rej
         "balanced",
         "Committee review model with excessive concentration.",
     )
+    _make_research_ready(model)
     client = _client()
 
     blocked = client.post(
@@ -133,6 +156,7 @@ def test_model_editor_archives_before_after_diff_and_resets_approval(monkeypatch
         "balanced",
         "Approved model before a committee edit.",
     )
+    _make_research_ready(model, "AVGO")
     client = _client()
     approved = client.post(
         f"/api/model-governance/{model.id}/events",
@@ -189,6 +213,7 @@ def test_model_governance_approval_packet_exports_committee_evidence(monkeypatch
         "balanced",
         "Approval packet model.",
     )
+    _make_research_ready(model)
     client = _client()
     edit = client.post(
         f"/api/models/{model.id}/editor",
@@ -248,6 +273,7 @@ def test_model_governance_requires_verified_committee_identity_when_pin_configur
         "balanced",
         "Committee approval model with local identity verification.",
     )
+    _make_research_ready(model)
     client = _client()
 
     missing_identity = client.post(
@@ -314,6 +340,70 @@ def test_model_governance_requires_verified_committee_identity_when_pin_configur
 
     assert packet["committee_identity"]["signer_name"] == "Jordan Reviewer"
     assert packet["committee_identity"]["verified"] is True
+
+
+def test_model_approval_requires_real_fresh_coverage_and_validation(monkeypatch, tmp_path):
+    _use_db(monkeypatch, tmp_path)
+    model = portfolio.parse_model_file(
+        b"Ticker,Weight\nNOEVIDENCE1,50\nNOEVIDENCE2,50\n",
+        "not-ready.csv",
+        "Not Ready Model",
+        "balanced",
+        "Must not be approved without research evidence.",
+    )
+
+    response = _client().post(
+        f"/api/model-governance/{model.id}/events",
+        json={
+            "actor": "Investment Committee",
+            "approval_status": "approved",
+            "action": "approval_update",
+            "note": "Attempted approval without sufficient evidence.",
+        },
+    )
+
+    assert response.status_code == 400
+    error = response.get_json()["error"].lower()
+    assert "eligible live or uploaded" in error
+    assert "benchmark-measured" in error
+
+
+def test_same_name_model_reupload_invalidates_prior_approval(monkeypatch, tmp_path):
+    _use_db(monkeypatch, tmp_path)
+    model = portfolio.parse_model_file(
+        b"Ticker,Weight\nAAPL,20\nMSFT,20\nGOOGL,20\nAMZN,20\nNVDA,20\n",
+        "reupload.csv",
+        "Reupload Governance Model",
+        "balanced",
+        "Original approved version.",
+    )
+    _make_research_ready(model, "AVGO")
+    client = _client()
+    approval = client.post(
+        f"/api/model-governance/{model.id}/events",
+        json={
+            "actor": "Investment Committee",
+            "approval_status": "approved",
+            "action": "approval_update",
+            "note": "Approved original holdings after evidence review.",
+        },
+    )
+    assert approval.status_code == 200
+
+    upload = client.post(
+        "/api/model/upload",
+        data={
+            "file": (BytesIO(b"Ticker,Weight\nAAPL,15\nMSFT,20\nGOOGL,20\nAMZN,20\nNVDA,15\nAVGO,10\n"), "reupload-v2.csv"),
+            "name": "Reupload Governance Model",
+            "mandate": "balanced",
+        },
+        content_type="multipart/form-data",
+    )
+
+    assert upload.status_code == 200
+    row = next(item for item in client.get("/api/model-governance").get_json()["models"] if item["id"] == model.id)
+    assert row["approval_status"] == "pending_review"
+    assert row["approved_by"] == ""
 
 
 def test_model_governance_is_unavailable_without_sqlite_persistence(monkeypatch):
@@ -429,3 +519,67 @@ def test_model_editor_saves_normalized_holdings_and_governance_snapshot(monkeypa
     assert governed["latest_change_note"] == "Reduced concentration and rebalanced target weights."
     assert governed["version"] == 2
     assert governance["change_log"][0]["action"] == "model_edit"
+
+
+def test_model_editor_rolls_back_model_when_governance_evidence_fails(monkeypatch, tmp_path):
+    store = _use_db(monkeypatch, tmp_path)
+    model = portfolio.parse_model_file(
+        b"Ticker,Weight\nAAPL,60\nMSFT,40\n",
+        "atomic-editor.csv",
+        "Atomic Editor Model",
+        "balanced",
+        "Original governed holdings.",
+    )
+    monkeypatch.setattr(
+        model_governance.evidence,
+        "capture",
+        lambda **_kwargs: {"recorded": False, "warning": "simulated evidence failure"},
+    )
+
+    with pytest.raises(RuntimeError, match="simulated evidence failure"):
+        model_governance.save_edit(
+            model,
+            holdings=[
+                {"ticker": "AAPL", "weight_pct": 25},
+                {"ticker": "MSFT", "weight_pct": 25},
+                {"ticker": "NVDA", "weight_pct": 50},
+            ],
+            change_note="This attempted edit must remain atomic.",
+        )
+
+    assert [holding.ticker for holding in portfolio.get(model.id).holdings] == ["AAPL", "MSFT"]
+    persisted = next(item for item in store.load_models() if item.id == model.id)
+    assert [holding["ticker"] for holding in persisted.holdings] == ["AAPL", "MSFT"]
+    assert store.model_governance_events(model.id, limit=10) == []
+
+
+def test_model_replacement_upload_rolls_back_when_governance_fails(monkeypatch, tmp_path):
+    store = _use_db(monkeypatch, tmp_path)
+    original = portfolio.parse_model_file(
+        b"Ticker,Weight\nAAPL,60\nMSFT,40\n",
+        "atomic-upload.csv",
+        "Atomic Upload Model",
+        "balanced",
+        "Original uploaded holdings.",
+    )
+    monkeypatch.setattr(
+        model_governance,
+        "record_event",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("simulated governance failure")),
+    )
+
+    response = _client().post(
+        "/api/model/upload",
+        data={
+            "name": original.name,
+            "mandate": "balanced",
+            "context": "Replacement attempt.",
+            "file": (BytesIO(b"Ticker,Weight\nNVDA,70\nAVGO,30\n"), "replacement.csv"),
+        },
+        content_type="multipart/form-data",
+    )
+
+    assert response.status_code == 503
+    assert [holding.ticker for holding in portfolio.get(original.id).holdings] == ["AAPL", "MSFT"]
+    persisted = next(item for item in store.load_models() if item.id == original.id)
+    assert [holding["ticker"] for holding in persisted.holdings] == ["AAPL", "MSFT"]

@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Start Helios live on your local network (production server + password gate).
+# Start Helios on localhost using the production WSGI server + password gate.
 #
 #   ./run.sh                       # auto-generates a password, prints it
 #   HELIOS_PASSWORD=secret ./run.sh
 #   HELIOS_PORT=8080 ./run.sh
-#   HELIOS_TLS=1 ./run.sh          # self-signed HTTPS (encrypts the login)
+#   HELIOS_TLS=1 ./run.sh          # self-signed HTTPS for local development
+#   # Institutional mode rejects direct public binds; use a trusted TLS reverse proxy.
 #   ./run.sh --dev                 # localhost-only Flask dev server
 set -e
 cd "$(dirname "$0")"

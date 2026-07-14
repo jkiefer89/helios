@@ -9,17 +9,20 @@ modules that import from here.
 from __future__ import annotations
 
 import math
+import hashlib
 import os
 import secrets
 import socket
 import threading
 import time
+from dataclasses import dataclass
 from hmac import compare_digest
+from collections.abc import Callable
 from urllib.parse import urlsplit
 
 import numpy as np
 import pandas as pd
-from flask import Flask, Response, jsonify, request, send_from_directory
+from flask import Flask, Response, g, jsonify, request, send_from_directory
 from werkzeug.exceptions import HTTPException
 
 from .localenv import APP_ROOT
@@ -52,6 +55,44 @@ def _resolve_auth_password(raw: str | None) -> tuple[str, bool]:
 
 
 AUTH_PASSWORD, PASSWORD_GENERATED = _resolve_auth_password(os.environ.get("HELIOS_PASSWORD"))
+
+
+@dataclass(frozen=True)
+class Principal:
+    username: str
+    roles: tuple[str, ...]
+    auth_method: str
+    mfa_verified: bool
+
+
+@dataclass
+class SessionRecord:
+    principal: Principal
+    created_at: float
+    last_seen: float
+    absolute_expires_at: float
+
+
+ROLE_PERMISSIONS = {
+    "viewer": {"read"},
+    "analyst": {"read", "research_write"},
+    "data_steward": {"read", "data_write", "operations"},
+    "model_sponsor": {"read", "research_write", "governance_submit"},
+    "independent_validator": {"read", "validation_review"},
+    "approver": {"read", "governance_approve"},
+    "admin": {
+        "read", "research_write", "data_write", "operations",
+        "provider_admin", "governance_submit", "governance_approve",
+        "validation_review", "security_admin",
+    },
+}
+PRIVILEGED_PERMISSIONS = {
+    "data_write", "operations", "provider_admin", "governance_approve",
+    "governance_submit", "validation_review", "security_admin",
+}
+_SESSIONS: dict[str, SessionRecord] = {}
+_SESSIONS_LOCK = threading.Lock()
+SESSION_COOKIE = "helios_session"
 
 
 def _auth_ok(username: str, password: str) -> bool:
@@ -119,6 +160,307 @@ def _clear_auth_failures(remote: str) -> None:
         _AUTH_FAILURES.pop(remote, None)
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_seconds(name: str, default: int, low: int, high: int) -> int:
+    try:
+        value = int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        value = default
+    return max(low, min(value, high))
+
+
+def _roles(raw: str, default: str = "viewer") -> tuple[str, ...]:
+    roles = tuple(sorted({part.strip().lower() for part in raw.split(",") if part.strip()}))
+    return roles or (default,)
+
+
+def _permissions(principal: Principal) -> set[str]:
+    permissions: set[str] = set()
+    for role in principal.roles:
+        permissions.update(ROLE_PERMISSIONS.get(role, set()))
+    return permissions
+
+
+def _session_token_from_request() -> str:
+    authorization = request.headers.get("Authorization", "")
+    if authorization.lower().startswith("bearer "):
+        return authorization[7:].strip()
+    return request.cookies.get(SESSION_COOKIE, "").strip()
+
+
+def _session_principal(token: str) -> Principal | None:
+    if not token:
+        return None
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    now = time.time()
+    idle_seconds = _env_seconds("HELIOS_SESSION_IDLE_SECONDS", 900, 60, 86_400)
+    with _SESSIONS_LOCK:
+        record = _SESSIONS.get(token_hash)
+        if record is None:
+            return None
+        if now >= record.absolute_expires_at or now - record.last_seen >= idle_seconds:
+            _SESSIONS.pop(token_hash, None)
+            return None
+        record.last_seen = now
+        return record.principal
+
+
+def _trusted_proxy() -> bool:
+    configured = {
+        part.strip() for part in os.environ.get("HELIOS_TRUSTED_PROXY_IPS", "").split(",")
+        if part.strip()
+    }
+    return bool(configured) and (request.remote_addr or "") in configured
+
+
+def _sso_principal() -> Principal | None:
+    if not _env_bool("HELIOS_SSO_ENABLED", False) or not _trusted_proxy():
+        return None
+    username = request.headers.get("X-Helios-User", "").strip()
+    if not username:
+        return None
+    roles = _roles(request.headers.get("X-Helios-Roles", "viewer"))
+    mfa = request.headers.get("X-Helios-MFA", "").strip().lower() in {"1", "true", "verified", "yes"}
+    return Principal(username[:120], roles, "trusted_proxy_sso", mfa)
+
+
+def _basic_principal() -> Principal | None:
+    auth = request.authorization
+    if not auth or auth.type != "basic" or not _auth_ok(auth.username or "", auth.password or ""):
+        return None
+    return Principal(
+        (auth.username or AUTH_USER)[:120],
+        _roles(os.environ.get("HELIOS_BASIC_ROLES", "admin"), default="admin"),
+        "basic",
+        _env_bool("HELIOS_BASIC_MFA_VERIFIED", False),
+    )
+
+
+def _authenticate_request() -> Principal | None:
+    principal = _session_principal(_session_token_from_request())
+    if principal is not None:
+        return principal
+    principal = _sso_principal()
+    if principal is not None:
+        return principal
+    return _basic_principal()
+
+
+def _required_permission() -> str:
+    if request.method in _CSRF_SAFE_METHODS:
+        return "read"
+    path = request.path
+    if path.startswith("/api/auth/"):
+        return "read"
+    if path.startswith("/api/providers"):
+        return "provider_admin"
+    if path.startswith("/api/model/forward"):
+        return "data_write"
+    if path.startswith("/api/operations"):
+        return "operations"
+    if path.startswith("/api/data-quality/sync"):
+        return "operations"
+    if path.startswith("/api/ledger/account/") and request.method == "DELETE":
+        return "operations"
+    if path.startswith("/api/ledger"):
+        return "data_write"
+    if "/independent-validation" in path or "/validation-exceptions" in path:
+        return "validation_review"
+    if path.startswith("/api/model-governance"):
+        payload = request.get_json(silent=True) if request.is_json else {}
+        status = str((payload or {}).get("approval_status") or "").lower()
+        return "governance_approve" if status in {"approved", "rejected"} else "governance_submit"
+    if path.startswith("/api/models/") and path.endswith("/editor"):
+        return "governance_submit"
+    if path.startswith(("/api/live", "/api/upload", "/api/data/", "/api/model/upload")):
+        return "data_write"
+    return "research_write"
+
+
+def _host_allowed() -> bool:
+    configured = {
+        part.strip().lower() for part in os.environ.get("HELIOS_TRUSTED_HOSTS", "").split(",")
+        if part.strip()
+    }
+    if not configured:
+        return True
+    host = (request.host or "").split(":", 1)[0].strip("[]").lower()
+    return host in configured
+
+
+def _security_event(action: str, outcome: str, principal: Principal | None = None, details: dict | None = None) -> bool:
+    try:
+        from engine import operations
+
+        recorded = operations.record_privileged_event(
+            actor=principal.username if principal else "unknown",
+            actor_roles=list(principal.roles) if principal else [],
+            action=action,
+            resource=request.path,
+            outcome=outcome,
+            source_ip=request.remote_addr or "",
+            details=details or {},
+        )
+        return recorded is not None
+    except Exception:
+        app.logger.exception("Could not record privileged security event")
+        return False
+
+
+def _institutional_controls_required() -> bool:
+    return _env_bool("HELIOS_INSTITUTIONAL_CONTROLS", True)
+
+
+def _privileged_preflight(principal: Principal, permission: str):
+    if permission not in PRIVILEGED_PERMISSIONS or not _institutional_controls_required():
+        return None
+    if not AUTH_ENABLED and not app.testing:
+        return _guard_response("Institutional controls require authenticated access.", 503)
+    try:
+        from engine import persistence
+
+        store = persistence.get_store()
+    except Exception:
+        store = None
+    if (
+        store is None
+        or not store.available
+        or not bool((getattr(store, "encryption", None) or {}).get("enabled"))
+    ):
+        return _guard_response(
+            "Institutional privileged actions require durable encrypted audit persistence.",
+            503,
+        )
+    if not _security_event(
+        f"http_{request.method.lower()}_attempt",
+        "attempted",
+        principal,
+        {"permission": permission},
+    ):
+        return _guard_response("Privileged-action audit preflight failed.", 503)
+    g.helios_privileged_attempt_recorded = True
+    g.helios_privileged_commit_callbacks = []
+    g.helios_privileged_rollback_callbacks = []
+    try:
+        transaction = store.transaction(durable=True)
+        transaction.__enter__()
+        g.helios_privileged_transaction = transaction
+    except Exception:
+        app.logger.exception("Could not begin privileged-action transaction")
+        return _guard_response("Privileged-action durable transaction could not start.", 503)
+    return None
+
+
+def _finish_privileged_transaction(*, commit: bool) -> None:
+    transaction = getattr(g, "helios_privileged_transaction", None)
+    if transaction is None:
+        return
+    g.helios_privileged_transaction = None
+    if commit:
+        transaction.__exit__(None, None, None)
+        return
+    rollback = RuntimeError("Privileged request did not complete successfully.")
+    transaction.__exit__(RuntimeError, rollback, None)
+
+
+def privileged_transaction_active() -> bool:
+    return getattr(g, "helios_privileged_transaction", None) is not None
+
+
+def defer_privileged_state(
+    *,
+    commit: Callable[[], None] | None = None,
+    rollback: Callable[[], None] | None = None,
+) -> bool:
+    """Tie process-local state changes to the active privileged DB transaction.
+
+    A commit callback runs only after the durable DB commit. A rollback callback
+    runs after any non-success response, audit failure, or commit failure. When
+    institutional controls are not active, commit callbacks run immediately.
+    """
+    if not privileged_transaction_active():
+        if commit is not None:
+            commit()
+        return False
+    if commit is not None:
+        g.helios_privileged_commit_callbacks.append(commit)
+    if rollback is not None:
+        g.helios_privileged_rollback_callbacks.append(rollback)
+    return True
+
+
+def _run_privileged_callbacks(kind: str) -> None:
+    name = f"helios_privileged_{kind}_callbacks"
+    callbacks = list(getattr(g, name, []) or [])
+    setattr(g, name, [])
+    if kind == "rollback":
+        callbacks.reverse()
+    for callback in callbacks:
+        callback()
+
+
+def _rollback_privileged_state() -> None:
+    try:
+        _run_privileged_callbacks("rollback")
+    except Exception:
+        app.logger.exception("Could not restore privileged process-local state")
+    g.helios_privileged_commit_callbacks = []
+
+
+def current_principal() -> Principal:
+    principal = getattr(g, "helios_principal", None)
+    return principal or Principal("local-operator", ("admin",), "local", True)
+
+
+def current_actor() -> str:
+    return current_principal().username
+
+
+def create_session(principal: Principal) -> tuple[str, dict]:
+    token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    now = time.time()
+    absolute_seconds = _env_seconds("HELIOS_SESSION_ABSOLUTE_SECONDS", 28_800, 300, 604_800)
+    with _SESSIONS_LOCK:
+        _prune_sessions(now)
+        if len(_SESSIONS) >= 200:
+            oldest = min(_SESSIONS, key=lambda key: _SESSIONS[key].last_seen)
+            _SESSIONS.pop(oldest, None)
+        _SESSIONS[token_hash] = SessionRecord(principal, now, now, now + absolute_seconds)
+    return token, {
+        "user": principal.username,
+        "roles": list(principal.roles),
+        "auth_method": principal.auth_method,
+        "mfa_verified": principal.mfa_verified,
+        "absolute_expires_in_seconds": absolute_seconds,
+        "idle_timeout_seconds": _env_seconds("HELIOS_SESSION_IDLE_SECONDS", 900, 60, 86_400),
+    }
+
+
+def revoke_session(token: str) -> bool:
+    if not token:
+        return False
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    with _SESSIONS_LOCK:
+        return _SESSIONS.pop(token_hash, None) is not None
+
+
+def _prune_sessions(now: float) -> None:
+    idle_seconds = _env_seconds("HELIOS_SESSION_IDLE_SECONDS", 900, 60, 86_400)
+    expired = [
+        key for key, record in _SESSIONS.items()
+        if now >= record.absolute_expires_at or now - record.last_seen >= idle_seconds
+    ]
+    for key in expired:
+        _SESSIONS.pop(key, None)
+
+
 def _guard_response(message: str, code: int, headers: dict | None = None) -> Response:
     """Auth/CSRF/lockout refusal: JSON error envelope for API paths, plain text
     elsewhere so the browser Basic-auth prompt keeps working."""
@@ -134,19 +476,49 @@ def _guard_response(message: str, code: int, headers: dict | None = None) -> Res
 
 @app.before_request
 def _require_auth():
+    if not _host_allowed():
+        _security_event("host_rejected", "denied", details={"host": request.host})
+        return _guard_response("Untrusted host.", 400)
     if request.method not in _CSRF_SAFE_METHODS and _is_cross_site_request():
+        _security_event("csrf_rejected", "denied")
         return _guard_response("Forbidden.", 403)
     if not AUTH_ENABLED:
-        return None
+        principal = Principal("local-operator", ("admin",), "auth_disabled", True)
+        g.helios_principal = principal
+        permission = _required_permission()
+        g.helios_permission = permission
+        return _privileged_preflight(principal, permission)
     remote = request.remote_addr or "unknown"
     if _auth_locked_out(remote):
+        _security_event("authentication_lockout", "denied")
         return _guard_response("Too many failed login attempts — try again shortly.", 429)
-    auth = request.authorization
-    if auth and auth.type == "basic" and _auth_ok(auth.username or "", auth.password or ""):
+    principal = _authenticate_request()
+    if principal is not None:
         _clear_auth_failures(remote)
-        return None
+        g.helios_principal = principal
+        permission = _required_permission()
+        g.helios_permission = permission
+        if permission not in _permissions(principal):
+            _security_event(
+                "authorization_denied", "denied", principal,
+                {"required_permission": permission},
+            )
+            return _guard_response("Insufficient role permission.", 403)
+        if (
+            permission in PRIVILEGED_PERMISSIONS
+            and (_env_bool("HELIOS_REQUIRE_MFA", False) or _institutional_controls_required())
+            and not principal.mfa_verified
+        ):
+            _security_event(
+                "mfa_required", "denied", principal,
+                {"required_permission": permission},
+            )
+            return _guard_response("Verified MFA is required for this operation.", 403)
+        return _privileged_preflight(principal, permission)
+    auth = request.authorization
     if auth is not None:
         _register_auth_failure(remote)
+        _security_event("authentication_failed", "denied")
     return _guard_response(
         "Helios — authentication required.",
         401,
@@ -166,6 +538,48 @@ def _serve_react_index():
 def _security_headers(resp: Response) -> Response:
     """Defense-in-depth headers. The CSP restricts scripts to our own origin
     on every response — there are no per-route exceptions."""
+    permission = getattr(g, "helios_permission", "")
+    if request.method not in _CSRF_SAFE_METHODS and permission in PRIVILEGED_PERMISSIONS:
+        transaction = getattr(g, "helios_privileged_transaction", None)
+        if transaction is not None and resp.status_code < 400:
+            audited = _security_event(
+                f"http_{request.method.lower()}",
+                "succeeded",
+                current_principal(),
+                {"permission": permission, "status_code": resp.status_code},
+            )
+            if audited:
+                try:
+                    _finish_privileged_transaction(commit=True)
+                    _run_privileged_callbacks("commit")
+                except Exception:
+                    app.logger.exception("Could not durably commit privileged action")
+                    _rollback_privileged_state()
+                    resp = _guard_response("Privileged action could not be durably committed.", 503)
+            else:
+                _finish_privileged_transaction(commit=False)
+                _rollback_privileged_state()
+                resp = _guard_response("Privileged action completed without durable audit confirmation.", 503)
+        elif transaction is not None:
+            _finish_privileged_transaction(commit=False)
+            _rollback_privileged_state()
+            _security_event(
+                f"http_{request.method.lower()}",
+                "failed",
+                current_principal(),
+                {"permission": permission, "status_code": resp.status_code},
+            )
+        else:
+            audited = _security_event(
+                f"http_{request.method.lower()}",
+                "succeeded" if resp.status_code < 400 else "failed",
+                current_principal(),
+                {"permission": permission, "status_code": resp.status_code},
+            )
+            if _institutional_controls_required() and resp.status_code < 400 and not audited:
+                resp = _guard_response("Privileged action completed without durable audit confirmation.", 503)
+    # Apply headers after any fail-closed response replacement so the error
+    # response receives the same browser defenses as the original response.
     resp.headers["X-Content-Type-Options"] = "nosniff"
     resp.headers["X-Frame-Options"] = "DENY"
     resp.headers["Referrer-Policy"] = "no-referrer"
@@ -177,7 +591,16 @@ def _security_headers(resp: Response) -> Response:
         "connect-src 'self'; "
         "base-uri 'none'; frame-ancestors 'none'; object-src 'none'"
     )
+    if _env_bool("HELIOS_TRUSTED_TLS", False):
+        resp.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return resp
+
+
+@app.teardown_request
+def _rollback_unfinished_privileged_transaction(_error=None) -> None:
+    if getattr(g, "helios_privileged_transaction", None) is not None:
+        _finish_privileged_transaction(commit=False)
+        _rollback_privileged_state()
 
 
 # Bound concurrent outbound live fetches so they can't consume every worker

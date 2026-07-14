@@ -134,16 +134,18 @@ export function OpportunityRadar({
                 <span>Evidence gates</span>
                 <span>0 eligible rankings</span>
               </div>
-              <div className="radar-preview-table locked-radar-table gate-checklist-table" tabIndex={0} aria-label="Locked opportunity radar gate checklist" onKeyDown={scrollTableByKey}>
-                <div><span>Area</span><span>Status</span><span>Required evidence</span><span>Next step</span></div>
-                {lockedRows.map((row) => (
-                  <div className="locked-table-row" key={row.area}>
-                    <strong>{row.area}<small>{row.detail}</small></strong>
-                    <span>{row.status}</span>
-                    <span>{row.evidence}</span>
-                    <em>{row.nextStep}</em>
-                  </div>
-                ))}
+              <div className="radar-preview-table locked-radar-table terminal-data-table-shell" tabIndex={0} aria-label="Locked opportunity radar gate checklist" onKeyDown={scrollTableByKey}>
+                <table className="terminal-data-table gate-checklist-data-table">
+                  <thead><tr><th scope="col">Area</th><th scope="col">Status</th><th scope="col">Required evidence</th><th scope="col">Next step</th></tr></thead>
+                  <tbody>{lockedRows.map((row) => (
+                    <tr key={row.area}>
+                      <th scope="row"><strong>{row.area}</strong><small>{row.detail}</small></th>
+                      <td><span className="gate-status">{row.status}</span></td>
+                      <td>{row.evidence}</td>
+                      <td>{row.nextStep}</td>
+                    </tr>
+                  ))}</tbody>
+                </table>
               </div>
             </>
           ) : (
@@ -152,23 +154,20 @@ export function OpportunityRadar({
                 <span>{items.length} rows</span>
                 <span>{payload?.total_candidates ? `${payload.total_candidates} screened` : "Real eligible set"}</span>
               </div>
-              <div className="terminal-table" tabIndex={0} aria-label="Scrollable ranked candidates table" onKeyDown={scrollTableByKey}>
-                <div className="terminal-table__head"><span>Rank</span><span>Name</span><span>Action</span><span>Opp</span><span>Evidence</span><span>Risk</span></div>
-                {items.map((item, index) => (
-                  <button
-                    className={selected?.id === item.id ? "selected" : ""}
-                    type="button"
-                    key={item.id}
-                    onClick={() => setSelectedId(item.id)}
-                  >
-                    <span>{index + 1}</span>
-                    <span><strong>{item.symbol}</strong><small>{item.name}</small><SourcePill source={item.source} /></span>
-                    <span className={`action action-${safeActionTone(item.action)}`}>{item.action}</span>
-                    <ScoreBar value={item.opportunity_score} tone="positive" />
-                    <ScoreBar value={item.evidence_score} tone="info" />
-                    <ScoreBar value={item.risk_score} tone="negative" />
-                  </button>
-                ))}
+              <div className="terminal-table terminal-data-table-shell" tabIndex={0} aria-label="Scrollable ranked candidates table" onKeyDown={scrollTableByKey}>
+                <table className="terminal-data-table opportunity-data-table">
+                  <thead><tr><th scope="col">Rank</th><th scope="col">Name</th><th scope="col">Action</th><th scope="col">Opp</th><th scope="col">Evidence</th><th scope="col">Risk</th></tr></thead>
+                  <tbody>{items.map((item, index) => (
+                  <tr className={selected?.id === item.id ? "selected" : ""} key={item.id}>
+                    <td><button type="button" onClick={() => setSelectedId(item.id)} aria-label={`Select ${item.symbol}`}>{index + 1}</button></td>
+                    <th scope="row"><strong>{item.symbol}</strong><small>{item.name}</small><SourcePill source={item.source} /></th>
+                    <td className={`action action-${safeActionTone(item.action)}`}>{item.action}</td>
+                    <td><ScoreBar value={item.opportunity_score} tone="positive" /></td>
+                    <td><ScoreBar value={item.evidence_score} tone="info" /></td>
+                    <td><ScoreBar value={item.risk_score} tone="negative" /></td>
+                  </tr>
+                ))}</tbody>
+                </table>
               </div>
             </>
           )}
@@ -206,7 +205,7 @@ function buildLockedOpportunityRows(payload: OpportunitiesResponse | null) {
   return [
     {
       area: "Universe eligibility",
-      detail: "No placeholder candidate rows are rendered.",
+      detail: "No unevidenced candidate rows are rendered.",
       status: "Locked",
       evidence: "Eligible live or uploaded price history",
       nextStep: requiredAction,
@@ -227,7 +226,7 @@ function buildLockedOpportunityRows(payload: OpportunitiesResponse | null) {
     },
     {
       area: "Research queue",
-      detail: "Sample data remains demo-only.",
+      detail: "Ineligible histories are excluded from research.",
       status: "Blocked",
       evidence: "Passed real-data gate",
       nextStep: "Re-run the radar after the gate opens.",
@@ -237,16 +236,18 @@ function buildLockedOpportunityRows(payload: OpportunitiesResponse | null) {
 
 function BlockedModelsTable({ items }: { items: BlockedOpportunityItem[] }) {
   return (
-    <div className="radar-preview-table locked-radar-table gate-checklist-table" tabIndex={0} aria-label="Blocked models excluded from the ranked queue" onKeyDown={scrollTableByKey}>
-      <div><span>Model</span><span>Status</span><span>Missing tickers</span><span>Required action</span></div>
-      {items.map((item) => (
-        <div className="locked-table-row" key={item.id}>
-          <strong>{item.name || item.symbol}<small>{item.reason || "Model data quality is blocked."}</small></strong>
-          <span>{item.display_label || "Data Quality Blocked"}</span>
-          <span>{item.missing_tickers?.length ? item.missing_tickers.join(", ") : "—"}</span>
-          <em>{item.required_action || "Connect live data or upload real price/model files to generate real research."}</em>
-        </div>
-      ))}
+    <div className="radar-preview-table locked-radar-table terminal-data-table-shell" tabIndex={0} aria-label="Blocked models excluded from the ranked queue" onKeyDown={scrollTableByKey}>
+      <table className="terminal-data-table gate-checklist-data-table">
+        <thead><tr><th scope="col">Model</th><th scope="col">Status</th><th scope="col">Missing tickers</th><th scope="col">Required action</th></tr></thead>
+        <tbody>{items.map((item) => (
+          <tr key={item.id}>
+            <th scope="row"><strong>{item.name || item.symbol}</strong><small>{item.reason || "Model data quality is blocked."}</small></th>
+            <td><span className="gate-status">{item.display_label || "Data Quality Blocked"}</span></td>
+            <td>{item.missing_tickers?.length ? item.missing_tickers.join(", ") : "—"}</td>
+            <td>{item.required_action || "Connect live data or upload real price/model files to generate real research."}</td>
+          </tr>
+        ))}</tbody>
+      </table>
     </div>
   );
 }
@@ -257,8 +258,8 @@ function LockedCandidateDetail({ payload }: { payload: OpportunitiesResponse | n
       <strong>Selection locked</strong>
       <p>{payload?.reason || payload?.required_action || "No eligible real-data candidate is available."}</p>
       <div>
-        <span className="source-pill source-demo">sample data excluded</span>
-        <span className="source-pill source-excluded">no fake rows</span>
+        <span className="source-pill source-excluded">ineligible data excluded</span>
+        <span className="source-pill source-excluded">evidence required</span>
       </div>
     </div>
   );

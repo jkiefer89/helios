@@ -35,6 +35,7 @@ DEFAULT_CONSTRAINTS: dict[str, float] = {
     "trade_horizon_days": 5.0,         # days allowed to work the trades
     "min_trade_usd": 200.0,            # suppress dust orders below this
     "cost_bps_per_side": costs.DEFAULT_COST_BPS_PER_SIDE,
+    "max_price_age_days": 7.0,          # as-of close freshness at the custodian date
 }
 
 _PROPOSAL_DISCLAIMER = ("Proposal for analysis only — Helios never executes trades. "
@@ -59,12 +60,16 @@ def _adv_usd(ticker: str) -> float | None:
     return float(dollar.mean())
 
 
-def _last_real_close(ticker: str) -> tuple[float | None, str]:
-    """Last close from live/uploaded history — never a simulated price."""
+def _last_real_close(ticker: str, as_of: str) -> tuple[float | None, str]:
+    """Latest eligible close on or before the custodian snapshot date."""
     inst = data.get(ticker)
     if inst is None or not provenance.is_real_source(inst.source) or "close" not in inst.df:
         return None, ""
-    close = inst.df["close"].dropna()
+    close = inst.df["close"].dropna().sort_index()
+    try:
+        close = close.loc[:pd.Timestamp(as_of)]
+    except (TypeError, ValueError):
+        return None, ""
     if close.empty:
         return None, ""
     return float(close.iloc[-1]), str(pd.Timestamp(close.index[-1]).date())
@@ -117,10 +122,14 @@ def propose_rebalance(account_id: str, model_id: str,
     cons, warnings = _merge_constraints(constraints)
     target = {h.ticker.upper(): float(h.weight) for h in model.holdings}
     current: dict[str, float] = {}
+    shares_available: dict[str, float] = {}
     for pos in positions:
         ticker = str(pos["ticker"]).upper()
         if ticker in {"CASH", "USD"}:
             continue
+        shares_available[ticker] = shares_available.get(ticker, 0.0) + max(
+            0.0, float(pos.get("shares") or 0.0),
+        )
         mv = pos.get("market_value")
         if mv is None and pos.get("price") is not None:
             mv = float(pos["shares"] or 0.0) * float(pos["price"])
@@ -133,13 +142,14 @@ def propose_rebalance(account_id: str, model_id: str,
     prices: dict[str, float] = {}
     price_dates: dict[str, str] = {}
     unpriced: list[str] = []
+    stale_prices: list[dict[str, Any]] = []
     for ticker in tickers:
-        px, as_of = _last_real_close(ticker)
+        px, price_as_of = _last_real_close(ticker, str(snap["as_of"]))
         if px is None or px <= 0:
             unpriced.append(ticker)
         else:
             prices[ticker] = px
-            price_dates[ticker] = as_of
+            price_dates[ticker] = price_as_of
     if unpriced:
         return {
             "status": "blocked",
@@ -147,6 +157,26 @@ def propose_rebalance(account_id: str, model_id: str,
                        + ". Fetch live data or upload a price CSV — Helios does not "
                          "size trades on invented prices."),
             "unpriced_tickers": unpriced,
+            "disclaimer": _PROPOSAL_DISCLAIMER,
+        }
+    snapshot_date = pd.Timestamp(str(snap["as_of"])).normalize()
+    for ticker, price_as_of in price_dates.items():
+        age = int((snapshot_date - pd.Timestamp(price_as_of).normalize()).days)
+        if age > int(cons["max_price_age_days"]):
+            stale_prices.append({
+                "ticker": ticker,
+                "price_as_of": price_as_of,
+                "age_days": age,
+            })
+    if stale_prices:
+        return {
+            "status": "blocked",
+            "reason": (
+                "Trade sizing is blocked because one or more as-of prices exceed the "
+                f"{int(cons['max_price_age_days'])}-day freshness limit."
+            ),
+            "stale_price_tickers": stale_prices,
+            "constraints": cons,
             "disclaimer": _PROPOSAL_DISCLAIMER,
         }
 
@@ -161,6 +191,8 @@ def propose_rebalance(account_id: str, model_id: str,
     max_w = cons["max_single_position_pct"] / 100.0
     max_turnover = cons["max_turnover_pct"] / 100.0
     min_cash = cons["min_cash_pct"] / 100.0
+    cash_weight = cash / total_value
+    cost_rate = cons["cost_bps_per_side"] / 10000.0
     part = cons["max_adv_participation_pct"] / 100.0
     horizon = max(cons["trade_horizon_days"], 0.25)
     # Per-ticker max weight-move budget from liquidity: participation × ADV × days.
@@ -173,24 +205,32 @@ def propose_rebalance(account_id: str, model_id: str,
     if HAS_CVXPY:
         w = _cp.Variable(len(tickers))
         trade = w - w_cur
-        cost_rate = cons["cost_bps_per_side"] / 10000.0
         objective = _cp.Minimize(_cp.sum_squares(w - w_tgt) + cost_rate * _cp.norm1(trade))
+        cash_after = cash_weight - _cp.sum(trade) - cost_rate * _cp.norm1(trade)
+        one_way_turnover = 0.5 * (_cp.norm1(trade) + _cp.abs(_cp.sum(trade)))
         constraint_list = [
             w >= 0,
             w <= max_w,
-            _cp.sum(w) <= 1.0 - min_cash,
-            _cp.norm1(trade) <= 2.0 * max_turnover,   # norm1 counts both sides
+            cash_after >= min_cash,
+            one_way_turnover <= max_turnover,
         ]
         finite = np.isfinite(move_cap)
         if finite.any():
             constraint_list.append(_cp.abs(trade)[finite] <= move_cap[finite])
         problem = _cp.Problem(objective, constraint_list)
         try:
-            problem.solve()
+            # Pin the solver choice so proposals do not vary with whichever
+            # optional backend happens to be first in CVXPY's environment.
+            problem.solve(solver=_cp.CLARABEL)
         except Exception as exc:
-            solver_notes.append(f"CVXPY solve failed ({exc}); deterministic projection used.")
-            w_prop = _projection_fallback(w_cur, w_tgt, max_w, max_turnover, min_cash, move_cap)
-            method = "capped_projection_fallback"
+            return {
+                "status": "blocked",
+                "reason": f"The approved optimization solver failed: {exc}",
+                "constraints": cons,
+                "warnings": warnings,
+                "solver_notes": ["No fallback proposal was emitted."],
+                "disclaimer": _PROPOSAL_DISCLAIMER,
+            }
         else:
             if problem.status in ("optimal", "optimal_inaccurate") and w.value is not None:
                 w_prop = np.clip(np.asarray(w.value).flatten(), 0.0, None)
@@ -214,18 +254,25 @@ def propose_rebalance(account_id: str, model_id: str,
                     "disclaimer": _PROPOSAL_DISCLAIMER,
                 }
     else:
-        w_prop = _projection_fallback(w_cur, w_tgt, max_w, max_turnover, min_cash, move_cap)
-        method = "capped_projection_fallback"
-        solver_notes.append("cvxpy not installed — deterministic capped projection used.")
+        return {
+            "status": "blocked",
+            "reason": "The approved CVXPY/CLARABEL optimization contract is unavailable.",
+            "constraints": cons,
+            "warnings": warnings,
+            "solver_notes": ["Install the pinned optimization dependency; no fallback proposal was emitted."],
+            "disclaimer": _PROPOSAL_DISCLAIMER,
+        }
 
     proposal = _build_proposal(account_id, model, snap, tickers, w_cur, w_tgt, w_prop,
-                               prices, price_dates, adv, total_value, cash, cons,
+                               prices, price_dates, adv, shares_available,
+                               total_value, cash, cons,
                                method, warnings, solver_notes)
     # A solved QP can still be unable to REACH the target (it lands on the
     # binding caps). Name those caps rather than letting a quietly-shrunk
     # proposal read as "done" — the review's resize-or-block requirement.
     if proposal["summary"]["residual_to_target_pct"] > 0.25:
         proposal["target_reachable"] = False
+        proposal["status"] = "constrained"
         proposal["violations"] = _constraint_violations(
             tickers, w_cur, w_tgt, max_w, max_turnover, min_cash, move_cap, cons)
     else:
@@ -236,7 +283,8 @@ def propose_rebalance(account_id: str, model_id: str,
 
 def _projection_fallback(w_cur: np.ndarray, w_tgt: np.ndarray, max_w: float,
                          max_turnover: float, min_cash: float,
-                         move_cap: np.ndarray) -> np.ndarray:
+                         move_cap: np.ndarray, *, cash_weight: float = 0.0,
+                         cost_rate: float = 0.0) -> np.ndarray:
     """Deterministic: clip the DESIRED weights to caps, bound each move by
     liquidity, scale all moves together until the turnover budget holds —
     and never clip the result afterward: a final clip would teleport an
@@ -250,9 +298,18 @@ def _projection_fallback(w_cur: np.ndarray, w_tgt: np.ndarray, max_w: float,
         desired = desired * (1.0 - min_cash) / total
     move = desired - w_cur
     move = np.sign(move) * np.minimum(np.abs(move), np.where(np.isfinite(move_cap), move_cap, np.abs(move)))
-    one_way = np.abs(move).sum() / 2.0
+    one_way = 0.5 * (np.abs(move).sum() + abs(move.sum()))
     if one_way > max_turnover and one_way > 0:
         move = move * (max_turnover / one_way)
+    cash_after = cash_weight - float(move.sum()) - float(np.abs(move).sum()) * cost_rate
+    if cash_after < min_cash:
+        buys = np.clip(move, 0.0, None)
+        buy_total = float(buys.sum())
+        if buy_total > 0:
+            shortfall = min_cash - cash_after
+            # Reducing a buy frees principal plus its per-side cost.
+            reduction = min(buy_total, shortfall / max(1.0 + cost_rate, 1e-12))
+            move = move - buys * (reduction / buy_total)
     # w_cur >= 0 and |move| <= |desired - w_cur| with desired >= 0, so the
     # result cannot go negative; over-cap weights stay over-cap honestly.
     return w_cur + move
@@ -270,13 +327,26 @@ def _constraint_violations(tickers: list[str], w_cur: np.ndarray, w_tgt: np.ndar
             "detail": (f"{ticker} target weight {weight * 100:.1f}% exceeds the "
                        f"{max_w * 100:.1f}% cap by {(weight - max_w) * 100:.1f}pp."),
         })
+    for idx, (ticker, current_weight) in enumerate(zip(tickers, w_cur)):
+        if current_weight <= max_w + 1e-9:
+            continue
+        minimum_reachable = max(0.0, current_weight - move_cap[idx]) if np.isfinite(move_cap[idx]) else 0.0
+        if minimum_reachable > max_w + 1e-9:
+            violations.append({
+                "constraint": "max_single_position_pct",
+                "detail": (
+                    f"{ticker} starts at {current_weight * 100:.1f}% and cannot reach the "
+                    f"{max_w * 100:.1f}% cap within the current liquidity budget."
+                ),
+            })
     if w_tgt.sum() > 1.0 - min_cash + 1e-9:
         violations.append({
             "constraint": "min_cash_pct",
             "detail": (f"Target weights sum to {w_tgt.sum() * 100:.1f}% but the cash buffer "
                        f"requires ≤ {(1.0 - min_cash) * 100:.1f}% invested."),
         })
-    needed_turnover = np.abs(np.clip(w_tgt, 0, max_w) - w_cur).sum() / 2.0
+    target_move = np.clip(w_tgt, 0, max_w) - w_cur
+    needed_turnover = 0.5 * (np.abs(target_move).sum() + abs(target_move.sum()))
     if needed_turnover > max_turnover + 1e-9:
         violations.append({
             "constraint": "max_turnover_pct",
@@ -299,6 +369,7 @@ def _build_proposal(account_id: str, model: Any, snap: dict[str, Any],
                     tickers: list[str], w_cur: np.ndarray, w_tgt: np.ndarray,
                     w_prop: np.ndarray, prices: dict[str, float],
                     price_dates: dict[str, str], adv: dict[str, float | None],
+                    shares_available: dict[str, float],
                     total_value: float, cash: float, cons: dict[str, float],
                     method: str, warnings: list[str],
                     solver_notes: list[str]) -> dict[str, Any]:
@@ -307,12 +378,24 @@ def _build_proposal(account_id: str, model: Any, snap: dict[str, Any],
     part = cons["max_adv_participation_pct"] / 100.0
     trades: list[dict[str, Any]] = []
     suppressed = 0
+    applied = np.array(w_cur, dtype=float, copy=True)
     for idx, ticker in enumerate(tickers):
         delta_usd = (w_prop[idx] - w_cur[idx]) * total_value
+        share_cap_applied = False
+        if delta_usd < 0:
+            owned_shares = max(0.0, float(shares_available.get(ticker, 0.0)))
+            maximum_sale_usd = owned_shares * prices[ticker]
+            if abs(delta_usd) > maximum_sale_usd + 0.01:
+                delta_usd = -maximum_sale_usd
+                share_cap_applied = True
+                warnings.append(
+                    f"{ticker}: proposed sale capped at {owned_shares:.4f} custodian shares."
+                )
         if abs(delta_usd) < min_trade:
             if abs(delta_usd) > 1e-6:
                 suppressed += 1
             continue
+        applied[idx] = w_cur[idx] + delta_usd / total_value
         px = prices[ticker]
         ticker_adv = adv.get(ticker)
         trades.append({
@@ -320,9 +403,11 @@ def _build_proposal(account_id: str, model: Any, snap: dict[str, Any],
             "side": "BUY" if delta_usd > 0 else "SELL",
             "current_weight_pct": round(w_cur[idx] * 100, 2),
             "target_weight_pct": round(w_tgt[idx] * 100, 2),
-            "proposed_weight_pct": round(w_prop[idx] * 100, 2),
+            "proposed_weight_pct": round(applied[idx] * 100, 2),
             "trade_usd": round(delta_usd, 0),
-            "est_shares": round(delta_usd / px, 1),
+            "est_shares": round(abs(delta_usd) / px, 1),
+            "shares_available": round(float(shares_available.get(ticker, 0.0)), 4),
+            "share_cap_applied": share_cap_applied,
             "price_used": px,
             "price_as_of": price_dates.get(ticker, ""),
             "est_cost_usd": round(abs(delta_usd) * cost_rate, 2),
@@ -330,8 +415,11 @@ def _build_proposal(account_id: str, model: Any, snap: dict[str, Any],
                                   if ticker_adv else None),
         })
     trades.sort(key=lambda t: -abs(t["trade_usd"]))
-    one_way_turnover = float(np.abs(w_prop - w_cur).sum() / 2.0)
-    residual = float(np.abs(w_prop - w_tgt).sum() / 2.0)
+    applied_move = applied - w_cur
+    one_way_turnover = float(0.5 * (np.abs(applied_move).sum() + abs(applied_move.sum())))
+    residual = float(np.abs(applied - w_tgt).sum() / 2.0)
+    total_cost = float(sum(t["est_cost_usd"] for t in trades))
+    proposed_cash_usd = cash - float(applied_move.sum()) * total_value - total_cost
     return {
         "status": "proposed",
         "account_id": account_id,
@@ -347,8 +435,9 @@ def _build_proposal(account_id: str, model: Any, snap: dict[str, Any],
             "n_trades": len(trades),
             "one_way_turnover_pct": round(one_way_turnover * 100, 2),
             "residual_to_target_pct": round(residual * 100, 2),
-            "est_total_cost_usd": round(sum(t["est_cost_usd"] for t in trades), 2),
-            "proposed_cash_pct": round((1.0 - float(w_prop.sum())) * 100, 2),
+            "est_total_cost_usd": round(total_cost, 2),
+            "proposed_cash_usd": round(proposed_cash_usd, 2),
+            "proposed_cash_pct": round(proposed_cash_usd / total_value * 100, 2),
         },
         "constraints": cons,
         "warnings": warnings,

@@ -156,7 +156,8 @@ def test_macro_get_ignores_refresh_param(monkeypatch):
     client = helios.app.test_client()
     assert client.get("/api/macro?refresh=1").status_code == 200
     assert client.post("/api/macro/refresh").status_code == 200
-    assert forced == [False, True]
+    # The GET is a pure cached read and does not invoke macro_snapshot at all.
+    assert forced == [True]
 
 
 # --------------------------------------------------------------------------- #
@@ -174,7 +175,9 @@ def test_price_source_cutover_stamps_provider(monkeypatch, tmp_path):
     persistence.reset_store_for_tests()
     try:
         monkeypatch.setenv("HELIOS_PRICE_SOURCE", "fmp")
+        monkeypatch.setenv("HELIOS_FMP_KEY", "test-placeholder")
         monkeypatch.setattr(data, "HAS_YF", False)   # no yfinance fallback available
+        assert data.live_provider_available() is True
         frame = price_series(days=120).to_frame("close")
         monkeypatch.setattr(data, "_fmp_price_history", lambda s, p="2y": frame.copy())
 

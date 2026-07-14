@@ -12,7 +12,7 @@ import pandas as pd
 from . import provenance
 
 
-def classify_regime(close: pd.Series, symbol: str = "SPY", source: str = "sample") -> dict:
+def classify_regime(close: pd.Series, symbol: str = "SPY", source: str = "unknown") -> dict:
     """Classify a price series as risk-on, neutral, or risk-off.
 
     Returns a stable, explainable 0-100 score plus the concrete drivers used in
@@ -132,11 +132,14 @@ def market_regime(instruments) -> dict:
     if proxy.df.get("close") is None or proxy.df["close"].dropna().empty:
         return _unavailable_regime()
     if not provenance.is_real_source(proxy.source):
-        # A synthetic proxy silently classified the whole market's regime on
-        # offline starts (review finding) — say so where dashboards surface it.
-        warnings.append(
-            f"Regime proxy {proxy.symbol} uses bundled {proxy.source} data — "
-            "not real market evidence.")
+        unavailable = _unavailable_regime()
+        unavailable["symbol"] = proxy.symbol
+        unavailable["source"] = proxy.source
+        unavailable["warnings"] = warnings + [
+            f"Regime proxy {proxy.symbol} is not eligible market evidence. "
+            "Load approved live or uploaded benchmark history."
+        ]
+        return unavailable
 
     result = classify_regime(proxy.df["close"], symbol=proxy.symbol, source=proxy.source)
     result["warnings"] = warnings + result.get("warnings", [])
@@ -162,4 +165,3 @@ def _summary(label: str, symbol: str, score: int, drivers: list[dict]) -> str:
     else:
         tone = "Risk appetite is mixed"
     return f"{tone} for {symbol} (score {score}/100). {lead}"
-

@@ -10,7 +10,7 @@ import pandas as pd
 import pytest
 
 from engine import data, data_quality, opportunity, provenance, regime, signal_journal
-from tests.conftest import price_csv, price_series
+from tests.conftest import load_sample_instruments, price_csv, price_series
 
 
 # --------------------------------------------------------------------------- #
@@ -68,31 +68,24 @@ def test_record_signal_refuses_future_ending_input(monkeypatch, tmp_path):
 # --------------------------------------------------------------------------- #
 # 0.2 Samples are opt-in; a synthetic regime proxy never moves real scores
 # --------------------------------------------------------------------------- #
-def test_init_app_does_not_load_samples_by_default(monkeypatch):
-    monkeypatch.delenv("HELIOS_LOAD_SAMPLES", raising=False)
-    # The autouse fixture pre-populates samples for other tests; clear and
-    # re-run the gated startup path.
+def test_production_app_has_no_sample_loader(monkeypatch):
     data._STORE.clear()
     import helios_web
-    from helios_web import core
-    # init_app is idempotent behind app.blueprints; call the gated block directly.
-    if not core.app.blueprints:
-        helios_web.init_app()
-    else:
-        import os
-        if os.environ.get("HELIOS_LOAD_SAMPLES", "0") == "1":
-            data.load_samples()
+    helios_web.init_app()
     assert not any(i.source == "sample" for i in data.all_instruments())
-    data.load_samples()   # restore for subsequent tests in this module
+    assert not hasattr(data, "load_samples")
+    load_sample_instruments()
     assert any(i.source == "sample" for i in data.all_instruments())
 
 
-def test_sample_regime_proxy_warns_and_never_penalizes_real_candidates():
+def test_ineligible_regime_proxy_is_unavailable_and_never_penalizes_real_candidates():
     sample_spy = next(i for i in data.all_instruments()
                       if i.symbol == "SPY" and i.source == "sample")
     market = regime.market_regime([sample_spy])
     assert market["source"] == "sample"
-    assert any("not real market evidence" in w for w in market["warnings"])
+    assert market["status"] == "unavailable"
+    assert market["score"] is None
+    assert any("not eligible market evidence" in w for w in market["warnings"])
 
     # A real candidate in a sample-derived risk-off regime keeps its score.
     base = {"symbol": "REAL", "name": "Real Co", "source": "live",

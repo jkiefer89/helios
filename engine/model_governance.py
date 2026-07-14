@@ -13,7 +13,7 @@ from html import escape
 from io import BytesIO
 from typing import Any
 
-from . import data, mandate, model_library, persistence, portfolio
+from . import data, evidence, mandate, model_library, persistence, portfolio, research_gate
 from .pdf_layout import (
     card_grid as _pdf_card_grid,
     draw_text as _pdf_text,
@@ -143,21 +143,50 @@ def record_event(
         note=safe_note,
         committee_identity=identity,
     )
-    event = store.record_model_governance_event(
-        model_id=model.id,
-        version=version,
-        actor=safe_actor(actor),
-        action=safe_action,
-        note=safe_note,
-        approval_status=status,
-        snapshot=snapshot,
-        metadata={
-            "committee_note": safe_note,
-            "committee_identity": identity,
-            "version_diff": snapshot.get("version_diff") or {},
-            "risk_gate": snapshot.get("risk_gate") or {},
-        },
-    )
+    evidence_id = evidence.new_id("governance")
+    snapshot["evidence"] = evidence.reference(evidence_id)
+    with store.transaction(durable=True):
+        event = store.record_model_governance_event(
+            model_id=model.id,
+            version=version,
+            actor=safe_actor(actor),
+            action=safe_action,
+            note=safe_note,
+            approval_status=status,
+            snapshot=snapshot,
+            metadata={
+                "committee_note": safe_note,
+                "committee_identity": identity,
+                "version_diff": snapshot.get("version_diff") or {},
+                "risk_gate": snapshot.get("risk_gate") or {},
+                "evidence": evidence.reference(evidence_id),
+            },
+        )
+        if event is None:
+            raise RuntimeError(store.warning or "Governance event could not be persisted.")
+        if event is not None:
+            captured = evidence.capture(
+                evidence_id=evidence_id,
+                artifact_kind="governance",
+                target_kind="model",
+                target_id=model.id,
+                input_payload={
+                    "model": snapshot.get("model") or {},
+                    "version_diff": snapshot.get("version_diff") or {},
+                    "risk_gate": snapshot.get("risk_gate") or {},
+                    "committee_identity": identity,
+                    "committee_note": safe_note,
+                    "requested_status": status,
+                },
+                output_payload=event,
+                evidence_manifest=evidence.manifest(
+                    model_version=version,
+                    transformations=("mandate_validation", "research_readiness_gate", "committee_decision"),
+                    extra={"approval_status": status, "action": safe_action},
+                ),
+            )
+            if not captured.get("recorded"):
+                raise RuntimeError(captured.get("warning") or "Governance evidence could not be persisted.")
     return {"recorded": event is not None, "event": event, "warning": "" if event else store.warning}
 
 
@@ -196,29 +225,30 @@ def save_edit(
             for holding in draft.holdings
         ],
     )
-    portfolio.register(edited)
-    # Any failure past this point must restore the prior in-memory model, or a
-    # failed (4xx) save would leave mutated holdings behind.
+    store = persistence.get_store()
+    if not store.available:
+        return {"saved": False, "warning": store.warning or "SQLite persistence is required for model edits."}
     try:
-        persisted = portfolio._persist_model(edited, source_filename="model-editor")
-        if not persisted.get("persisted"):
-            portfolio.register(model)
-            return {"saved": False, "warning": persisted.get("warning") or "Could not persist model edits."}
-        event_result = record_event(
-            edited,
-            actor=actor or DEFAULT_ACTOR,
-            action="model_edit",
-            note=note,
-            approval_status="pending_review",
-            previous_model=model,
-        )
-        if not event_result.get("recorded"):
-            portfolio.register(model)
-            portfolio._persist_model(model, source_filename="model-editor")  # revert the persisted copy too
-            return {"saved": False, "warning": event_result.get("warning") or "Could not record model edit governance event."}
+        with store.transaction(durable=True):
+            persisted = portfolio._persist_model(edited, source_filename="model-editor")
+            if not persisted.get("persisted"):
+                raise RuntimeError(persisted.get("warning") or "Could not persist model edits.")
+            event_result = record_event(
+                edited,
+                actor=actor or DEFAULT_ACTOR,
+                action="model_edit",
+                note=note,
+                approval_status="pending_review",
+                previous_model=model,
+            )
+            if not event_result.get("recorded"):
+                raise RuntimeError(
+                    event_result.get("warning") or "Could not record model edit governance event."
+                )
     except Exception:
         portfolio.register(model)
         raise
+    portfolio.register(edited)
     return {
         **_editor_payload(model, edited, rebalance_to_target=rebalance_to_target),
         "saved": True,
@@ -827,11 +857,18 @@ def _empty_version_diff() -> dict[str, Any]:
 def _risk_gate(model: portfolio.Model) -> dict[str, Any]:
     limits = _risk_limits(model)
     violations = _risk_limit_violations(model, limits)
+    readiness = research_gate.model_readiness(model)
+    blockers = []
+    if violations:
+        blockers.append("Risk-limit breaches must be resolved before approval.")
+    if not readiness["passed"]:
+        blockers.append(readiness["blocked_reason"])
     return {
-        "can_approve": not violations,
-        "state": "blocked" if violations else "pass",
-        "blocked_reason": "Risk-limit breaches must be resolved before approval." if violations else "",
+        "can_approve": not blockers,
+        "state": "blocked" if blockers else "pass",
+        "blocked_reason": " ".join(blockers),
         "violations": violations,
+        "research_readiness": readiness,
     }
 
 
@@ -964,7 +1001,10 @@ def _normalise_status(value: Any) -> str:
 
 def _normalise_action(value: Any, has_status: bool) -> str:
     action = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
-    allowed = {"approval_update", "archive_snapshot", "change_note", "model_edit", *REBALANCE_ACTIONS}
+    allowed = {
+        "approval_update", "archive_snapshot", "change_note", "model_edit",
+        "model_uploaded", "model_replaced", *REBALANCE_ACTIONS,
+    }
     if action in allowed:
         return action
     return "approval_update" if has_status else "change_note"

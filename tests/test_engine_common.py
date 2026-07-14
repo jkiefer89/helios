@@ -47,17 +47,19 @@ def test_clean_close_normalizes_index_and_values():
 
 
 def test_paper_hit_direction_rules():
-    assert _common.paper_hit("BUY", 2.0, None) is True
+    assert _common.paper_hit("BUY", 2.0, None) is None
     assert _common.paper_hit("BUY", 2.0, -0.5) is False  # alpha overrides forward
-    assert _common.paper_hit("SELL", -1.0, None) is True
-    assert _common.paper_hit("REDUCE", 1.0, None) is False
-    assert _common.paper_hit("HOLD", -0.5, None) is True
-    assert _common.paper_hit("HOLD", -2.0, None) is False
+    assert _common.paper_hit("SELL", -1.0, -0.2) is True
+    assert _common.paper_hit("REDUCE", 1.0, 0.2) is False
+    assert _common.paper_hit("HOLD", -0.5, 0.1) is None
+    assert _common.hold_preserved("HOLD", -0.5) is True
+    assert _common.hold_preserved("HOLD", -2.0) is False
+    assert _common.hold_preserved("BUY", 0.2) is None
     assert _common.paper_hit("BUY", None, None) is None
 
 
 def test_journal_paper_hit_requires_measured_entries():
-    measured = {"forward_status": "measured", "action_label": "BUY", "forward_result_pct": 1.2, "alpha_pct": None}
+    measured = {"forward_status": "measured", "action_label": "BUY", "forward_result_pct": 1.2, "alpha_pct": 0.4}
     pending = {**measured, "forward_status": "pending"}
 
     assert _common.journal_paper_hit(measured) is True

@@ -25,7 +25,7 @@ export function Instruments({
         <div>
           <div className="section-label">Instruments</div>
           <h1>Available price histories</h1>
-          <p>Only live or uploaded instruments can unlock real research rankings. Sample histories remain demo-only.</p>
+          <p>Only live or uploaded instruments can unlock research rankings. Ineligible histories are excluded.</p>
         </div>
       </header>
       <RealDataCenter
@@ -41,20 +41,22 @@ export function Instruments({
             <button type="button" onClick={() => window.dispatchEvent(new Event("helios:reveal-data-intake"))}>Open data intake</button>
           </EmptyState>
         ) : (
-          <div className="terminal-table instruments-table" tabIndex={0} aria-label="Scrollable instrument universe table" onKeyDown={scrollTableByKey}>
-            <div className="terminal-table__head">
-              <span>Symbol</span><span>Name</span><span>Source</span><span>Rows</span><span>Last</span><span>Action</span>
-            </div>
-            {tickers.map((ticker) => (
-              <button type="button" key={ticker.symbol} onClick={() => onOpenInstrument(ticker.symbol)}>
-                <span><strong>{ticker.symbol}</strong></span>
-                <span>{ticker.name}</span>
-                <SourcePill source={ticker.source} />
-                <span>{ticker.row_count ?? "—"}</span>
-                <span>{fmtMoney(ticker.last_price)}</span>
-                <span className="table-action">Open · <i className={(ticker.change_pct || 0) >= 0 ? "up" : "down"}>{fmtPct(ticker.change_pct)}</i></span>
-              </button>
-            ))}
+          <div className="terminal-table terminal-data-table-shell" tabIndex={0} aria-label="Scrollable instrument universe table" onKeyDown={scrollTableByKey}>
+            <table className="terminal-data-table instruments-data-table">
+            <thead><tr>
+              <th scope="col">Symbol</th><th scope="col">Name</th><th scope="col">Source</th><th scope="col">Rows</th><th scope="col">Last</th><th scope="col">Action</th>
+            </tr></thead>
+            <tbody>{tickers.map((ticker) => (
+              <tr key={ticker.symbol}>
+                <td><strong>{ticker.symbol}</strong></td>
+                <td>{ticker.name}</td>
+                <td><SourcePill source={ticker.source} /></td>
+                <td>{ticker.row_count ?? "—"}</td>
+                <td>{fmtMoney(ticker.last_price)}</td>
+                <td className="table-action"><button type="button" onClick={() => onOpenInstrument(ticker.symbol)}>Open</button> · <i className={(ticker.change_pct || 0) >= 0 ? "up" : "down"}>{fmtPct(ticker.change_pct)}</i></td>
+              </tr>
+            ))}</tbody>
+            </table>
           </div>
         )}
       </Panel>

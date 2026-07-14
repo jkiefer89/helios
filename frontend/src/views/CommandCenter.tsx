@@ -5,7 +5,8 @@ import { SourcePill } from "../components/badges/DataModeBadge";
 import { Panel } from "../components/cards/Panel";
 import { MiniBars, ScoreBar } from "../components/charts/Charts";
 import { EmptyState } from "../components/empty-states/EmptyState";
-import type { ViewId } from "../components/layout/AppShell";
+import { ResearchGate } from "../components/states/ResearchGate";
+import { isViewId, type ViewId } from "../components/layout/AppShell";
 import { fmtNumber, fmtPct, fmtTimestamp } from "../utils/format";
 
 type DisclosureTone = "neutral" | "info" | "positive" | "warning";
@@ -16,14 +17,22 @@ export function CommandCenter({
   onOpenInstrument,
   onOpenModel,
   onOpenView,
+  onRetry,
 }: {
   payload: CommandCenterResponse | null;
   dataStatus: DataStatusResponse | null;
   onOpenInstrument: (symbol: string) => void;
   onOpenModel: (id: string) => void;
   onOpenView: (view: ViewId) => void;
+  onRetry: () => Promise<void>;
 }) {
-  if (!payload) return <EmptyState title="Command Center unavailable" body="The backend did not return a command payload." />;
+  if (!payload) {
+    return (
+      <EmptyState title="Command Center unavailable" body="The backend did not return a command payload.">
+        <button type="button" onClick={() => void onRetry()}>Retry Command Center</button>
+      </EmptyState>
+    );
+  }
   const regime = payload.regime;
   const regimeUnavailable = regime.status === "unavailable" || typeof regime.score !== "number";
   // Narrowed for the meter branch (only rendered when a real score exists).
@@ -67,7 +76,7 @@ export function CommandCenter({
           <button className="regime-segment risk-on active" type="button" onClick={() => onOpenView("analysis")}>
             <span>{regime.label}</span>
             <b>{fmtNumber(regimeScore, 0)}<small>/100</small></b>
-            <em>{payload.eligible_for_real_research ? "Real-data review enabled" : "Demo-only regime proxy"}</em>
+            <em>{payload.eligible_for_real_research ? "Real-data review enabled" : "Regime evidence unavailable"}</em>
           </button>
           <button className="regime-segment neutral" type="button" onClick={() => onOpenView("opportunities")}>
             <span>Neutral</span>
@@ -98,9 +107,7 @@ export function CommandCenter({
       )}
 
       {regime.warnings.length > 0 && <div className="warning-list command-warnings">{regime.warnings.map((warning) => <span key={warning}>{warning}</span>)}</div>}
-      {!payload.eligible_for_real_research && (
-        <ResearchUnlockCTA payload={payload} dataStatus={dataStatus} onOpenView={onOpenView} />
-      )}
+      <WorkflowReadiness payload={payload} dataStatus={dataStatus} onOpenView={onOpenView} />
 
       {payload.macro && <MacroIntelligencePanel macro={payload.macro} />}
 
@@ -170,17 +177,19 @@ export function CommandCenter({
           {payload.top_opportunities.length === 0 ? (
             <LockedRadarTable message={payload.required_action || "Upload or fetch real price history to unlock the radar table."} onOpenView={onOpenView} />
           ) : (
-            <div className="radar-preview-table" tabIndex={0} aria-label="Scrollable opportunity radar preview" onKeyDown={scrollTableByKey}>
-              <div><span>Rank</span><span>Instrument</span><span>Score</span><span>Risk</span><span>Drivers</span></div>
-              {payload.top_opportunities.map((item, index) => (
-                <button type="button" key={item.id} onClick={() => onOpenInstrument(item.symbol)}>
-                  <span>{index + 1}</span>
-                  <strong>{item.symbol}<small>{item.name}</small></strong>
-                  <ScoreBar value={item.score} tone="positive" />
-                  <ScoreBar value={item.risk_score} tone="warning" />
-                  <em>{item.reason || item.action}</em>
-                </button>
-              ))}
+            <div className="radar-preview-table terminal-data-table-shell" tabIndex={0} aria-label="Scrollable opportunity radar preview" onKeyDown={scrollTableByKey}>
+              <table className="terminal-data-table command-radar-table">
+                <thead><tr><th scope="col">Rank</th><th scope="col">Instrument</th><th scope="col">Score</th><th scope="col">Risk</th><th scope="col">Drivers</th></tr></thead>
+                <tbody>{payload.top_opportunities.map((item, index) => (
+                  <tr key={item.id}>
+                    <td>{index + 1}</td>
+                    <th scope="row"><button className="table-link" type="button" onClick={() => onOpenInstrument(item.symbol)}>{item.symbol}<small>{item.name}</small></button></th>
+                    <td><ScoreBar value={item.score} tone="positive" /></td>
+                    <td><ScoreBar value={item.risk_score} tone="warning" /></td>
+                    <td>{item.reason || item.action}</td>
+                  </tr>
+                ))}</tbody>
+              </table>
             </div>
           )}
         </Panel>
@@ -242,7 +251,7 @@ function buildDisclosureCards(payload: CommandCenterResponse, sourceStatus: stri
           tone: "positive",
         }
       : {
-          title: "Demo / gated data",
+          title: "Research data blocked",
           body: `${sourceStatus}. ${payload.reason || payload.required_action || "Verify source quality before use."}`,
           tone: "info",
         },
@@ -255,7 +264,7 @@ function buildDisclosureCards(payload: CommandCenterResponse, sourceStatus: stri
       : {
           title: "Real data required",
           body: "Research rankings, alerts, and score distributions unlock only when eligible live or uploaded histories pass provenance checks.",
-          tone: "positive",
+          tone: "warning",
         },
     {
       title: "No guarantees",
@@ -269,8 +278,8 @@ function formatSourceStatus(sourceCounts: Record<string, number>) {
   const labels: Record<string, string> = {
     live: "Live histories",
     upload: "Uploaded histories",
-    sample: "Demo samples",
-    simulated: "Simulated histories",
+    sample: "Ineligible fixture histories",
+    simulated: "Ineligible generated histories",
     missing: "Missing histories",
   };
   const parts = Object.entries(sourceCounts)
@@ -279,7 +288,7 @@ function formatSourceStatus(sourceCounts: Record<string, number>) {
   return parts.join(" · ") || "Source status pending";
 }
 
-function ResearchUnlockCTA({
+function WorkflowReadiness({
   payload,
   dataStatus,
   onOpenView,
@@ -289,32 +298,63 @@ function ResearchUnlockCTA({
   onOpenView: (view: ViewId) => void;
 }) {
   const missing = dataStatus?.missing_data.missing_tickers || [];
+  const nextView = isViewId(payload.next_action.view) ? payload.next_action.view : "command";
   return (
-    <section className="research-unlock-cta" aria-label="Real research locked">
-      <div>
-        <span>Real Research Locked</span>
-        <h2>Demo Mode cannot power real rankings.</h2>
-        <p>
-          {payload.display_label || "Demo data"} is available for workflow review only. Sample or synthetic histories cannot unlock
-          Opportunity Radar rankings, model alerts, or advisor reports until live ticker data or uploaded real files pass provenance checks.
-        </p>
-        <div className="unlock-evidence-strip">
-          <span><b>{dataStatus?.real_instrument_count ?? 0}</b> eligible histories</span>
-          <span><b>{dataStatus?.loaded_model_count ?? 0}</b> imported models</span>
-          <span><b>{missing.length}</b> missing tickers</span>
-          <span><b>{dataStatus?.database.available ? "ready" : "warning"}</b> SQLite</span>
-        </div>
-        {missing.length > 0 && <small className="muted">Missing: {missing.slice(0, 8).join(", ")}{missing.length > 8 ? "..." : ""}</small>}
+    <section className="command-workflow" aria-label="Research readiness and next action">
+      <ResearchGate
+        payload={payload}
+        state={payload.readiness.state}
+        title={payload.readiness.summary}
+        actionLabel={payload.next_action.label}
+        onAction={() => {
+          if (nextView === "instruments") window.dispatchEvent(new Event("helios:reveal-data-intake"));
+          onOpenView(nextView);
+        }}
+      />
+      <div className="command-workflow__grid">
+        <Panel title="Readiness" meta={`${payload.readiness.checks.filter((check) => check.passed).length}/${payload.readiness.checks.length} controls`}>
+          <div className="readiness-check-list">
+            {payload.readiness.checks.map((check) => (
+              <button type="button" key={check.key} onClick={() => openView(isViewId(check.view) ? check.view : "command", onOpenView)}>
+                <i className={check.passed ? "passed" : "blocked"} aria-hidden="true" />
+                <span><strong>{check.label}</strong><small>{check.detail}</small></span>
+                <em>{check.passed ? "Pass" : "Review"}</em>
+              </button>
+            ))}
+          </div>
+        </Panel>
+        <Panel title="Active Blockers" meta={`${payload.blockers.length} open`}>
+          {payload.blockers.length === 0 ? (
+            <EmptyState title="No active blockers" body="Required research controls currently pass. Continue to candidate evidence review." />
+          ) : (
+            <div className="workflow-event-list">
+              {payload.blockers.slice(0, 5).map((blocker) => (
+                <button type="button" key={blocker.id} onClick={() => openView(isViewId(blocker.view) ? blocker.view : "command", onOpenView)}>
+                  <b className={`severity-${safeSeverity(blocker.severity)}`}>{blocker.severity}</b>
+                  <span><strong>{blocker.title}</strong><small>{blocker.detail}</small><small>{blocker.required_action}</small></span>
+                </button>
+              ))}
+            </div>
+          )}
+        </Panel>
+        <Panel title="Recent Changes" meta={`${payload.recent_changes.length} recorded`}>
+          {payload.recent_changes.length === 0 ? (
+            <EmptyState title="No recent workspace changes" body="Refreshes, governance actions, and saved report snapshots appear here." />
+          ) : (
+            <div className="workflow-event-list">
+              {payload.recent_changes.slice(0, 5).map((change) => (
+                <button type="button" key={change.id} onClick={() => onOpenView(isViewId(change.view) ? change.view : "command")}>
+                  <b>{change.kind.replace(/_/g, " ")}</b>
+                  <span><strong>{change.title}</strong><small>{change.detail}</small><small>{fmtTimestamp(change.created_at)}</small></span>
+                </button>
+              ))}
+            </div>
+          )}
+        </Panel>
       </div>
-      <div className="unlock-actions">
-        {/* Opening Instruments alone was a dead end: the only fetch/upload
-            controls live in the default-collapsed sidebar (review finding) —
-            these CTAs must also reveal the intake panel. */}
-        <button type="button" onClick={() => { window.dispatchEvent(new Event("helios:reveal-data-intake")); onOpenView("instruments"); }}>Fetch live ticker data</button>
-        <button type="button" onClick={() => { window.dispatchEvent(new Event("helios:reveal-data-intake")); onOpenView("instruments"); }}>Upload real price CSV</button>
-        <button type="button" onClick={() => onOpenView("models")}>Upload model CSV/Excel</button>
-        <button type="button" onClick={() => onOpenView("data-quality")}>Review Real Data Center gates</button>
-      </div>
+      {!payload.readiness.ready && missing.length > 0 && (
+        <p className="command-workflow__missing">Missing model coverage: {missing.slice(0, 8).join(", ")}{missing.length > 8 ? ` +${missing.length - 8}` : ""}</p>
+      )}
     </section>
   );
 }
@@ -370,11 +410,16 @@ function LockedStatePanel({
       <p>{body}</p>
       <div>
         {actions.map((action) => (
-          <button key={action.label} type="button" onClick={() => onOpenView(action.view)}>{action.label}</button>
+          <button key={action.label} type="button" onClick={() => openView(action.view, onOpenView)}>{action.label}</button>
         ))}
       </div>
     </div>
   );
+}
+
+function openView(view: ViewId, onOpenView: (view: ViewId) => void) {
+  if (view === "instruments") window.dispatchEvent(new Event("helios:reveal-data-intake"));
+  onOpenView(view);
 }
 
 function LockedRadarTable({
@@ -397,7 +442,7 @@ function LockedRadarTable({
   ];
   const rows: Array<{ area: string; status: string; evidence: string; nextStep: string; view: ViewId }> = [
     { area: "Opportunity rankings", status: "Locked", evidence: "Eligible live/uploaded price history", nextStep: "Fetch or upload a real series", view: "instruments" },
-    { area: "Risk scoring", status: "Locked", evidence: "Drawdown and volatility from eligible history", nextStep: "Replace demo-only rows", view: "strategy" },
+    { area: "Risk scoring", status: "Locked", evidence: "Drawdown and volatility from eligible history", nextStep: "Provide eligible market history", view: "strategy" },
     { area: "Client model coverage", status: "Pending", evidence: "Holdings with real price coverage", nextStep: "Upload a model and resolve missing holdings", view: "models" },
     { area: "Report publishing", status: "Blocked", evidence: "Passed provenance gate", nextStep: "Review evidence pack after real data passes", view: "reports" },
     { area: "Portfolio Clinic", status: "Blocked", evidence: "Imported model plus holding histories", nextStep: "Run clinic after model coverage is complete", view: "clinic" },
@@ -441,16 +486,22 @@ function LockedRadarTable({
         <span>Evidence gates</span>
         <span>{rows.length} checks</span>
       </div>
-      <div className="radar-preview-table locked-radar-table gate-checklist-table" tabIndex={0} aria-label="Scrollable locked opportunity radar gate checklist" onKeyDown={scrollTableByKey}>
-        <div><span>Area</span><span>Status</span><span>Required evidence</span><span>Next step</span></div>
-        {rows.map((row) => (
-          <button className="locked-table-row" type="button" key={row.area} onClick={() => onOpenView(row.view)}>
-            <strong>{row.area}<small>{row.area === "Opportunity rankings" ? message : "Awaiting eligible real-data evidence."}</small></strong>
-            <span>{row.status}</span>
-            <span>{row.evidence}</span>
-            <em>{row.nextStep}</em>
-          </button>
-        ))}
+      <div className="radar-preview-table locked-radar-table terminal-data-table-shell" tabIndex={0} aria-label="Scrollable locked opportunity radar gate checklist" onKeyDown={scrollTableByKey}>
+        <table className="terminal-data-table gate-checklist-data-table">
+          <thead><tr><th scope="col">Area</th><th scope="col">Status</th><th scope="col">Required evidence</th><th scope="col">Next step</th></tr></thead>
+          <tbody>{rows.map((row) => (
+            <tr key={row.area}>
+              <th scope="row">
+                <button className="table-link" type="button" onClick={() => onOpenView(row.view)}>
+                  <strong>{row.area}</strong><small>{row.area === "Opportunity rankings" ? message : "Awaiting eligible real-data evidence."}</small>
+                </button>
+              </th>
+              <td><span className="gate-status">{row.status}</span></td>
+              <td>{row.evidence}</td>
+              <td>{row.nextStep}</td>
+            </tr>
+          ))}</tbody>
+        </table>
       </div>
     </div>
   );
@@ -487,7 +538,7 @@ function buildRadarFilterConfig(message: string): Record<RadarFilterKey, RadarFi
       fields: [
         { label: "Selected sector", value: "All sectors" },
         { label: "Rows available", value: "No real eligible rows yet" },
-        { label: "Demo rows", value: "Excluded from research rankings" },
+        { label: "Ineligible rows", value: "Excluded from research rankings" },
       ],
     },
     strategy: {
@@ -563,7 +614,7 @@ function LockedDistribution() {
         <p>No histogram is rendered until real or uploaded candidates pass provenance checks.</p>
         <ul>
           <li>Fetch live data or upload eligible price history.</li>
-          <li>Replace demo/sample-only rows before ranking.</li>
+          <li>Provide eligible live or uploaded rows before ranking.</li>
           <li>Rebuild reports only after the evidence gate opens.</li>
         </ul>
       </div>
@@ -618,7 +669,7 @@ interface StatusItem {
 function buildStatusItems(payload: CommandCenterResponse, sourceStatus: string, generatedLabel: string): StatusItem[] {
   const modeLabel = payload.display_label || "Data status pending";
   const sourceTone = payload.eligible_for_real_research ? "positive" : "warning";
-  const sourceLabel = payload.eligible_for_real_research ? `Sources: ${sourceStatus}` : `Demo/Mixed sources: ${sourceStatus}`;
+  const sourceLabel = payload.eligible_for_real_research ? `Sources: ${sourceStatus}` : `Blocked/Mixed sources: ${sourceStatus}`;
   return [
     { tone: payload.eligible_for_real_research ? "positive" : "warning", label: `Market Data: ${modeLabel}`, view: "instruments" },
     { tone: sourceTone, label: sourceLabel, view: "reports" },

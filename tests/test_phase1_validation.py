@@ -168,7 +168,7 @@ def test_below_chance_forecast_cannot_move_the_action():
 
     assert fc_contrib(gated) == 0.0                      # below chance -> zero weight
     assert fc_contrib(full) > 0.0                        # measured edge -> full weight
-    assert fc_contrib(unmeasured) > 0.0                  # unmeasured -> kept, caveated
+    assert fc_contrib(unmeasured) == 0.0                 # unmeasured -> shown, not scored
     assert any("gated" in c for c in gated["caveats"])
     assert gated["score"] < full["score"]                # the gate actually moves the rating
 
@@ -179,5 +179,5 @@ def test_edge_multiplier_shape():
     assert m({"directional_accuracy": 0.50, "n_test": 100}) == 0.0
     assert m({"directional_accuracy": 0.55, "n_test": 100}) == 1.0
     assert m({"directional_accuracy": 0.525, "n_test": 100}) == pytest.approx(0.5)
-    assert m({"directional_accuracy": 0.42, "n_test": 10}) is None   # unmeasured
-    assert m(None) is None
+    assert m({"directional_accuracy": 0.42, "n_test": 10}) == 0.0   # unmeasured
+    assert m(None) == 0.0

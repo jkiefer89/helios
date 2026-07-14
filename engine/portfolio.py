@@ -8,6 +8,7 @@ signals, forecasts and insights live in their own modules and operate on what
 from __future__ import annotations
 
 import io
+import copy
 import re
 import threading
 import time
@@ -78,6 +79,19 @@ def register(model: Model) -> None:
         ids = list(_MODELS.keys())
         for stale in ids[:-MAX_MODELS] if len(ids) > MAX_MODELS else []:
             _MODELS.pop(stale, None)
+
+
+def snapshot_models() -> dict[str, Model]:
+    """Return an isolated model-store snapshot for privileged rollback."""
+    with _MODELS_LOCK:
+        return copy.deepcopy(_MODELS)
+
+
+def restore_models(snapshot: dict[str, Model]) -> None:
+    """Restore model state after a failed governance transaction."""
+    with _MODELS_LOCK:
+        _MODELS.clear()
+        _MODELS.update(copy.deepcopy(snapshot))
 
 
 # --------------------------------------------------------------------------- #
@@ -154,7 +168,8 @@ def model_id_from_name(name: str) -> str:
 
 
 def parse_model_file(raw: bytes, filename: str, name: str,
-                     mandate_key: str = "balanced", mandate_context: str = "") -> Model:
+                     mandate_key: str = "balanced", mandate_context: str = "",
+                     *, activate: bool = True) -> Model:
     """Parse an Excel/CSV of holdings into a Model.
 
     Requires a ticker-like column. A weight column is used when present;
@@ -233,8 +248,9 @@ def parse_model_file(raw: bytes, filename: str, name: str,
         mandate_context=re.sub(r"[\x00-\x1f\x7f]", "", (mandate_context or "").strip())[:400],
         holdings=holdings,
     )
-    register(model)
-    _persist_model(model, source_filename=filename)
+    if activate:
+        register(model)
+        _persist_model(model, source_filename=filename)
     return model
 
 
@@ -336,12 +352,12 @@ def build_series(
     model: Model,
     base: float = 100.0,
     min_days: int = 200,
-    allow_sample: bool = True,
-    allow_simulated: bool = True,
+    allow_sample: bool = False,
+    allow_simulated: bool = False,
 ) -> PortfolioSeries:
     """Construct a weight-rescaled portfolio NAV from holdings.
 
-    Each holding's close is resolved (live/sample/simulated), then daily returns
+    Each holding's persisted real close is resolved, then daily returns
     are outer-joined on the union of available dates. On any given day the target
     weights are rescaled across holdings with data for that day. This is a
     forward-analysis basis for mixed-history models, not a performance track
@@ -353,21 +369,14 @@ def build_series(
     closes, warnings = {}, []
     src_by = {}
     resolution_errors = {}
-    deadline = time.monotonic() + _RESOLVE_TIME_BUDGET_S
-    live_used = 0
     for h in model.holdings:
-        # Budget new live fetches so a model of many unknown tickers can't pin a
-        # worker; cached/sample holdings are unaffected, the rest fall to simulated.
-        allow_live = live_used < _LIVE_FETCH_BUDGET and time.monotonic() < deadline
         try:
             ps = data.resolve_series(
                 h.ticker,
-                allow_live=allow_live,
+                allow_live=False,
                 allow_sample=allow_sample,
                 allow_simulated=allow_simulated,
             )
-            if ps.source == "live":
-                live_used += 1
             src_by[h.ticker] = ps.source
             closes[h.ticker] = ps.close
         except ValueError as e:
@@ -483,6 +492,12 @@ def build_series(
         "simulated_weight_pct": round(sim_weight * 100, 1),
         "simulated_symbols": sim_syms,
         "missing_symbols": [tk for tk, src in src_by.items() if src == "missing"],
+        "source_by_symbol": dict(src_by),
+        "price_providers": {
+            tk: getattr(data.get(tk), "price_provider", "")
+            for tk in usable
+            if data.get(tk) is not None
+        },
         "source_weight_pct": {k: round(v * 100, 1) for k, v in source_weight.items()},
         "sample_weight_pct": round(source_weight.get("sample", 0.0) * 100, 1),
         "real_weight_pct": round((source_weight.get("live", 0.0) + source_weight.get("upload", 0.0)) * 100, 1),

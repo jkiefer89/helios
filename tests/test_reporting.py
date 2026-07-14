@@ -27,8 +27,8 @@ def test_instrument_report_contains_required_sections_and_disclaimer():
         "assumptions",
     }
     assert body["eligible_for_real_research"] is False
-    assert body["data_mode"] == "demo"
-    assert body["title"].startswith("Demo Report")
+    assert body["data_mode"] == "invalid_for_research"
+    assert body["title"].startswith("Data Quality Blocked")
     assert body["sections"]["provenance"]["source"] == "sample"
     assert body["sections"]["provenance"]["row_count"] > 0
     assert body["sections"]["provenance"]["first_date"]
@@ -298,6 +298,7 @@ def test_institutional_pdf_export_is_full_designer_grade_package(monkeypatch, tm
             "prepared_for": "Client Investment Committee",
             "prepared_by": "Helios Advisory",
             "reviewer": "Portfolio Oversight",
+            "report_purpose": "client_review",
         },
     )
     assert save.status_code == 200
@@ -309,7 +310,8 @@ def test_institutional_pdf_export_is_full_designer_grade_package(monkeypatch, tm
     assert pdf.status_code == 200
     assert pdf.data.startswith(b"%PDF-")
     assert pdf.data.count(b"/Type /Page") >= 4
-    assert b"CLIENT-READY PDF PACKAGE" in pdf.data
+    assert b"APPROVED EXTERNAL REVIEW PACK" in pdf.data
+    assert b"INSTITUTIONAL ADVISOR REPORT" in pdf.data
     assert b"EXECUTIVE SUMMARY" in pdf.data
     assert b"PROVENANCE DASHBOARD" in pdf.data
     assert b"EVIDENCE DETAIL" in pdf.data
@@ -483,7 +485,9 @@ def test_model_report_snapshot_includes_client_grade_risk_pack(monkeypatch, tmp_
     assert snapshot["client_risk_pack"]["available"] is True
 
     html_text = client.get(snapshot["html_url"]).get_data(as_text=True)
-    assert "Client Risk Pack" in html_text
+    assert "Risk Evidence" in html_text
+    assert "Client Risk Pack" not in html_text
+    assert "not approved for client or investment-committee distribution" in html_text
     assert "Historical Stress Replay" in html_text
     assert "What Would Break This Model" in html_text
     assert "Benchmark Relative Drawdown" in html_text
@@ -492,7 +496,8 @@ def test_model_report_snapshot_includes_client_grade_risk_pack(monkeypatch, tmp_
 
     pdf = client.get(snapshot["pdf_url"])
     assert pdf.status_code == 200
-    assert b"CLIENT-GRADE RISK PACK" in pdf.data
+    assert b"RISK EVIDENCE" in pdf.data
+    assert b"CLIENT-GRADE RISK PACK" not in pdf.data
     assert b"HISTORICAL STRESS REPLAY" in pdf.data
     assert b"WHAT WOULD BREAK THIS MODEL" in pdf.data
 

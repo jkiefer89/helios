@@ -948,9 +948,9 @@ def validate_ai_output(
         stmt = result.get("data_quality_statement", "")
         if data_mode in {"demo", "blocked", "invalid_for_research"} and "not real market evidence" not in stmt.lower():
             result["data_quality_statement"] = (
-                f"{stmt} Demo or blocked data is not real market evidence.".strip()
+                f"{stmt} Ineligible or blocked data is not real market evidence.".strip()
             )
-            result["compliance_caveats"].append("Data is demo/blocked and must not be presented as real research evidence.")
+            result["compliance_caveats"].append("Data is ineligible or blocked and must not be presented as real research evidence.")
         elif data_mode == "mixed" and "not verified real market data" not in stmt.lower():
             result["data_quality_statement"] = (
                 f"{stmt} Parts of this evidence are not verified real market data; advisor review is required.".strip()

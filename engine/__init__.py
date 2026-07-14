@@ -1,12 +1,12 @@
 """Analytics engine for the investment-model platform.
 
 Modules:
-    data        - load / generate / fetch price history
+    data        - load, validate, persist, and fetch price history
     analytics_cache - bounded memo cache for per-series analytics results
     indicators  - technical indicators & performance metrics
     forecast    - return forecasting with Monte-Carlo confidence cones
     mandate     - client-purpose presets and risk/return anchors
-    portfolio   - model upload parsing and synthetic NAV construction
+    portfolio   - model upload parsing and weight-rescaled research series
     insights    - deterministic model-improvement suggestions
     sentiment   - news / headline sentiment scoring
     signals     - composite BUY / SELL / HOLD trade signals
@@ -19,7 +19,7 @@ Modules:
     report_exports - saved advisor report snapshots and export renderers
     report_snapshots - snapshot composition, versioning, and narrative orchestration
     data_quality - freshness/coverage dashboard and research-readiness evidence
-    provenance  - demo/real/mixed data eligibility gates
+    provenance  - eligible/ineligible/mixed data-quality gates
     persistence - local SQLite store for live/uploaded data
     ai_copilot  - optional narrative provider layer over sanitized Helios facts
     model_library - governed starter model templates/workspaces
@@ -28,6 +28,10 @@ Modules:
     risk_exposure - portfolio-level risk, exposure, stress, and benchmark analytics
     signal_journal - local signal audit log and paper-performance tracking
     evidence_lab - rolling walk-forward out-of-sample signal evidence
+    evidence     - immutable calculation envelopes and deterministic replay
+    provider_registry - licensed provider, reconciliation, and cutover controls
+    independent_validation - independent model reviews and bounded exceptions
+    operations   - privileged audit, incidents, and backup verification
     edgar       - SEC EDGAR client: ticker->registrant, N-PORT holdings, former names
     holdings    - fund look-through and model-level exposure roll-up
     figi        - OpenFIGI CUSIP->ticker bridge for N-PORT holdings
@@ -64,6 +68,11 @@ __all__ = [
     "risk_exposure",
     "signal_journal",
     "evidence_lab",
+    "evidence",
+    "trials",
+    "provider_registry",
+    "independent_validation",
+    "operations",
     "edgar",
     "holdings",
     "figi",

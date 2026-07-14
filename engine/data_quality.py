@@ -31,7 +31,12 @@ def model_coverage(mdl: portfolio.Model) -> dict:
         source = inst.source if inst is not None else "missing"
         sources[source] = sources.get(source, 0) + 1
         history_days = len(inst.df["close"].dropna()) if inst is not None else 0
-        if provenance.is_real_source(source) and history_days >= 60:
+        instrument_provenance = provenance.instrument(
+            source,
+            history_days,
+            price_provider=getattr(inst, "price_provider", "") if inst is not None else "",
+        )
+        if instrument_provenance["eligible_for_real_research"]:
             real_count += 1
             continue
         missing.append(holding.ticker)
@@ -88,8 +93,12 @@ def threshold_config() -> dict:
     }
 
 
-def dashboard_payload() -> dict:
-    """Full data-quality dashboard payload, including synced persistent alerts."""
+def dashboard_payload(sync_alerts: bool = False) -> dict:
+    """Build the data-quality payload.
+
+    GET callers leave ``sync_alerts`` false so a read cannot change alert
+    occurrence state. Explicit refresh/sync POST workflows opt in to writes.
+    """
     active_thresholds = thresholds()
     instruments = data.all_instruments()
     models = portfolio.all_models()
@@ -101,6 +110,15 @@ def dashboard_payload() -> dict:
     model_rows = [model_row(mdl) for mdl in models]
     issues = []
     for row in symbols:
+        provider_control = row.get("provider_control") or {}
+        if row["source"] == "live" and not provider_control.get("passed", False):
+            issues.append(quality_issue(
+                "provider_controls",
+                "blocker",
+                row["symbol"],
+                str(provider_control.get("detail") or "The live price source is outside the approved provider cutover."),
+                str(provider_control.get("required_action") or "Refresh through an approved primary or backup provider."),
+            ))
         if row["is_stale"]:
             issues.append(quality_issue(
                 "stale_symbols",
@@ -193,7 +211,7 @@ def dashboard_payload() -> dict:
                 "warning",
                 model_row_item["name"],
                 f"{model_row_item['name']} mixes sources: " + ", ".join(f"{source}={count}" for source, count in sorted(nonzero_sources.items())),
-                "Resolve mixed/missing/sample coverage before presenting a unified model evidence pack.",
+                "Resolve mixed, missing, or ineligible coverage before presenting a unified model evidence pack.",
             ))
     for row in missing_rows:
         issues.append(quality_issue(
@@ -252,10 +270,13 @@ def dashboard_payload() -> dict:
         "source_conflicts": source_conflicts,
         "disclaimer": DISCLAIMER,
     }
-    payload["alerts"] = persistence.get_store().sync_data_quality_alerts(
-        alert_inputs(payload),
-        generated_at=payload["generated_at"],
-    )
+    if sync_alerts:
+        payload["alerts"] = persistence.get_store().sync_data_quality_alerts(
+            alert_inputs(payload),
+            generated_at=payload["generated_at"],
+        )
+    else:
+        payload["alerts"] = persistence.get_store().data_quality_alerts(limit=500)
     return payload
 
 
@@ -268,6 +289,12 @@ def symbol_row(inst: data.Instrument, last_refresh: dict | None, active_threshol
     today = datetime.now(timezone.utc).date()
     days_stale = (today - dates.max().date()).days if len(dates) else None
     is_real_source = provenance.is_real_source(inst.source)
+    instrument_provenance = provenance.instrument(
+        inst.source,
+        len(close),
+        min_history=active_thresholds["min_research_rows"],
+        price_provider=getattr(inst, "price_provider", ""),
+    )
     requires_refresh_log = inst.source == "live"
     return {
         "symbol": inst.symbol,
@@ -286,8 +313,10 @@ def symbol_row(inst: data.Instrument, last_refresh: dict | None, active_threshol
         # against fabricated bars). >1 day past today allows non-UTC same-day bars.
         "future_dated": bool(days_stale is not None and days_stale < -1),
         "is_short": bool(is_real_source and len(close) < active_thresholds["institutional_history_rows"]),
-        "research_ready": bool(is_real_source and len(close) >= active_thresholds["min_research_rows"]
+        "research_ready": bool(instrument_provenance["eligible_for_real_research"]
                                and not (days_stale is not None and days_stale < -1)),
+        "data_provenance": instrument_provenance,
+        "provider_control": instrument_provenance.get("provider_control") or {},
         "last_refresh": last_refresh,
         "refresh_evidence": {
             "requires_refresh_log": requires_refresh_log,
@@ -297,7 +326,10 @@ def symbol_row(inst: data.Instrument, last_refresh: dict | None, active_threshol
             "rows_added": last_refresh.get("rows_added") if last_refresh else None,
             "source": last_refresh.get("source") if last_refresh else None,
         },
-        "next_step": symbol_next_step(inst.source, len(close), days_stale, active_thresholds, bool(last_refresh)),
+        "next_step": (
+            instrument_provenance.get("required_action")
+            or symbol_next_step(inst.source, len(close), days_stale, active_thresholds, bool(last_refresh))
+        ),
     }
 
 
@@ -315,7 +347,7 @@ def model_row(mdl: portfolio.Model) -> dict:
 
 def symbol_next_step(source: str, row_count: int, days_stale: int | None, active_thresholds: dict[str, int], has_refresh_log: bool) -> str:
     if not provenance.is_real_source(source):
-        return "Sample data is demo-only; fetch live or upload real history."
+        return "This history is ineligible; fetch live or upload verified real history."
     if row_count < active_thresholds["min_research_rows"]:
         return f"Fetch/upload at least {active_thresholds['min_research_rows']} valid rows before real research."
     if row_count < active_thresholds["institutional_history_rows"]:

@@ -9,12 +9,15 @@ from flask import Blueprint, Response, request
 from engine import (
     analytics_cache, backtest, cma, data, data_quality, figi, forecast, fundamentals,
     holdings, indicators, insights, macro_events, mandate, model_governance,
-    model_library, model_validation, portfolio, portfolio_clinic, provenance,
-    risk_exposure, sentiment, signals, strategy,
+    model_library, model_validation, persistence, portfolio, portfolio_clinic, provenance,
+    provider_registry, risk_exposure, sentiment, signals, strategy,
 )
 
 from .analysis import _record_model_signal, _series_payload, _strategy_request_args
-from .core import ANALYSIS_ONLY_DISCLAIMER, _UPLOAD_SEMAPHORE, _safe_int_arg, app, err, ok
+from .core import (
+    ANALYSIS_ONLY_DISCLAIMER, _UPLOAD_SEMAPHORE, _safe_int_arg, app,
+    current_actor, defer_privileged_state, err, ok,
+)
 
 bp = Blueprint("models", __name__)
 
@@ -112,14 +115,17 @@ def model_governance_event(model_id):
     if mdl is None:
         return err("Unknown model.", 404)
     payload = request.get_json(silent=True) or {}
-    result = model_governance.record_event(
-        mdl,
-        actor=str(payload.get("actor") or "Advisor Console"),
-        action=str(payload.get("action") or ""),
-        note=str(payload.get("note") or ""),
-        approval_status=str(payload.get("approval_status") or ""),
-        committee_identity=payload.get("committee_identity") if isinstance(payload.get("committee_identity"), dict) else None,
-    )
+    try:
+        result = model_governance.record_event(
+            mdl,
+            actor=current_actor(),
+            action=str(payload.get("action") or ""),
+            note=str(payload.get("note") or ""),
+            approval_status=str(payload.get("approval_status") or ""),
+            committee_identity=payload.get("committee_identity") if isinstance(payload.get("committee_identity"), dict) else None,
+        )
+    except RuntimeError as exc:
+        return err(str(exc), 503)
     if not result.get("recorded"):
         return err(result.get("warning") or "Could not record model governance event.", int(result.get("status_code") or 503))
     return ok({"event": result["event"]})
@@ -191,6 +197,8 @@ def model_editor_preview(model_id):
         )
     except ValueError as exc:
         return err(str(exc), 400)
+    except RuntimeError as exc:
+        return err(str(exc), 503)
     return ok(result)
 
 
@@ -200,16 +208,22 @@ def model_editor_save(model_id):
     if mdl is None:
         return err("Unknown model.", 404)
     payload = request.get_json(silent=True) or {}
+    in_memory_before = portfolio.snapshot_models()
+    defer_privileged_state(
+        rollback=lambda snapshot=in_memory_before: portfolio.restore_models(snapshot)
+    )
     try:
         result = model_governance.save_edit(
             mdl,
             holdings=payload.get("holdings") or [],
             change_note=str(payload.get("change_note") or ""),
-            actor=str(payload.get("actor") or "Advisor Console"),
+            actor=current_actor(),
             rebalance_to_target=bool(payload.get("rebalance_to_target")),
         )
     except ValueError as exc:
         return err(str(exc), 400)
+    except RuntimeError as exc:
+        return err(str(exc), 503)
     if not result.get("saved"):
         return err(result.get("warning") or "Could not save model edits.", 400)
     # Reweighting can keep row count and last date unchanged, so drop memos.
@@ -223,14 +237,43 @@ def model_upload():
         return err("No file uploaded.")
     f = request.files["file"]
     name = request.form.get("name") or (f.filename or "Client Model").rsplit(".", 1)[0]
+    previous_model = portfolio.get(portfolio.model_id_from_name(name))
     mkey = mandate.key_or_default(request.form.get("mandate"))
     context = request.form.get("context", "")
     if not _UPLOAD_SEMAPHORE.acquire(blocking=False):
         return err("Server busy parsing another upload — try again in a moment.", 429)
     try:
-        mdl = portfolio.parse_model_file(f.read(), f.filename or "", name, mkey, context)
+        store = persistence.get_store()
+        if store.available:
+            with store.transaction(durable=True):
+                mdl = portfolio.parse_model_file(
+                    f.read(), f.filename or "", name, mkey, context, activate=False,
+                )
+                persisted = portfolio._persist_model(mdl, source_filename=f.filename or "")
+                if not persisted.get("persisted"):
+                    raise RuntimeError(persisted.get("warning") or "Could not persist the model.")
+                if previous_model is not None:
+                    governance = model_governance.record_event(
+                        mdl,
+                        actor=current_actor(),
+                        action="model_replaced",
+                        note="Uploaded holdings replaced the prior model version; committee approval must be renewed.",
+                        approval_status="pending_review",
+                        previous_model=previous_model,
+                    )
+                    if not governance.get("recorded"):
+                        raise RuntimeError(
+                            governance.get("warning") or "Could not record replacement governance evidence."
+                        )
+            defer_privileged_state(
+                commit=lambda model=mdl: (portfolio.register(model), analytics_cache.invalidate())
+            )
+        else:
+            mdl = portfolio.parse_model_file(f.read(), f.filename or "", name, mkey, context)
     except ValueError as e:
         return err(str(e), 400)
+    except RuntimeError as e:
+        return err(str(e), 503)
     except Exception:
         app.logger.exception("model parse failed")
         return err("Could not read that file. Expected columns for Ticker and (optionally) Weight.", 400)
@@ -286,6 +329,13 @@ def model_analyze():
     close = ps.close
     if len(close) < 60:
         return err("Holdings have too little available analyzed history (need 60+ sessions).", 400)
+    research_provenance = provenance.portfolio(ps.provenance)
+    if not research_provenance["eligible_for_real_research"]:
+        return err(
+            "Research blocked: "
+            f"{research_provenance['reason']} {research_provenance['required_action']}".strip(),
+            409,
+        )
 
     avail = _available_long(ps.n_days)
     long_label = forecast._long_label(hval) if hkind == "long" else None
@@ -293,7 +343,7 @@ def model_analyze():
         hkind, hval = "short", 21  # requested long horizon unavailable for this history
         long_label = None
 
-    # Aggregate any known headlines from holdings (sample tickers carry demo news).
+    # Aggregate only headlines persisted with explicit live-data ingestion.
     headlines = []
     for h in mdl.holdings:
         inst = data.get(h.ticker)
@@ -314,7 +364,6 @@ def model_analyze():
                            portfolio_meta=pmeta, history_days=ps.n_days,
                            data_honesty=ps.provenance, macro_context=macro_ctx)
     bt = backtest.run(close)
-    journal_entry = _record_model_signal(mdl, ps, close, sig, signal_horizon)
 
     # Long-horizon drift reverts toward the holdings-derived CMA anchor when the
     # forward endpoint has already computed one (get-only: a cold cache falls
@@ -354,13 +403,13 @@ def model_analyze():
         "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
         # Server-side provenance verdict (same shape as /api/live); the raw
         # "provenance" block above is kept unchanged for backward compatibility.
-        "data_provenance": provenance.portfolio(ps.provenance),
+        "data_provenance": research_provenance,
         "horizon": {"kind": hkind, "value": hval, "label": long_label,
                     "available_long": avail},
         "forecast": forecast_panel,
         "forecast_short": fc_short,
         "signal": sig,
-        "signal_journal_entry": journal_entry,
+        "signal_journal_entry": None,
         "backtest": bt,
         "insights": ins,
         # Structured verdicts for the mandate-fit panel — computed from the
@@ -369,6 +418,53 @@ def model_analyze():
         "mandate_checks": insights.mandate_checks(mdl, metrics, fc_long_1y),
         "warnings": ps.warnings,
     })
+
+
+@bp.route("/api/model/signals/record", methods=["POST"])
+def record_model_signal():
+    """Record a prospective model signal without coupling writes to a GET."""
+    payload = request.get_json(silent=True) or {}
+    mdl = portfolio.get(str(payload.get("id") or ""))
+    if mdl is None:
+        return err("Unknown model.", 404)
+    try:
+        horizon = int(payload.get("horizon") or 21)
+    except (TypeError, ValueError):
+        return err("horizon must be an integer.", 400)
+    if not 5 <= horizon <= 90:
+        return err("horizon must be between 5 and 90.", 400)
+    try:
+        ps = portfolio.build_series(mdl, allow_sample=False, allow_simulated=False)
+    except ValueError as exc:
+        return err(str(exc), 400)
+    close = ps.close
+    if len(close) < 60:
+        return err("Holdings need at least 60 analyzed sessions to record a signal.", 400)
+    research_provenance = provenance.portfolio(ps.provenance)
+    if not research_provenance["eligible_for_real_research"]:
+        return err(
+            "Signal recording blocked: "
+            f"{research_provenance['reason']} {research_provenance['required_action']}".strip(),
+            409,
+        )
+    fc = forecast.forecast(close, horizon=horizon)
+    pmeta = {
+        "n_holdings": len(mdl.holdings),
+        "top_weight": mdl.holdings[0].weight if mdl.holdings else 0,
+        "top_ticker": mdl.holdings[0].ticker if mdl.holdings else "?",
+    }
+    sig = signals.evaluate(
+        close,
+        fc,
+        {"aggregate_score": 0, "aggregate_label": "neutral", "count": 0},
+        mandate_key=mdl.mandate_key,
+        portfolio_meta=pmeta,
+        history_days=ps.n_days,
+        data_honesty=ps.provenance,
+        macro_context=macro_events.build_macro_context(),
+    )
+    entry = _record_model_signal(mdl, ps, close, sig, horizon)
+    return ok({"signal_journal_entry": entry, "disclaimer": ANALYSIS_ONLY_DISCLAIMER})
 
 
 @bp.route("/api/model/strategy/analyze")
@@ -458,7 +554,29 @@ def model_lookthrough():
     mdl = portfolio.get(request.args.get("id", ""))
     if mdl is None:
         return err("Unknown model.", 404)
-    roll = holdings.model_lookthrough(mdl)
+    roll = holdings.model_lookthrough(mdl, allow_fetch=False)
+    forward = provenance.forward_research(roll["coverage"])
+    return ok({
+        "id": mdl.id,
+        "name": mdl.name,
+        "mandate": {"key": mdl.mandate_key, "label": mandate.get(mdl.mandate_key)["label"]},
+        "exposure": roll["exposure"],
+        "per_holding": roll["per_holding"],
+        "coverage": roll["coverage"],
+        "forward": forward,
+        "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
+    })
+
+
+@bp.route("/api/model/lookthrough/refresh", methods=["POST"])
+def refresh_model_lookthrough():
+    """Acquire model SEC look-through evidence after an explicit action."""
+    payload = request.get_json(silent=True) or {}
+    model_id = str(payload.get("id") or request.args.get("id") or "")
+    mdl = portfolio.get(model_id)
+    if mdl is None:
+        return err("Unknown model.", 404)
+    roll = holdings.model_lookthrough(mdl, allow_fetch=True)
     forward = provenance.forward_research(roll["coverage"])
     return ok({
         "id": mdl.id,
@@ -493,7 +611,11 @@ def _fundamentals_map_for(underlyings: list) -> dict:
 
     need = [(u.get("cusip") or "").upper() for u in top
             if not (u.get("ticker") or "").strip() and u.get("cusip")]
-    cusip_to_ticker = figi.map_cusips(need) if need else {}
+    cusip_to_ticker = (
+        figi.map_cusips(need)
+        if need and not provider_registry.controls_required()
+        else {}
+    )
 
     fmap: dict = {}
     deadline = time.monotonic() + _FORWARD_FUNDAMENTALS_TIME_BUDGET_S
@@ -513,7 +635,7 @@ def _fundamentals_map_for(underlyings: list) -> dict:
     return fmap
 
 
-@bp.route("/api/model/forward")
+@bp.route("/api/model/forward", methods=["POST"])
 def model_forward():
     """Forward expected return from holdings look-through + building-block CMA.
 
@@ -524,12 +646,19 @@ def model_forward():
     mdl = portfolio.get(request.args.get("id", ""))
     if mdl is None:
         return err("Unknown model.", 404)
+    provider_control = provider_registry.domain_readiness("fundamentals")
+    if not provider_control["passed"]:
+        return err(
+            "Forward research provider gate blocked: "
+            f"{provider_control['detail']} {provider_control['required_action']}".strip(),
+            503,
+        )
     # Captured BEFORE the slow look-through/fundamentals fan-out: if a model
     # edit or data refresh invalidates the analytics cache while this request
     # is in flight, the anchor publish below is dropped instead of landing a
     # stale value under the same key after the invalidation (review finding).
     cache_gen = analytics_cache.generation()
-    roll = holdings.model_lookthrough(mdl)
+    roll = holdings.model_lookthrough(mdl, allow_fetch=True)
     underlyings = roll["exposure"].get("underlyings", [])
     fmap = _fundamentals_map_for(underlyings)
     fundamentals_sources = sorted({f.source for f in fmap.values() if getattr(f, "usable", False)})
