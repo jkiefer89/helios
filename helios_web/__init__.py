@@ -20,23 +20,21 @@ from __future__ import annotations
 
 def init_app():
     """Wire the singleton Flask app once: engine warmup, blueprints, auto-live."""
-    import os
-
     from engine import data as engine_data, portfolio
 
-    from . import ai, analysis, core, data, decisions, ledger, models, rebalance, reports, spa
+    from . import (
+        ai, analysis, core, data, decisions, evidence, institutional, ledger,
+        models, rebalance, reports, security, spa, trials,
+    )
 
     app = core.app
     if not app.blueprints:
-        # Synthetic demo histories are OPT-IN (they park under REAL tickers —
-        # AAPL/SPY/... — in the same store as live data, and a sample SPY once
-        # leaked in as the market-regime proxy; review finding). A fresh start
-        # lands on the honest empty state: fetch live or upload real CSVs.
-        if os.environ.get("HELIOS_LOAD_SAMPLES", "0") == "1":
-            engine_data.load_samples()
         engine_data.load_persisted_instruments()
         portfolio.load_persisted_models()
-        for module in (data, analysis, models, reports, ai, decisions, ledger, rebalance, spa):
+        for module in (
+            data, analysis, models, reports, ai, decisions, evidence, ledger,
+            rebalance, trials, institutional, security, spa,
+        ):
             app.register_blueprint(module.bp)
         data._start_auto_live_refresh()
     return app

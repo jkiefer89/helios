@@ -6,6 +6,7 @@ os.environ.setdefault("HELIOS_AUTH", "0")
 os.environ.setdefault("HELIOS_RF", "0.02")
 os.environ.setdefault("HELIOS_DB_PATH", "off")
 os.environ.setdefault("HELIOS_LOAD_DOTENV", "0")
+os.environ.setdefault("HELIOS_INSTITUTIONAL_CONTROLS", "0")
 
 import numpy as np
 import pandas as pd
@@ -16,6 +17,40 @@ from engine import analytics_cache, data, fundamentals, macro, news, persistence
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+
+_SAMPLE_SPEC = [
+    ("AAPL", "Apple Inc.", 0.18, 0.26, 120.0, True, 1),
+    ("MSFT", "Microsoft Corp.", 0.21, 0.24, 240.0, True, 2),
+    ("NVDA", "NVIDIA Corp.", 0.42, 0.52, 45.0, True, 3),
+    ("TSLA", "Tesla Inc.", 0.12, 0.58, 210.0, True, 4),
+    ("SPY", "S&P 500 ETF", 0.10, 0.16, 380.0, False, 5),
+    ("BTC-USD", "Bitcoin / USD", 0.35, 0.70, 22000.0, True, 6),
+]
+
+
+def load_sample_instruments() -> None:
+    """Offline provenance fixtures. Production code cannot create samples."""
+    for symbol, name, drift, vol, start, flips, seed in _SAMPLE_SPEC:
+        if data.get(symbol) is not None:
+            continue
+        rng = np.random.default_rng(seed)
+        days = 760
+        dt = 1.0 / 252.0
+        segments = 4 if flips else 1
+        bounds = np.linspace(0, days, segments + 1).astype(int)
+        regime_mult = rng.uniform(-1.2, 1.6, size=segments) if flips else np.array([1.0])
+        daily = np.empty(days)
+        for segment in range(segments):
+            a, b = bounds[segment], bounds[segment + 1]
+            seg_vol = max(vol * (1.0 + 0.4 * rng.standard_normal()) if flips else vol, 0.05)
+            seg_drift = drift * (regime_mult[segment] if flips else 1.0)
+            daily[a:b] = ((seg_drift - 0.5 * seg_vol**2) * dt
+                          + seg_vol * np.sqrt(dt) * rng.standard_normal(b - a))
+        close = start * np.exp(np.cumsum(daily))
+        idx = pd.bdate_range(end="2025-06-13", periods=days)
+        frame = pd.DataFrame({"close": close, "volume": rng.lognormal(15.5, 0.6, days)}, index=idx)
+        data.register(data.Instrument(symbol, name, frame, "sample", []))
 
 
 @pytest.fixture(autouse=True)
@@ -37,13 +72,12 @@ def isolate_provider_env():
 
 @pytest.fixture(autouse=True)
 def reset_process_local_stores():
-    """Keep tests independent while preserving bundled sample instruments."""
-    data.load_samples()
+    """Keep tests independent while preserving test-only sample instruments."""
+    load_sample_instruments()
     samples = {k: v for k, v in data._STORE.items() if v.source == "sample"}
     data._STORE.clear()
     data._STORE.update(samples)
     data._PRICE_CACHE.clear()
-    data._NEGATIVE_RESOLVE.clear()
     portfolio._MODELS.clear()
     analytics_cache.invalidate()
     fundamentals.invalidate_cache()
@@ -54,7 +88,6 @@ def reset_process_local_stores():
     data._STORE.clear()
     data._STORE.update(samples)
     data._PRICE_CACHE.clear()
-    data._NEGATIVE_RESOLVE.clear()
     portfolio._MODELS.clear()
     analytics_cache.invalidate()
     fundamentals.invalidate_cache()

@@ -18,7 +18,7 @@ from ._common import dedupe as _dedupe
 
 def score_candidate(candidate: dict, regime: dict | None = None) -> dict:
     regime = regime or {"label": "neutral"}
-    source = candidate.get("source", "sample")
+    source = candidate.get("source", "unknown")
     # Non-finite (NaN/inf/non-numeric) analytics inputs are coerced to
     # conservative fallbacks so they can never inflate — or NaN-poison — the
     # composite score. Fallback rationale per input:
@@ -124,8 +124,14 @@ def score_candidate(candidate: dict, regime: dict | None = None) -> dict:
         "plain_english_summary": _summary(candidate, evidence_score, risk_score, action),
         "recommended_next_step": _next_step(action),
         "warnings": _dedupe(warnings)[:5],
-        "eligible_for_real_research": provenance.is_real_source(source) and not sim_weight,
-        "data_mode": "real" if provenance.is_real_source(source) else "demo",
+        "eligible_for_real_research": bool(candidate.get(
+            "eligible_for_real_research",
+            provenance.is_real_source(source) and not sim_weight,
+        )),
+        "data_mode": str(candidate.get(
+            "data_mode",
+            "real" if provenance.is_real_source(source) else "invalid_for_research",
+        )),
     }
     return scored
 
@@ -201,16 +207,27 @@ def instrument_candidate(inst: data.Instrument) -> dict | None:
     close = inst.df["close"].dropna()
     if len(close) < 60:
         return None
+    p = provenance.instrument(
+        inst.source,
+        len(close),
+        price_provider=getattr(inst, "price_provider", ""),
+    )
     cache_key = analytics_cache.series_key(f"{inst.symbol}:{inst.source}", close)
     cached = analytics_cache.get("opportunity_candidate", cache_key)
     if cached is not None:
-        return cached
+        return {
+            **cached,
+            "eligible_for_real_research": p["eligible_for_real_research"],
+            "data_mode": p["data_mode"],
+            "data_provenance": p,
+        }
     fc = forecast.forecast(close, horizon=21, n_paths=700)
     sent = sentiment.score_headlines(inst.headlines)
-    # Fundamentals give the radar its horizon-independent strategic leg; the
-    # fetch is TTL-cached in engine.fundamentals and empty/offline results are
-    # honestly reported as a technicals-only rating.
-    fwd = cma.instrument_forward(inst.symbol, fundamentals.fetch(inst.symbol))
+    # GET-backed radar views are cache/store-only. Provider refresh happens on
+    # explicit POST/background jobs; a cold cache is honestly technical-only.
+    cached_fundamentals = fundamentals.fetch_cached(inst.symbol) or fundamentals.Fundamentals(
+        ticker=inst.symbol, source="none")
+    fwd = cma.instrument_forward(inst.symbol, cached_fundamentals)
     # Macro context: cached-only (the radar never fetches feeds in-request; the
     # background loop keeps the snapshot warm). No snapshot -> no damper.
     macro_ctx = macro_events.build_macro_context(fwd.get("sector") or "")
@@ -240,6 +257,11 @@ def instrument_candidate(inst: data.Instrument) -> dict | None:
         "reason": sig.get("headline_rationale", ""),
         "warnings": sig.get("caveats", []),
     }
+    candidate.update({
+        "eligible_for_real_research": p["eligible_for_real_research"],
+        "data_mode": p["data_mode"],
+        "data_provenance": p,
+    })
     # Earnings proximity — a rating computed days before a report carries event
     # risk the price history can't see yet; flag it rather than hide it.
     earnings = (fwd or {}).get("earnings") or {}
@@ -276,7 +298,12 @@ def instrument_candidate(inst: data.Instrument) -> dict | None:
 def _instrument_candidates(instruments: list[data.Instrument]) -> list[dict]:
     out = []
     for inst in instruments:
-        if not provenance.is_real_source(inst.source):
+        p = provenance.instrument(
+            inst.source,
+            len(inst.df["close"].dropna()) if "close" in inst.df else 0,
+            price_provider=getattr(inst, "price_provider", ""),
+        )
+        if not p["eligible_for_real_research"]:
             continue
         try:
             candidate = instrument_candidate(inst)
@@ -309,7 +336,7 @@ def _model_candidates(models: list[portfolio.Model]) -> tuple[list[dict], list[d
                 "display_label": "Data Quality Blocked",
                 "eligible_for_real_research": False,
                 "reason": str(exc),
-                "required_action": provenance.DEMO_ACTION,
+                "required_action": provenance.RESEARCH_DATA_ACTION,
                 "missing_tickers": [h.ticker for h in mdl.holdings],
                 "warnings": [str(exc)],
             }))
@@ -355,7 +382,7 @@ def _blocked_model(mdl: portfolio.Model, p: dict) -> dict:
         "data_mode": p.get("data_mode", "invalid_for_research"),
         "display_label": p.get("display_label", "Data Quality Blocked"),
         "reason": p.get("reason", "Model data quality is blocked."),
-        "required_action": p.get("required_action", provenance.DEMO_ACTION),
+        "required_action": p.get("required_action", provenance.RESEARCH_DATA_ACTION),
         "missing_tickers": p.get("missing_tickers", []),
         "warnings": p.get("warnings", []),
     }

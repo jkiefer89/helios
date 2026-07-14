@@ -83,24 +83,49 @@ def _ridge_predict(Xrow, w, b, mean, std):
 # --------------------------------------------------------------------------- #
 def _evaluate(X, y, alpha=1.0):
     n = len(y)
-    split = int(n * 0.7)
-    if split < 30 or n - split < 10:
+    initial_train = max(60, int(n * 0.5))
+    refit_interval = 5
+    if initial_train < 30 or n - initial_train < 10:
         return {"r2": None, "rmse": None, "directional_accuracy": None, "n_test": 0,
-                "calibration": {"status": "insufficient_data", "n_test": max(0, n - split)}}
-    w, b, mean, std = _ridge_fit(X[:split], y[:split], alpha)
-    with np.errstate(all="ignore"):
-        train_pred = _standardize(X[:split], mean, std) @ w + b
-        pred = _standardize(X[split:], mean, std) @ w + b
-    actual = y[split:]
+                "evaluation_method": "rolling_origin_expanding",
+                "initial_train_size": min(initial_train, n),
+                "refit_interval": refit_interval,
+                "calibration": {"status": "insufficient_data", "n_test": max(0, n - initial_train)}}
+
+    predictions: list[np.ndarray] = []
+    actuals: list[np.ndarray] = []
+    residual_scales: list[float] = []
+    for origin in range(initial_train, n, refit_interval):
+        stop = min(origin + refit_interval, n)
+        w, b, mean, std = _ridge_fit(X[:origin], y[:origin], alpha)
+        with np.errstate(all="ignore"):
+            train_pred = _standardize(X[:origin], mean, std) @ w + b
+            block_pred = _standardize(X[origin:stop], mean, std) @ w + b
+        predictions.append(np.asarray(block_pred, dtype=float))
+        actuals.append(np.asarray(y[origin:stop], dtype=float))
+        residual_scales.extend(
+            [float(np.std(y[:origin] - train_pred))] * int(stop - origin)
+        )
+
+    pred = np.concatenate(predictions)
+    actual = np.concatenate(actuals)
     rmse = float(np.sqrt(np.mean((pred - actual) ** 2)))
     ss_res = np.sum((actual - pred) ** 2)
     ss_tot = np.sum((actual - actual.mean()) ** 2)
     r2 = float(1 - ss_res / ss_tot) if ss_tot > 1e-12 else None
     nonzero = actual != 0
     dir_acc = float(np.mean(np.sign(pred[nonzero]) == np.sign(actual[nonzero]))) if nonzero.any() else None
-    resid_sigma = float(np.std(y[:split] - train_pred))
-    return {"r2": r2, "rmse": rmse, "directional_accuracy": dir_acc, "n_test": int(n - split),
-            "calibration": _calibration(pred, actual, resid_sigma)}
+    resid_sigma = float(np.nanmedian(np.asarray(residual_scales, dtype=float)))
+    return {
+        "r2": r2,
+        "rmse": rmse,
+        "directional_accuracy": dir_acc,
+        "n_test": int(len(actual)),
+        "evaluation_method": "rolling_origin_expanding",
+        "initial_train_size": int(initial_train),
+        "refit_interval": int(refit_interval),
+        "calibration": _calibration(pred, actual, resid_sigma),
+    }
 
 
 def _calibration(pred: np.ndarray, actual: np.ndarray, resid_sigma: float) -> dict:
@@ -171,13 +196,14 @@ def forecast(close: pd.Series, horizon: int = 21, n_paths: int = 2000, alpha: fl
     model_mu = _ridge_predict(last_row, w, b, mean, std)
 
     r = close.pct_change().dropna()
-    hist_mu = float(r.tail(60).mean())
-    sigma = float(r.tail(60).std())
+    log_r = np.log1p(r.clip(lower=-0.999999))
+    hist_mu = float(log_r.tail(60).mean())
+    sigma = float(log_r.tail(60).std())
     if not np.isfinite(sigma) or sigma <= 0:
         # NaN is truthy, so `float(r.std()) or 0.01` never fell back on the
         # one case it existed for (whole-series std NaN on tiny series) and
         # NaN cascaded into every band (review finding).
-        sigma = float(r.std())
+        sigma = float(log_r.std())
         if not np.isfinite(sigma) or sigma <= 0:
             sigma = 0.01
 
@@ -185,7 +211,8 @@ def forecast(close: pd.Series, horizon: int = 21, n_paths: int = 2000, alpha: fl
     # then cap the drift so the implied annualized Sharpe stays <= ~1.5. This
     # stops naive momentum extrapolation from forecasting absurd moves, while
     # still scaling responsiveness with each instrument's volatility.
-    mu_raw = 0.6 * float(np.clip(model_mu, -3 * sigma, 3 * sigma)) + 0.4 * hist_mu
+    model_mu_log = float(np.log1p(np.clip(model_mu, -0.95, 1.0)))
+    mu_raw = 0.6 * float(np.clip(model_mu_log, -3 * sigma, 3 * sigma)) + 0.4 * hist_mu
     drift_cap = 1.5 / np.sqrt(252) * sigma  # |mu/sigma| * sqrt(252) <= 1.5
     mu = float(np.clip(mu_raw, -drift_cap, drift_cap))
 
@@ -196,12 +223,12 @@ def forecast(close: pd.Series, horizon: int = 21, n_paths: int = 2000, alpha: fl
     # normalized to UNIT variance and combined with weights whose squares sum to
     # 1, so the cone's realized std equals `sigma` (= the reported expected vol)
     # rather than the ~0.7x-narrower blend of two half-weighted sigma terms.
-    boot_sample = r.tail(252).to_numpy() - float(r.tail(252).mean())
+    boot_sample = log_r.tail(252).to_numpy() - float(log_r.tail(252).mean())
     boot_std = float(boot_sample.std()) or sigma
     boot_z = rng.choice(boot_sample, size=(n_paths, horizon)) / boot_std
     gw = 0.5  # gaussian vs bootstrap mix; squares sum to 1 so total std == sigma
-    steps = mu + sigma * (gw * shocks + np.sqrt(1 - gw * gw) * boot_z)
-    paths = last_price * np.cumprod(1 + steps, axis=1)
+    log_steps = mu + sigma * (gw * shocks + np.sqrt(1 - gw * gw) * boot_z)
+    paths = last_price * np.exp(np.cumsum(log_steps, axis=1))
 
     pct = lambda q: np.percentile(paths, q, axis=0)  # noqa: E731
     median = pct(50)
@@ -231,6 +258,7 @@ def forecast(close: pd.Series, horizon: int = 21, n_paths: int = 2000, alpha: fl
         "model_daily_drift_pct": float(mu) * 100,
         "annualized_drift_pct": (float(mu) * 252) * 100,
         "expected_vol_pct": sigma * np.sqrt(252) * 100,
+        "simulation_basis": "log_return_paths",
         "quality": quality,
         "feature_weights": _named_weights(w),
     }

@@ -20,6 +20,8 @@ from ._common import avg as _avg
 # "insufficient_windows" honestly instead of a noise statistic.
 _RANKING_SPLIT = 0.8
 _HOLDOUT_MIN_MEASURED = 8
+_RANKING_MIN_MEASURED = 8
+_MIN_BENCHMARK_COVERAGE_PCT = 80.0
 
 
 def dashboard(
@@ -146,7 +148,7 @@ def _validation_row(
             "mandate": model.mandate_key,
             "role": "blocked",
             "validation_state": "blocked",
-            "validation_score": 0.0,
+            "validation_score": None,
             "validation_grade": "Blocked",
             "evidence_unavailable": True,
             "reason": evidence.get("reason") or "",
@@ -177,6 +179,44 @@ def _validation_row(
     split = int(len(windows) * _RANKING_SPLIT)
     ranking_stats = _segment_stats(windows[:split])
     holdout_stats = _segment_stats(windows[split:])
+    if (
+        ranking_stats["measured_count"] < _RANKING_MIN_MEASURED
+        or (ranking_stats["benchmark_coverage_pct"] or 0.0) < _MIN_BENCHMARK_COVERAGE_PCT
+    ):
+        return {
+            "model_id": model.id,
+            "model_name": model.name,
+            "mandate": model.mandate_key,
+            "role": "blocked",
+            "validation_state": "insufficient_evidence",
+            "validation_score": None,
+            "validation_grade": "Insufficient evidence",
+            "evidence_unavailable": True,
+            "reason": "Too little benchmark-measured directional evidence to rank this model.",
+            "required_action": (
+                f"Accumulate at least {_RANKING_MIN_MEASURED} actionable BUY/SELL windows "
+                f"with at least {_MIN_BENCHMARK_COVERAGE_PCT:.0f}% benchmark coverage."
+            ),
+            "ranking_basis": {
+                **ranking_stats,
+                "min_measured": _RANKING_MIN_MEASURED,
+                "min_benchmark_coverage_pct": _MIN_BENCHMARK_COVERAGE_PCT,
+            },
+            "walk_forward": walk,
+            "false_positives": false_positives,
+            "regime_sensitivity": evidence.get("regime_sensitivity") or [],
+            "decay": decay,
+            "confidence_bands": evidence.get("confidence_bands") or {},
+            "prospective_validation": evidence.get("prospective_validation") or {},
+            "governance": _governance_summary(governance),
+            "drift_alerts": [{
+                "severity": "blocked",
+                "title": "Validation evidence insufficient",
+                "detail": "Directional alpha evidence does not meet the ranking floor.",
+            }],
+            "methodology": _row_methodology(),
+            "disclaimer": evidence.get("disclaimer") or "",
+        }
     rank_walk = {
         "hit_rate_pct": ranking_stats["hit_rate_pct"] if ranking_stats["hit_rate_pct"] is not None
         else walk.get("hit_rate_pct"),
@@ -205,8 +245,12 @@ def _validation_row(
         },
         "holdout_confirmation": holdout_confirmation,
         "ci_inputs": _ci_inputs(windows),
-        "_alpha_series": [(str(r.get("signal_date") or ""), float(r["alpha_pct"]))
-                          for r in windows if isinstance(r.get("alpha_pct"), (int, float))],
+        "_alpha_series": [
+            (str(r.get("signal_date") or ""), float(value))
+            for r in windows
+            for value in [costs.directional_alpha(r.get("action_label"), r.get("alpha_pct"))]
+            if value is not None
+        ],
         "model_id": model.id,
         "model_name": model.name,
         "mandate": model.mandate_key,
@@ -233,20 +277,30 @@ def _validation_row(
 def _segment_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Hit rate / alpha / false-positive rate over one window segment."""
     hit_flags = [row["paper_hit"] for row in rows if row.get("paper_hit") is not None]
-    alphas = [row["alpha_pct"] for row in rows
-              if isinstance(row.get("alpha_pct"), (int, float))]
+    alphas = [
+        value for row in rows
+        for value in [costs.directional_alpha(row.get("action_label"), row.get("alpha_pct"))]
+        if value is not None
+    ]
     actionable = [row for row in rows if row.get("action_label") in {"BUY", "SELL"}]
-    fps = sum(1 for row in actionable if row.get("false_positive"))
+    measured_directional = [row for row in actionable if row.get("paper_hit") is not None]
+    alpha_count = sum(1 for row in actionable if isinstance(row.get("alpha_pct"), (int, float)))
+    fps = sum(1 for row in measured_directional if row.get("false_positive"))
     return {
         "window_count": len(rows),
         "measured_count": len(hit_flags),
+        "directional_signal_count": len(actionable),
+        "measured_directional_signal_count": len(measured_directional),
+        "benchmark_coverage_pct": (
+            round(100.0 * alpha_count / len(actionable), 2) if actionable else None
+        ),
         "hit_rate_pct": (round(100.0 * sum(1 for f in hit_flags if f) / len(hit_flags), 2)
                          if hit_flags else None),
         "avg_alpha_pct": round(sum(alphas) / len(alphas), 4) if alphas else None,
         "avg_alpha_after_default_costs_pct": (
             costs.net_of_default_costs(round(sum(alphas) / len(alphas), 4)) if alphas else None),
-        "false_positive_rate_pct": (round(100.0 * fps / len(actionable), 2)
-                                    if actionable else None),
+        "false_positive_rate_pct": (round(100.0 * fps / len(measured_directional), 2)
+                                    if measured_directional else None),
     }
 
 
@@ -254,8 +308,11 @@ def _ci_inputs(windows: list[dict[str, Any]]) -> dict[str, Any]:
     """Raw inputs for the selection-adjusted champion interval (computed at
     the dashboard level, where the trial count is known)."""
     hit_flags = [row["paper_hit"] for row in windows if row.get("paper_hit") is not None]
-    alphas = [float(row["alpha_pct"]) for row in windows
-              if isinstance(row.get("alpha_pct"), (int, float))]
+    alphas = [
+        float(value) for row in windows
+        for value in [costs.directional_alpha(row.get("action_label"), row.get("alpha_pct"))]
+        if value is not None
+    ]
     out: dict[str, Any] = {"measured_count": len(hit_flags)}
     if hit_flags:
         out["hit_rate_p"] = sum(1 for f in hit_flags if f) / len(hit_flags)

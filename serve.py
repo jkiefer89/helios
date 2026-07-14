@@ -1,23 +1,23 @@
-"""Production / local-network entrypoint for Helios.
+"""Production / controlled-network entrypoint for Helios.
 
 By default serves over plain HTTP with waitress (robust pure-Python WSGI),
-bound to all interfaces so devices on your Wi-Fi / office network can reach it.
-The whole app stays behind the HTTP Basic Auth gate configured in app.py.
+bound to localhost. Institutional mode refuses a direct public/LAN bind because
+the built-in TLS path is development-only; deploy behind a production reverse
+proxy while keeping Helios on loopback.
 
-    python serve.py                       # http://0.0.0.0:5000
+    python serve.py                       # http://127.0.0.1:5000
     HELIOS_PASSWORD='use-a-long-unique-passphrase' python serve.py
     HELIOS_PORT=8080 python serve.py
-    HELIOS_TLS=1 python serve.py          # self-signed HTTPS (encrypts the login)
+    HELIOS_TLS=1 python serve.py          # HTTPS (trusted cert paths or self-signed dev)
 
-HELIOS_TLS=1 generates a self-signed certificate on first run and serves over
-HTTPS so the Basic-Auth password is not sent in cleartext — recommended on any
-network you do not fully trust. Browsers will warn once about the self-signed
-cert; that is expected. Delete the certs/ folder to regenerate (e.g. after your
-LAN IP changes).
+HELIOS_TLS=1 may generate a self-signed certificate for local development.
+The built-in TLS server is for loopback development only and is never accepted
+as institutional deployment evidence.
 """
 from __future__ import annotations
 
 import errno
+import ipaddress
 import os
 import subprocess
 import tempfile
@@ -25,6 +25,7 @@ from pathlib import Path
 
 import app as helios
 from engine import persistence
+from helios_web import core as web_core
 
 MIN_PASSWORD_LENGTH = 12
 
@@ -49,13 +50,31 @@ def parse_bool_env(name: str, default: str = "0") -> bool:
     raise SystemExit(f"{name} must be 0/1, true/false, yes/no, or on/off.")
 
 
-HOST = os.environ.get("HELIOS_HOST", "0.0.0.0") or "0.0.0.0"
+HOST = os.environ.get("HELIOS_HOST", "127.0.0.1") or "127.0.0.1"
 PORT = parse_port()
 TLS = parse_bool_env("HELIOS_TLS", "0")
 
 CERT_DIR = Path(__file__).resolve().parent / "certs"
 CERT = CERT_DIR / "helios-cert.pem"
 KEY = CERT_DIR / "helios-key.pem"
+
+
+def configured_tls_paths() -> tuple[Path, Path] | None:
+    cert_raw = os.environ.get("HELIOS_TLS_CERT_PATH", "").strip()
+    key_raw = os.environ.get("HELIOS_TLS_KEY_PATH", "").strip()
+    if bool(cert_raw) != bool(key_raw):
+        raise SystemExit("HELIOS_TLS_CERT_PATH and HELIOS_TLS_KEY_PATH must be configured together.")
+    if not cert_raw:
+        return None
+    cert = Path(cert_raw).expanduser()
+    key = Path(key_raw).expanduser()
+    if not cert.is_file() or not key.is_file():
+        raise SystemExit("Configured TLS certificate/key files do not exist or are not readable.")
+    return cert, key
+
+
+def trusted_tls_enabled() -> bool:
+    return bool(configured_tls_paths() and parse_bool_env("HELIOS_TLS_TRUSTED", "0"))
 
 
 def _ensure_cert() -> None:
@@ -89,8 +108,11 @@ def _ensure_cert() -> None:
         os.unlink(cfg_path)
 
 
-def prepare_tls() -> None:
+def prepare_tls() -> tuple[Path, Path]:
     """HELIOS_TLS=1 fails closed: never fall back to plain HTTP on 0.0.0.0."""
+    configured = configured_tls_paths()
+    if configured:
+        return configured
     try:
         _ensure_cert()
     except Exception as e:
@@ -98,6 +120,30 @@ def prepare_tls() -> None:
             f"HELIOS_TLS=1 but the TLS certificate could not be created ({e}) — "
             "install openssl (or delete the certs/ folder and retry), or unset HELIOS_TLS."
         )
+    return CERT, KEY
+
+
+def validate_deployment_security(host: str, use_tls: bool) -> None:
+    """Institutional mode permits only loopback origin binding."""
+    institutional = parse_bool_env("HELIOS_INSTITUTIONAL_CONTROLS", "1")
+    public = not _is_loopback_host(host)
+    if not institutional or not public:
+        return
+    raise SystemExit(
+        "Institutional controls refuse a direct public/LAN bind. Keep HELIOS_HOST="
+        "127.0.0.1 and place a production reverse proxy/IdP in front of Helios so "
+        "the Werkzeug development TLS server is never internet- or LAN-facing."
+    )
+
+
+def _is_loopback_host(host: str) -> bool:
+    value = str(host or "").strip().strip("[]").lower()
+    if value == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(value).is_loopback
+    except ValueError:
+        return False
 
 
 def port_in_use_hint(port: int) -> str:
@@ -130,19 +176,22 @@ def encryption_status_line() -> str:
 
 def main() -> None:
     use_tls = TLS
+    validate_deployment_security(HOST, use_tls)
+    tls_paths = None
     if use_tls:
-        prepare_tls()
+        tls_paths = prepare_tls()
 
     helios.print_banner(HOST, PORT, tls=use_tls)
     print_startup_warnings()
 
     try:
         if use_tls:
-            # Self-signed HTTPS via werkzeug — appropriate for a small trusted-LAN tool.
+            # Werkzeug TLS is restricted to loopback in institutional mode.
             from werkzeug.serving import run_simple
 
+            cert, key = tls_paths or (CERT, KEY)
             run_simple(HOST, PORT, helios.app, threaded=True,
-                       ssl_context=(str(CERT), str(KEY)))
+                       ssl_context=(str(cert), str(key)))
         else:
             from waitress import serve
 

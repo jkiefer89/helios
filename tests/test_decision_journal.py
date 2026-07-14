@@ -83,10 +83,11 @@ def test_outcomes_measured_from_forward_prices(store):
     measured = decision_journal.evaluate_outcomes(raw)
     assert measured["outcomes"].get("21") is not None
     assert measured["outcomes"].get("252") is not None
-    # Upward synthetic drift + BUY -> hits (alpha may be absent without benchmark data).
+    # The forward return is measurable, but a directional hit remains
+    # unavailable until the matching benchmark window is available.
     assert measured["outcomes"]["21"]["target_return_pct"] > 0
-    assert measured["outcomes"]["21"]["hit"] is True
-    assert measured["outcomes"]["21"]["engine_hit"] is True
+    assert measured["outcomes"]["21"]["hit"] is None
+    assert measured["outcomes"]["21"]["engine_hit"] is None
     assert measured["outcome_status"] in {"partial", "measured"}
 
 
@@ -250,15 +251,14 @@ def test_model_decision_with_real_holdings_is_measurable(store):
     assert entry["outcome_status"] == "pending"
 
 
-def test_model_decision_with_sample_holdings_stays_not_measurable(store):
+def test_model_decision_rejects_holdings_without_real_history(store):
     from engine import portfolio
-    sample = next(iter(data.all_instruments()))
     portfolio.register(portfolio.Model(
-        id="MSAMP", name="Sample Model", mandate_key="balanced", mandate_context="",
-        holdings=[portfolio.Holding(sample.symbol, 1.0)]))
-    entry = decision_journal.record_decision(
-        target_kind="model", target_id="MSAMP", my_action="HOLD")
-    assert entry["outcome_status"] == "not_measurable"
+        id="MNOHIST", name="Missing History Model", mandate_key="balanced", mandate_context="",
+        holdings=[portfolio.Holding("NOHIST", 1.0)]))
+    with pytest.raises(ValueError, match="No price history"):
+        decision_journal.record_decision(
+            target_kind="model", target_id="MNOHIST", my_action="HOLD")
 
 
 def test_sec_events_malformed_edgar_payload_degrades_not_crashes():

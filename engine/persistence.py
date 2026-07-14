@@ -28,7 +28,7 @@ except Exception:  # pragma: no cover - exercised when dependency install is bro
     Fernet = None
     InvalidToken = Exception
 
-SCHEMA_VERSION = 10  # 8: + ledger + fundamentals_snapshots; 9: PIT slots; 10: security master + vendor vault + price revisions + corporate actions + audit chain
+SCHEMA_VERSION = 13  # 13: institutional provider, security, incident, and validation controls
 REAL_SOURCES = {"live", "upload"}
 DISABLED_VALUES = {"", "0", "false", "off", "disabled", "none"}
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[1] / ".helios" / "helios.db"
@@ -77,6 +77,11 @@ def _json_dumps_stable(payload: dict) -> str:
         return _j.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     except Exception:
         return str(payload)
+
+
+def _sha256_text(value: str) -> str:
+    import hashlib
+    return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
 
 
 def utc_now() -> str:
@@ -162,9 +167,11 @@ def _disabled_encryption_status(mode: str = "off", required: bool = False, warni
 
 
 class _EncryptedConnectionLease:
-    def __init__(self, store: "SQLiteStore"):
+    def __init__(self, store: "SQLiteStore", *, durable: bool = False):
         self.store = store
+        self.durable = durable
         self._changes_before = 0
+        self._rollback_image: bytes | None = None
 
     def __enter__(self) -> sqlite3.Connection:
         self.store._conn_lock.acquire()
@@ -172,6 +179,8 @@ class _EncryptedConnectionLease:
             self.store._conn_lock.release()
             raise RuntimeError("encrypted SQLite persistence is not initialized")
         self._changes_before = self.store._memory_conn.total_changes
+        if self.durable:
+            self._rollback_image = self.store._memory_conn.serialize()
         return self.store._memory_conn
 
     def __exit__(self, exc_type, exc, tb) -> bool:
@@ -180,7 +189,23 @@ class _EncryptedConnectionLease:
                 if exc_type is None:
                     self.store._memory_conn.commit()
                     if self.store._memory_conn.total_changes != self._changes_before:
-                        self.store._mark_snapshot_dirty()
+                        if self.durable:
+                            try:
+                                timer, self.store._flush_timer = self.store._flush_timer, None
+                                if timer is not None:
+                                    timer.cancel()
+                                self.store._persist_encrypted_snapshot()
+                                self.store._snapshot_dirty = False
+                            except Exception as persist_exc:
+                                if self._rollback_image is not None:
+                                    self.store._memory_conn.deserialize(self._rollback_image)
+                                    self.store._memory_conn.row_factory = sqlite3.Row
+                                    self.store._memory_conn.execute("PRAGMA foreign_keys = ON")
+                                self.store._snapshot_dirty = False
+                                self.store.warning = f"Could not persist encrypted snapshot: {persist_exc}"
+                                raise RuntimeError(self.store.warning) from persist_exc
+                        else:
+                            self.store._mark_snapshot_dirty()
                 else:
                     self.store._memory_conn.rollback()
         finally:
@@ -207,6 +232,63 @@ class _PlaintextConnectionLease:
         finally:
             self._conn.close()
         return False
+
+
+class _NestedConnectionLease:
+    """Reuse an explicit store transaction without committing it early."""
+
+    def __init__(self, conn: sqlite3.Connection):
+        self._conn = conn
+
+    def __enter__(self) -> sqlite3.Connection:
+        return self._conn
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+
+class _StoreTransaction:
+    """One atomic transaction across persistence helpers and required audits."""
+
+    def __init__(self, store: "SQLiteStore", *, durable: bool):
+        self.store = store
+        self.durable = durable
+        self._nested = False
+        self._lease: _EncryptedConnectionLease | _PlaintextConnectionLease | None = None
+        self._conn: sqlite3.Connection | None = None
+
+    def __enter__(self) -> sqlite3.Connection:
+        active = getattr(self.store._transaction_local, "connection", None)
+        if active is not None:
+            self._nested = True
+            self.store._transaction_local.depth = int(
+                getattr(self.store._transaction_local, "depth", 1)
+            ) + 1
+            self._conn = active
+            return active
+        self._lease = self.store._base_connect(durable=self.durable)
+        self._conn = self._lease.__enter__()
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as exc:
+            if "within a transaction" not in str(exc).lower():
+                self._lease.__exit__(type(exc), exc, exc.__traceback__)
+                raise
+        self.store._transaction_local.connection = self._conn
+        self.store._transaction_local.depth = 1
+        return self._conn
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        if self._nested:
+            self.store._transaction_local.depth = max(
+                1, int(getattr(self.store._transaction_local, "depth", 2)) - 1
+            )
+            return False
+        self.store._transaction_local.connection = None
+        self.store._transaction_local.depth = 0
+        if self._lease is None:
+            return False
+        return self._lease.__exit__(exc_type, exc, tb)
 
 
 def _normalise_encryption_mode() -> tuple[str, bool, bool]:
@@ -301,6 +383,7 @@ class SQLiteStore:
         self.warning = ""
         self._cipher, self.encryption, encryption_warning = _configured_cipher(path)
         self._conn_lock = threading.RLock()
+        self._transaction_local = threading.local()
         self._memory_conn: sqlite3.Connection | None = None
         self._snapshot_dirty = False
         self._flush_timer: threading.Timer | None = None
@@ -336,6 +419,7 @@ class SQLiteStore:
                 if self.path.is_file() and self.path.read_bytes()[:len(ENCRYPTED_DB_MAGIC)] == ENCRYPTED_DB_MAGIC:
                     raise RuntimeError("encrypted SQLite persistence requires encryption to be enabled with the configured key")
                 with self._connect() as conn:
+                    _preflight_schema_version(conn)
                     _create_schema(conn)
                     _check_schema_version(conn)
             self.available = True
@@ -370,6 +454,7 @@ class SQLiteStore:
                 raise RuntimeError("encrypted SQLite persistence file has an unknown format")
         self._memory_conn = conn
         with self._connect() as active:
+            _preflight_schema_version(active)
             _create_schema(active)
             # Fail closed on a newer-schema database before touching its rows
             # or rewriting the on-disk snapshot.
@@ -424,14 +509,14 @@ class SQLiteStore:
             if conn is not None:
                 conn.close()
 
-    def _backup_existing_snapshot(self) -> None:
+    def _backup_existing_snapshot(self) -> Path | None:
         """Startup safety copy of the encrypted snapshot, keeping the newest few."""
         if self.path is None or not self.path.is_file():
-            return
+            return None
         try:
             raw = self.path.read_bytes()
             if not raw.startswith(ENCRYPTED_DB_MAGIC):
-                return
+                return None
             backups = self.path.parent / BACKUP_DIR_NAME
             backups.mkdir(parents=True, exist_ok=True)
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
@@ -446,8 +531,10 @@ class SQLiteStore:
                     stale.unlink()
                 except OSError:
                     pass
+            return target
         except Exception as exc:
             print(f"  ⚠  Could not write persistence backup: {exc}", file=sys.stderr, flush=True)
+            return None
 
     def backup_status(self) -> dict[str, Any]:
         if self.path is None:
@@ -506,16 +593,27 @@ class SQLiteStore:
             flush=True,
         )
 
-    def _connect(self):
+    def _base_connect(self, *, durable: bool = False):
         if self.path is None:
             raise RuntimeError("SQLite persistence is disabled.")
         if self._memory_conn is not None:
-            return _EncryptedConnectionLease(self)
+            return _EncryptedConnectionLease(self, durable=durable)
         conn = sqlite3.connect(str(self.path), timeout=5)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA journal_mode = WAL")
+        if durable:
+            conn.execute("PRAGMA synchronous = FULL")
         return _PlaintextConnectionLease(conn)
+
+    def _connect(self, *, durable: bool = False):
+        active = getattr(self._transaction_local, "connection", None)
+        if active is not None:
+            return _NestedConnectionLease(active)
+        return self._base_connect(durable=durable)
+
+    def transaction(self, *, durable: bool = False) -> _StoreTransaction:
+        return _StoreTransaction(self, durable=durable)
 
     def _store_text(self, value: Any) -> Any:
         if self._cipher and isinstance(value, str) and value.startswith(ENCRYPTED_PREFIX):
@@ -1010,7 +1108,7 @@ class SQLiteStore:
         if not self.available:
             return None
         try:
-            with self._connect() as conn:
+            with self.transaction(durable=True) as conn:
                 conn.execute(
                     """
                     INSERT INTO model_governance_events
@@ -1037,7 +1135,18 @@ class SQLiteStore:
                     WHERE id = last_insert_rowid()
                     """
                 ).fetchone()
-                return _model_governance_event_row(row, self) if row else None
+                self.audit_append(
+                    "model_governance.record",
+                    {
+                        "model_id": str(model_id)[:64],
+                        "version": int(version),
+                        "action": str(action or "change_note")[:48],
+                        "approval_status": str(approval_status or "")[:32],
+                    },
+                    actor=actor,
+                    required=True,
+                )
+            return _model_governance_event_row(row, self) if row else None
         except Exception as exc:
             self.warning = f"Could not record model governance event: {exc}"
             return None
@@ -1239,6 +1348,36 @@ class SQLiteStore:
             self.warning = f"Could not sync data quality alerts: {exc}"
             return _data_quality_alert_result(incoming, tracking_available=False, warning=self.warning)
 
+    def data_quality_alerts(self, limit: int = 500) -> dict[str, Any]:
+        """Return persisted alert state without mutating alert history."""
+        if not self.available:
+            return _data_quality_alert_result([], tracking_available=False, warning=self.warning)
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM data_quality_alerts
+                    ORDER BY
+                      CASE status WHEN 'active' THEN 0 ELSE 1 END,
+                      CASE severity WHEN 'blocker' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
+                      last_changed_at DESC,
+                      target ASC
+                    LIMIT ?
+                    """,
+                    (max(1, min(int(limit), 5_000)),),
+                ).fetchall()
+            alerts = []
+            for row in rows:
+                alert = self._data_quality_alert_row(row)
+                alert["notification_state"] = "active" if alert["status"] == "active" else "resolved"
+                alert["should_notify"] = False
+                alerts.append(alert)
+            return _data_quality_alert_result(alerts, tracking_available=True)
+        except Exception as exc:
+            self.warning = f"Could not read data quality alerts: {exc}"
+            return _data_quality_alert_result([], tracking_available=False, warning=self.warning)
+
     def record_signal_event(self, event: dict[str, Any]) -> dict[str, Any]:
         if not self.available:
             return {"recorded": False, "warning": self.warning}
@@ -1247,7 +1386,7 @@ class SQLiteStore:
             source_counts = event.get("source_counts") or {}
             metadata = event.get("metadata") or {}
             with self._connect() as conn:
-                conn.execute(
+                cur = conn.execute(
                     """
                     INSERT INTO signal_journal
                       (dedupe_key, created_at, target_kind, target_id, target_name, benchmark,
@@ -1255,41 +1394,9 @@ class SQLiteStore:
                        score, action_label, data_mode, eligible_for_real_research,
                        source_counts_json, forward_status, forward_start_date,
                        forward_end_date, forward_result_pct, benchmark_result_pct,
-                       alpha_pct, evaluated_at, metadata_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(dedupe_key) DO UPDATE SET
-                      target_name = excluded.target_name,
-                      benchmark = excluded.benchmark,
-                      score = excluded.score,
-                      action_label = excluded.action_label,
-                      data_mode = excluded.data_mode,
-                      eligible_for_real_research = excluded.eligible_for_real_research,
-                      source_counts_json = excluded.source_counts_json,
-                      -- A MEASURED forward result is immutable evidence: a
-                      -- re-record of the same dedupe key must never regress it
-                      -- to pending and erase the measurement (review finding).
-                      forward_status = CASE WHEN signal_journal.forward_status = 'measured'
-                                            THEN signal_journal.forward_status
-                                            ELSE excluded.forward_status END,
-                      forward_start_date = CASE WHEN signal_journal.forward_status = 'measured'
-                                                THEN signal_journal.forward_start_date
-                                                ELSE excluded.forward_start_date END,
-                      forward_end_date = CASE WHEN signal_journal.forward_status = 'measured'
-                                              THEN signal_journal.forward_end_date
-                                              ELSE excluded.forward_end_date END,
-                      forward_result_pct = CASE WHEN signal_journal.forward_status = 'measured'
-                                                THEN signal_journal.forward_result_pct
-                                                ELSE excluded.forward_result_pct END,
-                      benchmark_result_pct = CASE WHEN signal_journal.forward_status = 'measured'
-                                                  THEN signal_journal.benchmark_result_pct
-                                                  ELSE excluded.benchmark_result_pct END,
-                      alpha_pct = CASE WHEN signal_journal.forward_status = 'measured'
-                                       THEN signal_journal.alpha_pct
-                                       ELSE excluded.alpha_pct END,
-                      evaluated_at = CASE WHEN signal_journal.forward_status = 'measured'
-                                          THEN signal_journal.evaluated_at
-                                          ELSE excluded.evaluated_at END,
-                      metadata_json = excluded.metadata_json
+                       alpha_pct, evaluated_at, metadata_json, trial_id, recording_source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(dedupe_key) DO NOTHING
                     """,
                     (
                         redact_secrets(str(event["dedupe_key"]))[:96],
@@ -1315,23 +1422,27 @@ class SQLiteStore:
                         self._store_number(event.get("alpha_pct")),
                         self._store_text(str(event.get("evaluated_at") or "")),
                         self._store_json(metadata),
+                        redact_secrets(str(event.get("trial_id") or ""))[:64],
+                        redact_secrets(str(event.get("recording_source") or "exploratory"))[:24],
                     ),
                 )
                 row = conn.execute(
                     "SELECT * FROM signal_journal WHERE dedupe_key = ?",
                     (redact_secrets(str(event["dedupe_key"]))[:96],),
                 ).fetchone()
-                return {"recorded": True, "entry": self._signal_row(row) if row else None}
+                inserted = bool(cur.rowcount)
+                return {"recorded": inserted, "duplicate": not inserted,
+                        "entry": self._signal_row(row) if row else None}
         except Exception as exc:
             self.warning = f"Could not record signal journal entry: {exc}"
             return {"recorded": False, "warning": self.warning}
 
-    def update_signal_forward_result(self, dedupe_key: str, result: dict[str, Any]) -> None:
+    def update_signal_forward_result(self, dedupe_key: str, result: dict[str, Any]) -> bool:
         if not self.available:
-            return
+            return False
         try:
             with self._connect() as conn:
-                conn.execute(
+                cur = conn.execute(
                     """
                     UPDATE signal_journal
                     SET forward_status = ?,
@@ -1354,8 +1465,10 @@ class SQLiteStore:
                         redact_secrets(str(dedupe_key))[:96],
                     ),
                 )
+                return bool(cur.rowcount)
         except Exception as exc:
             self.warning = f"Could not update signal journal result: {exc}"
+            return False
 
     # ----------------------------------------------------------------- #
     # Decision journal — the OPERATOR's calls (vs the engine's), scored
@@ -1366,15 +1479,15 @@ class SQLiteStore:
         if not self.available:
             return {"recorded": False, "warning": self.warning}
         try:
-            with self._connect() as conn:
+            with self.transaction(durable=True) as conn:
                 conn.execute(
                     """
                     INSERT INTO decision_journal
                       (decision_id, created_at, target_kind, target_id, target_name, mandate,
                        benchmark, engine_action, engine_score, tactical_action, strategic_action,
                        my_action, agreement, rationale, decision_date, decision_price, data_mode,
-                       context_json, outcome_status, outcomes_json, evaluated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       context_json, outcome_status, outcomes_json, evaluated_at, trial_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         redact_secrets(str(entry["decision_id"]))[:64],
@@ -1401,16 +1514,17 @@ class SQLiteStore:
                         redact_secrets(str(entry.get("outcome_status") or "pending"))[:16],
                         self._store_json(entry.get("outcomes") or {}),
                         str(entry.get("evaluated_at") or ""),
+                        redact_secrets(str(entry.get("trial_id") or ""))[:64],
                     ),
                 )
                 row = conn.execute(
                     "SELECT * FROM decision_journal WHERE decision_id = ?",
                     (redact_secrets(str(entry["decision_id"]))[:64],),
                 ).fetchone()
-            self.audit_append("decision.record", {
-                "decision_id": entry["decision_id"], "target_id": entry.get("target_id"),
-                "my_action": entry.get("my_action"), "decision_date": entry.get("decision_date"),
-                "decision_price": entry.get("decision_price")})
+                self.audit_append("decision.record", {
+                    "decision_id": entry["decision_id"], "target_id": entry.get("target_id"),
+                    "my_action": entry.get("my_action"), "decision_date": entry.get("decision_date"),
+                    "decision_price": entry.get("decision_price")}, required=True)
             return {"recorded": True, "entry": self._decision_row(row) if row else None}
         except Exception as exc:
             self.warning = f"Could not record decision: {exc}"
@@ -1431,11 +1545,11 @@ class SQLiteStore:
             return []
 
     def update_decision_outcomes(self, decision_id: str, outcomes: dict[str, Any],
-                                 status: str, evaluated_at: str) -> None:
+                                 status: str, evaluated_at: str) -> bool:
         if not self.available:
-            return
+            return False
         try:
-            with self._connect() as conn:
+            with self.transaction(durable=True) as conn:
                 # Guarded MERGE, not a wholesale replace: concurrent GETs
                 # under multithreaded waitress evaluate the same pending rows
                 # from stale snapshots, and last-writer-wins dropped already-
@@ -1457,7 +1571,7 @@ class SQLiteStore:
                     merged_status = "partial"
                 else:
                     merged_status = str(status or "pending")
-                conn.execute(
+                cur = conn.execute(
                     """
                     UPDATE decision_journal
                     SET outcomes_json = ?, outcome_status = ?, evaluated_at = ?
@@ -1470,11 +1584,13 @@ class SQLiteStore:
                         clean_id,
                     ),
                 )
-            self.audit_append("decision.outcomes", {
-                "decision_id": clean_id, "status": merged_status,
-                "horizons": sorted(merged), "evaluated_at": str(evaluated_at or "")})
+                self.audit_append("decision.outcomes", {
+                    "decision_id": clean_id, "status": merged_status,
+                    "horizons": sorted(merged), "evaluated_at": str(evaluated_at or "")}, required=True)
+                return bool(cur.rowcount)
         except Exception as exc:
             self.warning = f"Could not update decision outcomes: {exc}"
+            return False
 
     def _decision_row(self, row: sqlite3.Row) -> dict[str, Any]:
         return {
@@ -1499,6 +1615,7 @@ class SQLiteStore:
             "outcome_status": row["outcome_status"],
             "outcomes": self._load_json(row["outcomes_json"]),
             "evaluated_at": row["evaluated_at"],
+            "trial_id": row["trial_id"] if "trial_id" in row.keys() else "",
         }
 
     # ----------------------------------------------------------------- #
@@ -1612,7 +1729,7 @@ class SQLiteStore:
             return {"inserted": 0, "duplicates": 0, "warning": self.warning}
         inserted = duplicates = 0
         try:
-            with self._connect() as conn:
+            with self.transaction(durable=True) as conn:
                 for fill in fills:
                     cur = conn.execute(
                         """
@@ -1644,11 +1761,11 @@ class SQLiteStore:
                         inserted += 1
                     else:
                         duplicates += 1
-            if inserted:
-                self.audit_append("ledger.fills", {
-                    "inserted": inserted, "duplicates": duplicates,
-                    "accounts": sorted({str(f.get("account_id") or "") for f in fills}),
-                    "dedupe_keys": sorted(str(f.get("dedupe_key") or "") for f in fills)[:50]})
+                if inserted:
+                    self.audit_append("ledger.fills", {
+                        "inserted": inserted, "duplicates": duplicates,
+                        "accounts": sorted({str(f.get("account_id") or "") for f in fills}),
+                        "dedupe_keys": sorted(str(f.get("dedupe_key") or "") for f in fills)[:50]}, required=True)
             return {"inserted": inserted, "duplicates": duplicates}
         except Exception as exc:
             self.warning = f"Could not record fills: {exc}"
@@ -1693,11 +1810,82 @@ class SQLiteStore:
         }
 
     def record_account_snapshot(self, snapshot: dict[str, Any],
-                                positions: list[dict[str, Any]] | None = None) -> None:
+                                positions: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         if not self.available:
-            return
+            return {"recorded": False, "warning": self.warning}
         try:
-            with self._connect() as conn:
+            account_id = redact_secrets(str(snapshot["account_id"]))[:64]
+            as_of = str(snapshot["as_of"])[:10]
+            clean_positions = sorted([
+                {
+                    "ticker": str(pos.get("ticker") or "").upper()[:16],
+                    "shares": float(pos.get("shares") or 0.0),
+                    "price": float(pos["price"]) if pos.get("price") is not None else None,
+                    "market_value": float(pos["market_value"]) if pos.get("market_value") is not None else None,
+                    "cost_basis": float(pos["cost_basis"]) if pos.get("cost_basis") is not None else None,
+                }
+                for pos in positions or []
+            ], key=lambda row: row["ticker"])
+            evidence_payload = {
+                "account_id": account_id,
+                "as_of": as_of,
+                "cash": float(snapshot["cash"]) if snapshot.get("cash") is not None else None,
+                "total_value": float(snapshot["total_value"]),
+                "source": str(snapshot.get("source") or "")[:64],
+                "positions": clean_positions,
+            }
+            content_hash = __import__("hashlib").sha256(
+                _json_dumps_stable(evidence_payload).encode("utf-8")
+            ).hexdigest()
+            with self.transaction(durable=True) as conn:
+                prior = conn.execute(
+                    "SELECT * FROM account_snapshot_revisions "
+                    "WHERE account_id = ? AND as_of = ? ORDER BY revision DESC LIMIT 1",
+                    (account_id, as_of),
+                ).fetchone()
+                if prior and prior["content_hash"] == content_hash:
+                    return {
+                        "recorded": False,
+                        "duplicate": True,
+                        "snapshot_id": prior["snapshot_id"],
+                        "revision": int(prior["revision"]),
+                    }
+                revision = int(prior["revision"] or 0) + 1 if prior else 1
+                snapshot_id = f"acct-{__import__('uuid').uuid4().hex[:24]}"
+                reason = str(
+                    snapshot.get("correction_reason")
+                    or (snapshot.get("metadata") or {}).get("correction_reason")
+                    or ("Corrected source re-import." if prior else "Initial snapshot.")
+                )[:240]
+                created_at = utc_now()
+                conn.execute(
+                    """
+                    INSERT INTO account_snapshot_revisions(
+                      snapshot_id, account_id, as_of, revision, supersedes_snapshot_id,
+                      correction_reason, cash, total_value, source, content_hash,
+                      created_at, metadata_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        snapshot_id, account_id, as_of, revision,
+                        prior["snapshot_id"] if prior else "", reason,
+                        evidence_payload["cash"], evidence_payload["total_value"],
+                        evidence_payload["source"], content_hash, created_at,
+                        self._store_json(snapshot.get("metadata") or {}),
+                    ),
+                )
+                for pos in clean_positions:
+                    conn.execute(
+                        """
+                        INSERT INTO account_position_revisions(
+                          snapshot_id, ticker, shares, price, market_value, cost_basis
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (snapshot_id, pos["ticker"], pos["shares"], pos["price"],
+                         pos["market_value"], pos["cost_basis"]),
+                    )
+                # Compatibility projection: existing analytics read the current
+                # revision through these tables; immutable history lives above.
                 conn.execute(
                     """
                     INSERT OR REPLACE INTO account_snapshots(
@@ -1705,12 +1893,12 @@ class SQLiteStore:
                     ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        redact_secrets(str(snapshot["account_id"]))[:64],
-                        str(snapshot["as_of"])[:10],
-                        (float(snapshot["cash"]) if snapshot.get("cash") is not None else None),
-                        float(snapshot["total_value"]),
-                        str(snapshot.get("source") or "")[:64],
-                        utc_now(),
+                        account_id,
+                        as_of,
+                        evidence_payload["cash"],
+                        evidence_payload["total_value"],
+                        evidence_payload["source"],
+                        created_at,
                         self._store_json(snapshot.get("metadata") or {}),
                     ),
                 )
@@ -1718,7 +1906,7 @@ class SQLiteStore:
                     "DELETE FROM account_positions WHERE account_id = ? AND as_of = ?",
                     (str(snapshot["account_id"])[:64], str(snapshot["as_of"])[:10]),
                 )
-                for pos in positions or []:
+                for pos in clean_positions:
                     conn.execute(
                         """
                         INSERT OR REPLACE INTO account_positions(
@@ -1726,17 +1914,263 @@ class SQLiteStore:
                         ) VALUES (?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
-                            str(snapshot["account_id"])[:64],
-                            str(snapshot["as_of"])[:10],
-                            str(pos.get("ticker") or "").upper()[:16],
-                            float(pos.get("shares") or 0.0),
-                            (float(pos["price"]) if pos.get("price") is not None else None),
-                            (float(pos["market_value"]) if pos.get("market_value") is not None else None),
-                            (float(pos["cost_basis"]) if pos.get("cost_basis") is not None else None),
+                            account_id,
+                            as_of,
+                            pos["ticker"], pos["shares"], pos["price"],
+                            pos["market_value"], pos["cost_basis"],
                         ),
                     )
+                self.audit_append("account.snapshot", {
+                    "snapshot_id": snapshot_id, "account_id": account_id,
+                    "as_of": as_of, "revision": revision, "content_hash": content_hash,
+                }, required=True)
+            return {"recorded": True, "snapshot_id": snapshot_id, "revision": revision}
         except Exception as exc:
             self.warning = f"Could not record account snapshot: {exc}"
+            return {"recorded": False, "warning": self.warning}
+
+    def account_snapshot_revisions(self, account_id: str, as_of: str | None = None) -> list[dict[str, Any]]:
+        """Append-only correction history, newest revision first per date."""
+        if not self.available:
+            return []
+        try:
+            with self._connect() as conn:
+                if as_of:
+                    rows = conn.execute(
+                        "SELECT * FROM account_snapshot_revisions WHERE account_id = ? AND as_of = ? "
+                        "ORDER BY revision DESC", (account_id, str(as_of)[:10])).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT * FROM account_snapshot_revisions WHERE account_id = ? "
+                        "ORDER BY as_of DESC, revision DESC", (account_id,)).fetchall()
+                return [{
+                    **dict(row),
+                    "metadata": self._load_json(row["metadata_json"]),
+                    "positions": self._account_position_revision_rows(conn, row["snapshot_id"]),
+                } for row in rows]
+        except Exception:
+            return []
+
+    def _account_position_revision_rows(self, conn: sqlite3.Connection, snapshot_id: str) -> list[dict[str, Any]]:
+        rows = conn.execute(
+            "SELECT ticker, shares, price, market_value, cost_basis "
+            "FROM account_position_revisions WHERE snapshot_id = ? ORDER BY market_value DESC",
+            (snapshot_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def record_evidence_snapshot(self, snapshot: dict[str, Any]) -> dict[str, Any]:
+        """Insert an immutable calculation envelope; an ID can never be overwritten."""
+        if not self.available:
+            return {"recorded": False, "warning": self.warning}
+        try:
+            with self.transaction(durable=True) as conn:
+                existing = conn.execute(
+                    "SELECT input_hash, output_hash, envelope_hash FROM evidence_snapshots WHERE evidence_id = ?",
+                    (str(snapshot["evidence_id"]),),
+                ).fetchone()
+                if existing:
+                    same = (
+                        existing["input_hash"] == snapshot["input_hash"]
+                        and existing["output_hash"] == snapshot["output_hash"]
+                        and existing["envelope_hash"] == snapshot["envelope_hash"]
+                    )
+                    return {"recorded": False, "duplicate": same,
+                            "warning": "Evidence ID collision." if not same else ""}
+                conn.execute(
+                    """
+                    INSERT INTO evidence_snapshots(
+                      evidence_id, created_at, artifact_kind, target_kind, target_id,
+                      calculation_version, input_hash, output_hash, envelope_hash, manifest_json,
+                      input_json, output_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(snapshot["evidence_id"])[:64], str(snapshot["created_at"]),
+                        str(snapshot["artifact_kind"])[:32], str(snapshot.get("target_kind") or "")[:24],
+                        str(snapshot.get("target_id") or "")[:96],
+                        str(snapshot["calculation_version"])[:64], str(snapshot["input_hash"])[:64],
+                        str(snapshot["output_hash"])[:64], str(snapshot["envelope_hash"])[:64],
+                        _evidence_json_dumps(snapshot.get("manifest") or {}),
+                        _evidence_json_dumps(snapshot.get("input") or {}),
+                        _evidence_json_dumps(snapshot.get("output") or {}),
+                    ),
+                )
+                self.audit_append("evidence.snapshot", {
+                    "evidence_id": snapshot["evidence_id"], "artifact_kind": snapshot["artifact_kind"],
+                    "input_hash": snapshot["input_hash"], "output_hash": snapshot["output_hash"],
+                }, required=True)
+            return {"recorded": True, "evidence_id": snapshot["evidence_id"]}
+        except Exception as exc:
+            self.warning = f"Could not record evidence snapshot: {exc}"
+            return {"recorded": False, "warning": self.warning}
+
+    def create_prospective_trial(self, trial: dict[str, Any]) -> dict[str, Any]:
+        if not self.available:
+            return {"created": False, "warning": self.warning}
+        try:
+            with self.transaction(durable=True) as conn:
+                open_row = conn.execute(
+                    "SELECT trial_id FROM prospective_trials WHERE target_kind = ? AND target_id = ? "
+                    "AND status = 'open' LIMIT 1",
+                    (trial["target_kind"], trial["target_id"]),
+                ).fetchone()
+                if open_row:
+                    return {
+                        "created": False,
+                        "status_code": 409,
+                        "warning": f"Open trial {open_row['trial_id']} already exists for this target.",
+                    }
+                conn.execute(
+                    """
+                    INSERT INTO prospective_trials(
+                      trial_id, created_at, actor, target_kind, target_id,
+                      model_version, target_snapshot_hash, status, starts_on,
+                      closed_at, supersedes_trial_id, protocol_json, protocol_hash,
+                      registration_snapshot_json, registration_snapshot_hash, close_note
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, '', ?, ?, ?, ?, ?, '')
+                    """,
+                    (
+                        trial["trial_id"], trial["created_at"], trial["actor"],
+                        trial["target_kind"], trial["target_id"], int(trial.get("model_version") or 0),
+                        trial["target_snapshot_hash"], trial["starts_on"],
+                        trial.get("supersedes_trial_id") or "",
+                        _evidence_json_dumps(trial["protocol"]), trial["protocol_hash"],
+                        _evidence_json_dumps(trial["registration_snapshot"]),
+                        trial["registration_snapshot_hash"],
+                    ),
+                )
+                row = conn.execute(
+                    "SELECT * FROM prospective_trials WHERE trial_id = ?", (trial["trial_id"],)
+                ).fetchone()
+                self.audit_append("trial.register", {
+                    "trial_id": trial["trial_id"], "target_kind": trial["target_kind"],
+                    "target_id": trial["target_id"], "protocol_hash": trial["protocol_hash"],
+                }, actor=trial["actor"], required=True)
+            return {"created": True, "trial": _prospective_trial_row(row) if row else None}
+        except Exception as exc:
+            self.warning = f"Could not register prospective trial: {exc}"
+            return {"created": False, "warning": self.warning}
+
+    def prospective_trials(self, limit: int = 200, target_kind: str = "", target_id: str = "") -> list[dict[str, Any]]:
+        if not self.available:
+            return []
+        try:
+            query = "SELECT * FROM prospective_trials"
+            params: list[Any] = []
+            clauses = []
+            if target_kind:
+                clauses.append("target_kind = ?")
+                params.append(target_kind)
+            if target_id:
+                clauses.append("target_id = ?")
+                params.append(target_id)
+            if clauses:
+                query += " WHERE " + " AND ".join(clauses)
+            query += " ORDER BY created_at DESC, trial_id DESC LIMIT ?"
+            params.append(max(1, min(int(limit), 2000)))
+            with self._connect() as conn:
+                rows = conn.execute(query, params).fetchall()
+                return [_prospective_trial_row(row) for row in rows]
+        except Exception:
+            return []
+
+    def prospective_trial(self, trial_id: str) -> dict[str, Any] | None:
+        if not self.available:
+            return None
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT * FROM prospective_trials WHERE trial_id = ?", (str(trial_id)[:64],)
+                ).fetchone()
+                return _prospective_trial_row(row) if row else None
+        except Exception:
+            return None
+
+    def close_prospective_trial(self, trial_id: str, status: str, note: str, actor: str) -> dict[str, Any]:
+        if not self.available:
+            return {"closed": False, "warning": self.warning}
+        try:
+            with self.transaction(durable=True) as conn:
+                row = conn.execute(
+                    "SELECT * FROM prospective_trials WHERE trial_id = ?", (str(trial_id)[:64],)
+                ).fetchone()
+                if not row:
+                    return {"closed": False, "status_code": 404, "warning": "Unknown trial."}
+                if row["status"] != "open":
+                    return {"closed": False, "status_code": 409, "warning": "Trial is already closed."}
+                conn.execute(
+                    "UPDATE prospective_trials SET status = ?, closed_at = ?, close_note = ? WHERE trial_id = ?",
+                    (status, utc_now(), redact_long_text(note, limit=1000), str(trial_id)[:64]),
+                )
+                updated = conn.execute(
+                    "SELECT * FROM prospective_trials WHERE trial_id = ?", (str(trial_id)[:64],)
+                ).fetchone()
+                self.audit_append("trial.close", {
+                    "trial_id": trial_id, "status": status, "note_hash": _sha256_text(note),
+                }, actor=actor, required=True)
+            return {"closed": True, "trial": _prospective_trial_row(updated)}
+        except Exception as exc:
+            return {"closed": False, "warning": f"Could not close trial: {exc}"}
+
+    def get_evidence_snapshot(self, evidence_id: str) -> dict[str, Any] | None:
+        if not self.available:
+            return None
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT * FROM evidence_snapshots WHERE evidence_id = ?", (str(evidence_id)[:64],)
+                ).fetchone()
+                if not row:
+                    return None
+                return {
+                    "evidence_id": row["evidence_id"], "created_at": row["created_at"],
+                    "artifact_kind": row["artifact_kind"], "target_kind": row["target_kind"],
+                    "target_id": row["target_id"], "calculation_version": row["calculation_version"],
+                    "input_hash": row["input_hash"], "output_hash": row["output_hash"],
+                    "envelope_hash": row["envelope_hash"],
+                    "manifest": self._load_json(row["manifest_json"]),
+                    "input": self._load_json(row["input_json"]),
+                    "output": self._load_json(row["output_json"]),
+                }
+        except Exception:
+            return None
+
+    def evidence_snapshots(
+        self,
+        *,
+        artifact_kind: str = "",
+        target_kind: str = "",
+        target_id: str = "",
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        if not self.available:
+            return []
+        clauses: list[str] = []
+        params: list[Any] = []
+        for column, value in (
+            ("artifact_kind", artifact_kind),
+            ("target_kind", target_kind),
+            ("target_id", target_id),
+        ):
+            if value:
+                clauses.append(f"{column} = ?")
+                params.append(str(value))
+        query = "SELECT evidence_id FROM evidence_snapshots"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY created_at DESC, evidence_id DESC LIMIT ?"
+        params.append(max(1, min(int(limit), 2000)))
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(query, params).fetchall()
+            return [
+                snapshot for row in rows
+                for snapshot in [self.get_evidence_snapshot(row["evidence_id"])]
+                if snapshot is not None
+            ]
+        except Exception:
+            return []
 
     def account_snapshots(self, account_id: str) -> list[dict[str, Any]]:
         if not self.available:
@@ -1960,12 +2394,36 @@ class SQLiteStore:
         except Exception:
             return []
 
+    def corporate_actions_as_of(self, symbol: str, as_of: str, limit: int = 400) -> list[dict[str, Any]]:
+        """Return only actions both retrieved and effective by ``as_of``."""
+        if not self.available:
+            return []
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM corporate_actions
+                    WHERE symbol = ? AND ex_date <= ? AND substr(retrieved_at, 1, 10) <= ?
+                    ORDER BY ex_date ASC, action_type ASC
+                    LIMIT ?
+                    """,
+                    (
+                        str(symbol).upper()[:16], str(as_of)[:10], str(as_of)[:10],
+                        max(1, min(int(limit), 5000)),
+                    ),
+                ).fetchall()
+                return [dict(row) for row in rows]
+        except Exception:
+            return []
+
     def audit_append(self, action: str, payload: dict[str, Any] | str,
-                     actor: str = "operator") -> None:
+                     actor: str = "operator", *, required: bool = False) -> bool:
         """Append one tamper-evident link: chain_hash covers the previous link,
         so any retroactive edit breaks every later hash."""
         if not self.available:
-            return
+            if required:
+                raise RuntimeError(self.warning or "Durable audit persistence is unavailable.")
+            return False
         import hashlib
         text = payload if isinstance(payload, str) else _json_dumps_stable(payload)
         payload_hash = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
@@ -1974,8 +2432,11 @@ class SQLiteStore:
             # fork the chain and a benign race reads as tampering forever.
             # The lock serializes in-process writers; BEGIN IMMEDIATE takes the
             # SQLite write lock for cross-process ones.
-            with _AUDIT_APPEND_LOCK:
-                with self._connect() as conn:
+            # Match the privileged-event lock order: acquire the store before
+            # the chain lock so an active durable request transaction cannot
+            # deadlock with a second writer waiting for the encrypted store.
+            with self._connect(durable=required) as conn:
+                with _AUDIT_APPEND_LOCK:
                     try:
                         conn.execute("BEGIN IMMEDIATE")
                     except Exception:
@@ -1984,16 +2445,22 @@ class SQLiteStore:
                         "SELECT chain_hash FROM audit_chain ORDER BY seq DESC LIMIT 1").fetchone()
                     prev_hash = row["chain_hash"] if row else "genesis"
                     ts = utc_now()
+                    safe_actor = redact_secrets(str(actor))[:64]
+                    safe_action = str(action)[:64]
+                    chain_version = 2
                     chain_hash = hashlib.sha256(
-                        f"{prev_hash}|{payload_hash}|{ts}|{action}".encode()).hexdigest()
+                        f"{prev_hash}|{payload_hash}|{ts}|{safe_actor}|{safe_action}".encode()
+                    ).hexdigest()
                     conn.execute(
-                        "INSERT INTO audit_chain(ts, actor, action, payload_hash, prev_hash, chain_hash) "
-                        "VALUES (?, ?, ?, ?, ?, ?)",
-                        (ts, redact_secrets(str(actor))[:64], str(action)[:64],
-                         payload_hash, prev_hash, chain_hash),
+                        "INSERT INTO audit_chain(ts, actor, action, payload_hash, prev_hash, chain_hash, chain_version) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (ts, safe_actor, safe_action, payload_hash, prev_hash, chain_hash, chain_version),
                     )
-        except Exception:
-            pass
+            return True
+        except Exception as exc:
+            if required:
+                raise RuntimeError(f"Could not append required audit event '{action}': {exc}") from exc
+            return False
 
     def audit_verify(self, limit: int = 100000) -> dict[str, Any]:
         """Walk the chain re-deriving every hash; any break is named by seq."""
@@ -2002,19 +2469,24 @@ class SQLiteStore:
         import hashlib
         try:
             with self._connect() as conn:
+                total = int(conn.execute("SELECT COUNT(*) FROM audit_chain").fetchone()[0])
                 rows = conn.execute(
                     "SELECT * FROM audit_chain ORDER BY seq ASC LIMIT ?",
                     (max(1, int(limit)),),
                 ).fetchall()
             prev = "genesis"
             for row in rows:
-                expected = hashlib.sha256(
-                    f"{prev}|{row['payload_hash']}|{row['ts']}|{row['action']}".encode()).hexdigest()
+                if int(row["chain_version"] or 1) >= 2:
+                    source = f"{prev}|{row['payload_hash']}|{row['ts']}|{row['actor']}|{row['action']}"
+                else:
+                    source = f"{prev}|{row['payload_hash']}|{row['ts']}|{row['action']}"
+                expected = hashlib.sha256(source.encode()).hexdigest()
                 if row["prev_hash"] != prev or row["chain_hash"] != expected:
                     return {"status": "broken", "first_bad_seq": int(row["seq"]),
                             "entries_checked": len(rows)}
                 prev = row["chain_hash"]
-            return {"status": "intact", "entries": len(rows),
+            return {"status": "partial" if len(rows) < total else "intact", "entries": len(rows),
+                    "total_entries": total,
                     "head_hash": prev if rows else "genesis"}
         except Exception as exc:
             return {"status": "error", "warning": str(exc)}
@@ -2069,6 +2541,13 @@ class SQLiteStore:
                 fills = conn.execute("DELETE FROM trade_fills WHERE account_id = ?", (account_id,)).rowcount
                 snaps = conn.execute("DELETE FROM account_snapshots WHERE account_id = ?", (account_id,)).rowcount
                 conn.execute("DELETE FROM account_positions WHERE account_id = ?", (account_id,))
+                revision_ids = [row["snapshot_id"] for row in conn.execute(
+                    "SELECT snapshot_id FROM account_snapshot_revisions WHERE account_id = ?",
+                    (account_id,),
+                ).fetchall()]
+                for snapshot_id in revision_ids:
+                    conn.execute("DELETE FROM account_position_revisions WHERE snapshot_id = ?", (snapshot_id,))
+                conn.execute("DELETE FROM account_snapshot_revisions WHERE account_id = ?", (account_id,))
                 conn.execute("DELETE FROM ledger_accounts WHERE account_id = ?", (account_id,))
             return {"deleted": True, "fills_removed": fills, "snapshots_removed": snaps}
         except Exception as exc:
@@ -2133,6 +2612,26 @@ class SQLiteStore:
                 return [dict(row) for row in rows]
         except Exception:
             return []
+
+    def fundamentals_as_of(self, symbol: str, as_of: str) -> dict[str, Any] | None:
+        """Latest first-observed fundamentals known on or before ``as_of``."""
+        if not self.available:
+            return None
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    """
+                    SELECT * FROM fundamentals_snapshots
+                    WHERE symbol = ? AND as_of <= ?
+                    ORDER BY as_of DESC,
+                      CASE slot WHEN 'first' THEN 0 ELSE 1 END
+                    LIMIT 1
+                    """,
+                    (str(symbol).upper()[:16], str(as_of)[:10]),
+                ).fetchone()
+                return dict(row) if row else None
+        except Exception:
+            return None
 
     def save_report_snapshot(self, snapshot: dict[str, Any]) -> dict[str, Any]:
         if not self.available:
@@ -2540,6 +3039,76 @@ def _create_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS account_snapshot_revisions (
+          snapshot_id TEXT PRIMARY KEY,
+          account_id TEXT NOT NULL,
+          as_of TEXT NOT NULL,
+          revision INTEGER NOT NULL,
+          supersedes_snapshot_id TEXT NOT NULL DEFAULT '',
+          correction_reason TEXT NOT NULL DEFAULT '',
+          cash REAL,
+          total_value REAL NOT NULL,
+          source TEXT NOT NULL DEFAULT '',
+          content_hash TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          metadata_json TEXT NOT NULL DEFAULT '{}',
+          UNIQUE(account_id, as_of, revision)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS account_position_revisions (
+          snapshot_id TEXT NOT NULL,
+          ticker TEXT NOT NULL,
+          shares REAL NOT NULL DEFAULT 0,
+          price REAL,
+          market_value REAL,
+          cost_basis REAL,
+          PRIMARY KEY(snapshot_id, ticker),
+          FOREIGN KEY(snapshot_id) REFERENCES account_snapshot_revisions(snapshot_id) ON DELETE CASCADE
+        )
+        """
+    )
+    # Preserve every pre-v11 current snapshot as revision 1. SQLite supplies a
+    # unique immutable ID; content_hash is explicitly marked legacy because
+    # earlier schemas did not retain a canonical hash.
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO account_snapshot_revisions(
+          snapshot_id, account_id, as_of, revision, supersedes_snapshot_id,
+          correction_reason, cash, total_value, source, content_hash,
+          created_at, metadata_json
+        )
+        SELECT 'legacy-' || lower(hex(randomblob(12))), account_id, as_of, 1, '',
+               'Migrated from pre-v11 current snapshot.', cash, total_value,
+               source, 'legacy-unhashed', created_at, metadata_json
+        FROM account_snapshots
+        WHERE NOT EXISTS (
+          SELECT 1 FROM account_snapshot_revisions r
+          WHERE r.account_id = account_snapshots.account_id
+            AND r.as_of = account_snapshots.as_of
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO account_position_revisions(
+          snapshot_id, ticker, shares, price, market_value, cost_basis
+        )
+        SELECT r.snapshot_id, p.ticker, p.shares, p.price, p.market_value, p.cost_basis
+        FROM account_positions p
+        JOIN account_snapshot_revisions r
+          ON r.account_id = p.account_id AND r.as_of = p.as_of AND r.revision = 1
+        WHERE r.content_hash = 'legacy-unhashed'
+          AND NOT EXISTS (
+            SELECT 1 FROM account_position_revisions existing
+            WHERE existing.snapshot_id = r.snapshot_id
+          )
+        """
+    )
     # --- Point-in-time fundamentals: what Helios KNEW on each date --- #
     # v9: (symbol, as_of, slot) with slot in ('first','last') — the old
     # single-row-per-day INSERT OR REPLACE destroyed the morning observation
@@ -2646,6 +3215,174 @@ def _create_schema(conn: sqlite3.Connection) -> None:
         """
     )
     conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS evidence_snapshots (
+          evidence_id TEXT PRIMARY KEY,
+          created_at TEXT NOT NULL,
+          artifact_kind TEXT NOT NULL,
+          target_kind TEXT NOT NULL DEFAULT '',
+          target_id TEXT NOT NULL DEFAULT '',
+          calculation_version TEXT NOT NULL,
+          input_hash TEXT NOT NULL,
+          output_hash TEXT NOT NULL,
+          envelope_hash TEXT NOT NULL DEFAULT '',
+          manifest_json TEXT NOT NULL DEFAULT '{}',
+          input_json TEXT NOT NULL DEFAULT '{}',
+          output_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS prospective_trials (
+          trial_id TEXT PRIMARY KEY,
+          created_at TEXT NOT NULL,
+          actor TEXT NOT NULL,
+          target_kind TEXT NOT NULL,
+          target_id TEXT NOT NULL,
+          model_version INTEGER NOT NULL DEFAULT 0,
+          target_snapshot_hash TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'open',
+          starts_on TEXT NOT NULL,
+          closed_at TEXT NOT NULL DEFAULT '',
+          supersedes_trial_id TEXT NOT NULL DEFAULT '',
+          protocol_json TEXT NOT NULL,
+          protocol_hash TEXT NOT NULL UNIQUE,
+          registration_snapshot_json TEXT NOT NULL,
+          registration_snapshot_hash TEXT NOT NULL,
+          close_note TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS provider_reconciliations (
+          reconciliation_id TEXT PRIMARY KEY,
+          created_at TEXT NOT NULL,
+          actor TEXT NOT NULL,
+          data_domain TEXT NOT NULL,
+          primary_provider TEXT NOT NULL,
+          backup_provider TEXT NOT NULL,
+          symbol_count INTEGER NOT NULL DEFAULT 0,
+          compared_count INTEGER NOT NULL DEFAULT 0,
+          mismatch_count INTEGER NOT NULL DEFAULT 0,
+          max_abs_difference_pct REAL,
+          status TEXT NOT NULL,
+          evidence_json TEXT NOT NULL DEFAULT '{}',
+          note TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS provider_cutovers (
+          cutover_id TEXT PRIMARY KEY,
+          created_at TEXT NOT NULL,
+          actor TEXT NOT NULL,
+          data_domain TEXT NOT NULL,
+          primary_provider TEXT NOT NULL,
+          backup_provider TEXT NOT NULL,
+          reconciliation_id TEXT NOT NULL,
+          status TEXT NOT NULL,
+          note TEXT NOT NULL DEFAULT '',
+          metadata_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS privileged_events (
+          event_id TEXT PRIMARY KEY,
+          created_at TEXT NOT NULL,
+          actor TEXT NOT NULL,
+          actor_roles TEXT NOT NULL DEFAULT '',
+          action TEXT NOT NULL,
+          resource TEXT NOT NULL DEFAULT '',
+          outcome TEXT NOT NULL,
+          source_ip_hash TEXT NOT NULL DEFAULT '',
+          details_json TEXT NOT NULL DEFAULT '{}',
+          previous_hash TEXT NOT NULL,
+          event_hash TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS operational_incidents (
+          incident_id TEXT PRIMARY KEY,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          category TEXT NOT NULL,
+          severity TEXT NOT NULL,
+          status TEXT NOT NULL,
+          owner TEXT NOT NULL,
+          title TEXT NOT NULL,
+          source_key TEXT NOT NULL UNIQUE,
+          detail TEXT NOT NULL DEFAULT '',
+          acknowledged_at TEXT NOT NULL DEFAULT '',
+          resolved_at TEXT NOT NULL DEFAULT '',
+          metadata_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS incident_events (
+          event_id TEXT PRIMARY KEY,
+          incident_id TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          actor TEXT NOT NULL,
+          action TEXT NOT NULL,
+          note TEXT NOT NULL DEFAULT '',
+          metadata_json TEXT NOT NULL DEFAULT '{}',
+          FOREIGN KEY(incident_id) REFERENCES operational_incidents(incident_id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS independent_validation_reviews (
+          review_id TEXT PRIMARY KEY,
+          created_at TEXT NOT NULL,
+          model_id TEXT NOT NULL,
+          model_version INTEGER NOT NULL,
+          sponsor TEXT NOT NULL,
+          validator TEXT NOT NULL,
+          outcome TEXT NOT NULL,
+          reviewed_at TEXT NOT NULL,
+          next_review_due TEXT NOT NULL,
+          controls_json TEXT NOT NULL DEFAULT '{}',
+          findings_json TEXT NOT NULL DEFAULT '{"items":[]}',
+          note TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS model_validation_exceptions (
+          exception_id TEXT PRIMARY KEY,
+          created_at TEXT NOT NULL,
+          model_id TEXT NOT NULL,
+          model_version INTEGER NOT NULL,
+          control_key TEXT NOT NULL,
+          owner TEXT NOT NULL,
+          approver TEXT NOT NULL,
+          reason TEXT NOT NULL,
+          compensating_controls_json TEXT NOT NULL DEFAULT '{"items":[]}',
+          expires_at TEXT NOT NULL,
+          status TEXT NOT NULL,
+          resolved_at TEXT NOT NULL DEFAULT '',
+          resolution_note TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    _ensure_column(conn, "signal_journal", "trial_id", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "signal_journal", "recording_source", "TEXT NOT NULL DEFAULT 'exploratory'")
+    _ensure_column(conn, "decision_journal", "trial_id", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "evidence_snapshots", "envelope_hash", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "audit_chain", "chain_version", "INTEGER NOT NULL DEFAULT 1")
+    _backfill_evidence_envelope_hashes(conn)
+    conn.execute(
         "INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES (?, ?)",
         (SCHEMA_VERSION, utc_now()),
     )
@@ -2659,6 +3396,57 @@ def _create_schema(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_trade_fills_account_date ON trade_fills(account_id, trade_date)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_trade_fills_decision ON trade_fills(decision_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_fundamentals_snapshots_symbol ON fundamentals_snapshots(symbol, as_of)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_account_snapshot_revisions ON account_snapshot_revisions(account_id, as_of, revision)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_target ON evidence_snapshots(target_kind, target_id, created_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_trials_target ON prospective_trials(target_kind, target_id, status, created_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_signal_trial ON signal_journal(trial_id, recording_source, created_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_decision_trial ON decision_journal(trial_id, created_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_provider_reconciliation_domain ON provider_reconciliations(data_domain, created_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_provider_cutover_domain ON provider_cutovers(data_domain, created_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_privileged_events_created ON privileged_events(created_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_incidents_status ON operational_incidents(status, severity, updated_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_incident_events_incident ON incident_events(incident_id, created_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_independent_reviews_model ON independent_validation_reviews(model_id, model_version, reviewed_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_validation_exceptions_model ON model_validation_exceptions(model_id, model_version, status, expires_at)")
+
+
+def _preflight_schema_version(conn: sqlite3.Connection) -> None:
+    """Reject newer databases before creating or altering any application table."""
+    has_table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'"
+    ).fetchone()
+    if not has_table:
+        return
+    versions = [int(row[0]) for row in conn.execute("SELECT version FROM schema_version").fetchall()]
+    if versions and max(versions) > SCHEMA_VERSION:
+        raise RuntimeError(
+            f"database schema version {max(versions)} is newer than this Helios build "
+            f"supports ({SCHEMA_VERSION}) — open it with a matching or newer Helios version"
+        )
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    columns = {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _backfill_evidence_envelope_hashes(conn: sqlite3.Connection) -> None:
+    rows = conn.execute(
+        "SELECT * FROM evidence_snapshots WHERE envelope_hash = ''"
+    ).fetchall()
+    for row in rows:
+        envelope = {
+            "evidence_id": row["evidence_id"], "created_at": row["created_at"],
+            "artifact_kind": row["artifact_kind"], "target_kind": row["target_kind"],
+            "target_id": row["target_id"], "calculation_version": row["calculation_version"],
+            "input_hash": row["input_hash"], "output_hash": row["output_hash"],
+            "manifest": _json_loads(row["manifest_json"]),
+        }
+        conn.execute(
+            "UPDATE evidence_snapshots SET envelope_hash = ? WHERE evidence_id = ?",
+            (_sha256_text(_evidence_json_dumps(envelope)), row["evidence_id"]),
+        )
 
 
 def _check_schema_version(conn: sqlite3.Connection) -> None:
@@ -2800,6 +3588,11 @@ def _json_dumps(value: dict[str, Any]) -> str:
     return json.dumps(clean, sort_keys=True, separators=(",", ":"))
 
 
+def _evidence_json_dumps(value: dict[str, Any]) -> str:
+    """Canonical evidence JSON without the ordinary metadata list cap."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str)
+
+
 def _json_loads(value: str | None) -> dict[str, Any]:
     if not value:
         return {}
@@ -2844,7 +3637,30 @@ def _signal_row(row: sqlite3.Row, store: SQLiteStore | None = None) -> dict[str,
         "benchmark_result_pct": number("benchmark_result_pct"),
         "alpha_pct": number("alpha_pct"),
         "evaluated_at": text("evaluated_at") or None,
+        "trial_id": row["trial_id"] if "trial_id" in row.keys() else "",
+        "recording_source": row["recording_source"] if "recording_source" in row.keys() else "exploratory",
         "metadata": object_json("metadata_json"),
+    }
+
+
+def _prospective_trial_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "trial_id": row["trial_id"],
+        "created_at": row["created_at"],
+        "actor": row["actor"],
+        "target_kind": row["target_kind"],
+        "target_id": row["target_id"],
+        "model_version": int(row["model_version"] or 0),
+        "target_snapshot_hash": row["target_snapshot_hash"],
+        "status": row["status"],
+        "starts_on": row["starts_on"],
+        "closed_at": row["closed_at"] or None,
+        "supersedes_trial_id": row["supersedes_trial_id"] or None,
+        "protocol": _json_loads(row["protocol_json"]),
+        "protocol_hash": row["protocol_hash"],
+        "registration_snapshot": _json_loads(row["registration_snapshot_json"]),
+        "registration_snapshot_hash": row["registration_snapshot_hash"],
+        "close_note": row["close_note"],
     }
 
 
@@ -2930,6 +3746,7 @@ def _report_snapshot_row(row: sqlite3.Row, store: SQLiteStore, *, include_report
         "audit_trail": metadata.get("audit_trail") if isinstance(metadata.get("audit_trail"), list) else [],
         "disclosure_blocks": metadata.get("disclosure_blocks") if isinstance(metadata.get("disclosure_blocks"), list) else [],
         "output_formats": metadata.get("output_formats") if isinstance(metadata.get("output_formats"), list) else [],
+        "evidence": metadata.get("evidence") if isinstance(metadata.get("evidence"), dict) else {},
         "metadata": metadata,
     }
     if include_report:

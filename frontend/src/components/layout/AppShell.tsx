@@ -1,8 +1,10 @@
-import { useEffect, useId, useMemo, useRef, useState, type FocusEvent, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type FocusEvent, type FormEvent, type ReactNode } from "react";
 import type { DataMode, DataStatusResponse, MandateSummary, ModelSummary, TickerSummary } from "../../api/types";
 import { DataModeBadge, SourcePill } from "../badges/DataModeBadge";
 import { TerminalSelect } from "../forms/TerminalSelect";
 import { fmtMoney, fmtPct } from "../../utils/format";
+import { api } from "../../api/client";
+import type { SecurityStatusResponse } from "../../api/types";
 
 export type ViewId = "command" | "instruments" | "models" | "opportunities" | "strategy" | "evidence" | "clinic" | "risk" | "reports" | "journal" | "decisions" | "data-quality" | "analysis";
 
@@ -43,16 +45,13 @@ const views: Array<{ id: ViewId; label: string }> = [
   { id: "analysis", label: "Analysis" },
 ];
 
-// Workspace navigation grouped the way an advisor works: overview first,
-// then data intake, research surfaces, portfolio work, and client output.
-// These groups ARE the five first-class workspaces (review UX finding: they
-// used to be mere dividers inside one flat, overflowing 13-item bar).
+// The five first-class workspaces follow the review-to-decision workflow.
 export const navGroups: Array<{ label: string; ids: ViewId[] }> = [
-  { label: "Overview", ids: ["command"] },
-  { label: "Data", ids: ["instruments", "data-quality"] },
-  { label: "Research", ids: ["opportunities", "analysis", "strategy", "evidence", "journal", "decisions"] },
-  { label: "Portfolio", ids: ["models", "clinic", "risk"] },
-  { label: "Results", ids: ["reports"] },
+  { label: "Setup", ids: ["command", "instruments", "data-quality", "models"] },
+  { label: "Research", ids: ["opportunities", "analysis", "strategy"] },
+  { label: "Evidence & Risk", ids: ["evidence", "clinic", "risk"] },
+  { label: "Decisions", ids: ["journal", "decisions"] },
+  { label: "Reports", ids: ["reports"] },
 ];
 
 export function isViewId(value: string): value is ViewId {
@@ -64,7 +63,6 @@ function viewLabel(id: ViewId): string {
 }
 
 function compactDataModeLabel(mode: DataMode | undefined, label: string) {
-  if (mode === "demo") return "Demo Mode";
   if (mode === "real") return "Live Data";
   if (mode === "mixed") return "Mixed Data";
   if (mode === "invalid_for_research") return "Research Locked";
@@ -77,6 +75,9 @@ export function AppShell(props: ShellProps) {
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchActiveIndex, setSearchActiveIndex] = useState(0);
   const [advisorOpen, setAdvisorOpen] = useState(false);
+  const [securityStatus, setSecurityStatus] = useState<SecurityStatusResponse | null>(null);
+  const [securityError, setSecurityError] = useState("");
+  const [sessionBusy, setSessionBusy] = useState(false);
   const [density, setDensity] = useState<"comfortable" | "compact">(() => {
     try {
       return localStorage.getItem("helios_density") === "compact" ? "compact" : "comfortable";
@@ -162,6 +163,17 @@ export function AppShell(props: ShellProps) {
       : "";
   const dataModeFullLabel = props.dataMode?.label || "Data status pending";
   const dataModeShortLabel = compactDataModeLabel(props.dataMode?.mode, dataModeFullLabel);
+
+  const refreshSecurityStatus = useCallback(async () => {
+    try {
+      setSecurityStatus(await api.securityStatus());
+      setSecurityError("");
+    } catch (error) {
+      setSecurityError(error instanceof Error ? error.message : "Security status unavailable.");
+    }
+  }, []);
+
+  useEffect(() => { void refreshSecurityStatus(); }, [refreshSecurityStatus]);
 
   // "/" focuses the global search from anywhere outside a form control.
   useEffect(() => {
@@ -352,7 +364,12 @@ export function AppShell(props: ShellProps) {
                     <div><dt>Real histories</dt><dd>{props.dataStatus?.real_instrument_count ?? 0}</dd></div>
                     <div><dt>Current view</dt><dd>{activeViewLabel}</dd></div>
                     <div><dt>Selection</dt><dd>{selectedContext || "No active selection"}</dd></div>
+                    <div><dt>Identity</dt><dd>{securityStatus?.principal.user || "Unavailable"}</dd></div>
+                    <div><dt>Roles</dt><dd>{securityStatus?.principal.roles.join(", ") || "Unavailable"}</dd></div>
+                    <div><dt>MFA</dt><dd>{securityStatus?.principal.mfa_verified ? "Verified" : "Not verified"}</dd></div>
+                    <div><dt>Transport</dt><dd>{securityStatus?.transport.trusted_tls_asserted ? "Trusted TLS" : "Local / untrusted"}</dd></div>
                   </dl>
+                  {securityError && <p className="advisor-menu__warning" role="alert">{securityError}</p>}
                   <div className="advisor-menu__actions">
                     <button type="button" role="menuitem" aria-pressed={density === "compact"} onClick={toggleDensity}>
                       {density === "compact" ? "Density: Compact ●" : "Density: Comfortable ●"}
@@ -365,6 +382,38 @@ export function AppShell(props: ShellProps) {
                     <button type="button" role="menuitem" onClick={() => runAdvisorAction("risk")}>Risk Analytics</button>
                     <button type="button" role="menuitem" onClick={() => runAdvisorAction("data-quality")}>Data Quality</button>
                     <button type="button" role="menuitem" onClick={() => runAdvisorAction("reports")}>Reports & Disclosures</button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      disabled={sessionBusy}
+                      onClick={async () => {
+                        setSessionBusy(true);
+                        try {
+                          await api.createSession();
+                          await refreshSecurityStatus();
+                        } catch (error) {
+                          setSecurityError(error instanceof Error ? error.message : "Session creation failed.");
+                        } finally {
+                          setSessionBusy(false);
+                        }
+                      }}
+                    >Start secured session</button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      disabled={sessionBusy}
+                      onClick={async () => {
+                        setSessionBusy(true);
+                        try {
+                          await api.deleteSession();
+                          await refreshSecurityStatus();
+                        } catch (error) {
+                          setSecurityError(error instanceof Error ? error.message : "Session revocation failed.");
+                        } finally {
+                          setSessionBusy(false);
+                        }
+                      }}
+                    >End secured session</button>
                   </div>
                   <p>Authentication and data permissions are controlled by the Flask backend. Real research unlocks only after provenance checks pass.</p>
                 </div>
@@ -404,7 +453,7 @@ export function AppShell(props: ShellProps) {
               <span>{viewLabel(id)}</span>
             </button>
           ))}
-          {activeGroup.label === "Data" && (
+          {activeGroup.label === "Setup" && (
             <button type="button" className="view-tabs__action" onClick={revealDataIntake}>
               + Add data
             </button>
@@ -419,6 +468,10 @@ export function AppShell(props: ShellProps) {
       </div>
       </header>
       <div className={`workspace ${props.activeView === "command" ? "workspace-command" : ""} ${sidebarCollapsed ? "workspace-docked" : ""}`}>
+        <main className="content" id="main-content">
+          {props.notice && <div className="notice" role="status" aria-live="polite">{props.notice}</div>}
+          {props.children}
+        </main>
         {sidebarCollapsed ? (
           <button
             className="sidebar-rail"
@@ -481,10 +534,6 @@ export function AppShell(props: ShellProps) {
           </section>
         </aside>
         )}
-        <main className="content">
-          {props.notice && <div className="notice" role="status" aria-live="polite">{props.notice}</div>}
-          {props.children}
-        </main>
       </div>
     </div>
   );
@@ -562,7 +611,7 @@ function ImportPanel(props: ShellProps) {
     setPendingForm("model");
     try {
       await props.onUploadModel(file, name, mandate, context);
-      setFormNotice("Model imported. Portfolio Clinic will refresh when processing completes.");
+      setFormNotice("Model imported. Review holding coverage and validation before analysis.");
       form.reset();
     } catch (error) {
       setFormNotice(error instanceof Error ? error.message : "Model upload failed.");
@@ -616,7 +665,7 @@ function ImportPanel(props: ShellProps) {
         }
       : {
           title: "Real Data Onboarding",
-          body: "Connect live or uploaded price history to unlock real research. Bundled sample histories are excluded from real research evidence.",
+          body: "Connect live or uploaded price history to unlock real research. No runtime research is generated without eligible evidence.",
         };
   return (
     <section className="side-section onboarding">

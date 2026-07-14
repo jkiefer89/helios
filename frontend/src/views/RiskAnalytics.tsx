@@ -136,15 +136,17 @@ export function RiskAnalytics({
 
           <section className="dashboard-grid">
             <Panel title="Scenario Shocks" meta="deterministic/not forecasts">
-              <div className="terminal-table risk-table" tabIndex={0} aria-label="Scenario shock table">
-                <div className="terminal-table__head"><span>Scenario</span><span>Impact</span><span>Basis</span></div>
-                {payload.scenario_shocks.map((scenario) => (
-                  <div className="table-row" key={scenario.scenario}>
-                    <strong>{scenario.scenario}</strong>
-                    <span className={scenario.portfolio_impact_pct < 0 ? "tone-negative" : "tone-positive"}>{fmtPct(scenario.portfolio_impact_pct)}</span>
-                    <span>{scenario.basis}</span>
-                  </div>
-                ))}
+              <div className="terminal-table terminal-data-table-shell" tabIndex={0} aria-label="Scrollable scenario shocks">
+                <table className="terminal-data-table scenario-shock-data-table">
+                  <thead><tr><th scope="col">Scenario</th><th scope="col">Impact</th><th scope="col">Basis</th></tr></thead>
+                  <tbody>{payload.scenario_shocks.map((scenario) => (
+                  <tr key={scenario.scenario}>
+                    <th scope="row">{scenario.scenario}</th>
+                    <td className={scenario.portfolio_impact_pct < 0 ? "tone-negative" : "tone-positive"}>{fmtPct(scenario.portfolio_impact_pct)}</td>
+                    <td>{scenario.basis}</td>
+                  </tr>
+                ))}</tbody>
+                </table>
               </div>
             </Panel>
             <Panel title="Correlation Clusters" meta="pairwise returns">
@@ -167,17 +169,19 @@ export function RiskAnalytics({
           </section>
 
           <Panel title="Liquidity Flags" meta={`${payload.liquidity_flags.summary.flagged_count} flagged`}>
-            <div className="terminal-table liquidity-table" tabIndex={0} aria-label="Liquidity flags table">
-              <div className="terminal-table__head"><span>Ticker</span><span>Weight</span><span>Score</span><span>Flag</span><span>ADV proxy</span></div>
-              {payload.liquidity_flags.items.map((item) => (
-                <div className="table-row" key={item.ticker}>
-                  <strong>{item.ticker}</strong>
-                  <span>{fmtPct(item.weight_pct)}</span>
-                  <span>{fmtNumber(item.liquidity_score, 0)}</span>
-                  <span className={item.flag === "normal" ? "tone-positive" : "tone-warning"}>{titleCase(item.flag)}</span>
-                  <span>{item.estimated_adv_usd ? fmtMoney(item.estimated_adv_usd) : "Verify with provider"}</span>
-                </div>
-              ))}
+            <div className="terminal-table terminal-data-table-shell" tabIndex={0} aria-label="Scrollable liquidity flags">
+              <table className="terminal-data-table liquidity-data-table">
+                <thead><tr><th scope="col">Ticker</th><th scope="col">Weight</th><th scope="col">Score</th><th scope="col">Flag</th><th scope="col">ADV proxy</th></tr></thead>
+                <tbody>{payload.liquidity_flags.items.map((item) => (
+                <tr key={item.ticker}>
+                  <th scope="row">{item.ticker}</th>
+                  <td>{fmtPct(item.weight_pct)}</td>
+                  <td>{fmtNumber(item.liquidity_score, 0)}</td>
+                  <td className={item.flag === "normal" ? "tone-positive" : "tone-warning"}>{titleCase(item.flag)}</td>
+                  <td>{item.estimated_adv_usd ? fmtMoney(item.estimated_adv_usd) : "Verify with provider"}</td>
+                </tr>
+              ))}</tbody>
+              </table>
             </div>
             <p className="muted">{payload.liquidity_flags.summary.basis}</p>
           </Panel>
@@ -213,26 +217,28 @@ function CapacityPanel({ capacity }: { capacity?: RiskAnalyticsResponse["capacit
         <div className="stat-tile"><span>Weighted exit</span><strong>{fmtNumber(capacity.weighted_days_to_liquidate_10pct, 1)}d</strong><small>weight-averaged</small></div>
         <div className="stat-tile"><span>Unverified ADV</span><strong>{fmtNumber((capacity.proxy_based_count || 0) + unsized.length, 0)}</strong><small>{capacity.proxy_based_count || 0} static proxy · {unsized.length} unsized</small></div>
       </div>
-      <div className="terminal-table liquidity-table" tabIndex={0} aria-label="Implementation capacity table">
-        <div className="terminal-table__head"><span>Ticker</span><span>Position $</span><span>1-day part.</span><span>Days @10%</span><span>Est. impact</span></div>
-        {rows.map((row) => (
-          <div className="table-row" key={row.ticker}>
-            <strong>{row.ticker}<small>{row.adv_source === "static_public_proxy" ? "proxy ADV" : row.adv_source === "observed_60d_dollar_volume" ? "observed ADV" : row.adv_source}</small></strong>
-            <span>{fmtMoney(row.position_usd || 0)}</span>
-            <span>{fmtPct(row.one_day_participation_pct)}</span>
-            <span className={Number(row.days_to_liquidate_10pct) > 20 ? "tone-negative" : Number(row.days_to_liquidate_10pct) > 5 ? "tone-warning" : ""}>{fmtNumber(row.days_to_liquidate_10pct, 1)}d</span>
-            <span>{row.impact_estimate_bps != null ? `${fmtNumber(row.impact_estimate_bps, 0)} bps` : "—"}</span>
-          </div>
+      <div className="terminal-table terminal-data-table-shell" tabIndex={0} aria-label="Scrollable implementation capacity">
+        <table className="terminal-data-table capacity-data-table">
+          <thead><tr><th scope="col">Ticker</th><th scope="col">Position $</th><th scope="col">1-day part.</th><th scope="col">Days @10%</th><th scope="col">Est. impact</th></tr></thead>
+          <tbody>{rows.map((row) => (
+          <tr key={row.ticker}>
+            <th scope="row">{row.ticker}<small>{row.adv_source === "static_public_proxy" ? "proxy ADV" : row.adv_source === "observed_60d_dollar_volume" ? "observed ADV" : row.adv_source}</small></th>
+            <td>{fmtMoney(row.position_usd || 0)}</td>
+            <td>{fmtPct(row.one_day_participation_pct)}</td>
+            <td className={Number(row.days_to_liquidate_10pct) > 20 ? "tone-negative" : Number(row.days_to_liquidate_10pct) > 5 ? "tone-warning" : ""}>{fmtNumber(row.days_to_liquidate_10pct, 1)}d</td>
+            <td>{row.impact_estimate_bps != null ? `${fmtNumber(row.impact_estimate_bps, 0)} bps` : "—"}</td>
+          </tr>
         ))}
         {unsized.map((row) => (
-          <div className="table-row" key={row.ticker}>
-            <strong>{row.ticker}</strong>
-            <span>{fmtMoney(row.position_usd || 0)}</span>
-            <span>—</span>
-            <span>—</span>
-            <span className="tone-warning">ADV unavailable</span>
-          </div>
-        ))}
+          <tr key={row.ticker}>
+            <th scope="row">{row.ticker}</th>
+            <td>{fmtMoney(row.position_usd || 0)}</td>
+            <td>—</td>
+            <td>—</td>
+            <td className="tone-warning">ADV unavailable</td>
+          </tr>
+        ))}</tbody>
+        </table>
       </div>
       <p className="muted">{capacity.basis}</p>
     </Panel>
@@ -278,28 +284,32 @@ function ClientGradeRiskPack({ pack }: { pack?: ClientRiskPack }) {
       <section className="dashboard-grid three risk-pack-panels">
         <div>
           <h2>Stress Scenarios</h2>
-          <div className="terminal-table risk-pack-table" tabIndex={0} aria-label="Client risk pack stress scenarios">
-            <div className="terminal-table__head"><span>Scenario</span><span>Impact</span><span>Severity</span></div>
-            {pack.stress_scenarios.slice(0, 5).map((row) => (
-              <div className="table-row" key={row.scenario}>
-                <strong>{row.scenario}<small>{row.what_it_tests}</small></strong>
-                <span className={row.portfolio_impact_pct < 0 ? "tone-negative" : "tone-positive"}>{fmtPct(row.portfolio_impact_pct)}</span>
-                <span>{titleCase(row.severity)}</span>
-              </div>
-            ))}
+          <div className="terminal-table terminal-data-table-shell" tabIndex={0} aria-label="Scrollable client risk pack stress scenarios">
+            <table className="terminal-data-table risk-pack-data-table">
+              <thead><tr><th scope="col">Scenario</th><th scope="col">Impact</th><th scope="col">Severity</th></tr></thead>
+              <tbody>{pack.stress_scenarios.slice(0, 5).map((row) => (
+              <tr key={row.scenario}>
+                <th scope="row">{row.scenario}<small>{row.what_it_tests}</small></th>
+                <td className={row.portfolio_impact_pct < 0 ? "tone-negative" : "tone-positive"}>{fmtPct(row.portfolio_impact_pct)}</td>
+                <td>{titleCase(row.severity)}</td>
+              </tr>
+            ))}</tbody>
+            </table>
           </div>
         </div>
         <div>
           <h2>Historical Stress Replay</h2>
-          <div className="terminal-table risk-pack-table" tabIndex={0} aria-label="Historical stress replay">
-            <div className="terminal-table__head"><span>Observed Window</span><span>Impact</span><span>Evidence</span></div>
-            {pack.historical_stress_replay.slice(0, 5).map((row) => (
-              <div className="table-row" key={`${row.scenario}-${row.window_days}`}>
-                <strong>{row.scenario}<small>{row.start_date} to {row.end_date}</small></strong>
-                <span className={row.portfolio_impact_pct < 0 ? "tone-negative" : "tone-positive"}>{fmtPct(row.portfolio_impact_pct)}</span>
-                <span>{titleCase(row.basis)}</span>
-              </div>
-            ))}
+          <div className="terminal-table terminal-data-table-shell" tabIndex={0} aria-label="Scrollable historical stress replay">
+            <table className="terminal-data-table risk-pack-data-table">
+              <thead><tr><th scope="col">Observed Window</th><th scope="col">Impact</th><th scope="col">Evidence</th></tr></thead>
+              <tbody>{pack.historical_stress_replay.slice(0, 5).map((row) => (
+              <tr key={`${row.scenario}-${row.window_days}`}>
+                <th scope="row">{row.scenario}<small>{row.start_date} to {row.end_date}</small></th>
+                <td className={row.portfolio_impact_pct < 0 ? "tone-negative" : "tone-positive"}>{fmtPct(row.portfolio_impact_pct)}</td>
+                <td>{titleCase(row.basis)}</td>
+              </tr>
+            ))}</tbody>
+            </table>
           </div>
         </div>
         <div>

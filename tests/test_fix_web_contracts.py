@@ -128,16 +128,14 @@ _VERDICT_KEYS = {
 }
 
 
-def test_analyze_ships_demo_provenance_verdict_for_sample_data(client):
+def test_analyze_refuses_ineligible_fixture_history_without_exposing_analytics(client):
     resp = client.get("/api/analyze?ticker=AAPL&horizon=21")
 
-    assert resp.status_code == 200
-    verdict = resp.get_json()["data_provenance"]
-    assert set(verdict) >= _VERDICT_KEYS | {"source_counts"}
-    assert verdict["data_mode"] == "demo"
-    assert verdict["eligible_for_real_research"] is False
-    assert verdict["source_counts"] == {"sample": 1}
-    assert verdict["required_action"]
+    assert resp.status_code == 409
+    body = resp.get_json()
+    assert "research blocked" in body["error"].lower()
+    assert "metrics" not in body
+    assert "forecast" not in body
 
 
 def test_analyze_ships_real_provenance_verdict_for_uploads(client):
@@ -152,21 +150,15 @@ def test_analyze_ships_real_provenance_verdict_for_uploads(client):
     assert verdict["source_counts"] == {"upload": 1}
 
 
-def test_model_analyze_ships_blocked_verdict_for_pure_sample_model(client, monkeypatch):
+def test_model_analyze_refuses_model_without_eligible_history(client, monkeypatch):
     monkeypatch.setattr(data, "HAS_YF", False)
     model_id = _upload_model(client, b"Ticker,Weight\nAAPL,60\nMSFT,40\n", "Sample Verdict Model")
 
     resp = client.get(f"/api/model/analyze?id={model_id}&horizon=21")
 
-    assert resp.status_code == 200
+    assert resp.status_code == 400
     body = resp.get_json()
-    # Raw provenance block is untouched for backward compatibility.
-    assert "source_weight_pct" in body["provenance"]
-    verdict = body["data_provenance"]
-    assert set(verdict) >= _VERDICT_KEYS | {"source_weight_pct", "missing_tickers"}
-    assert verdict["data_mode"] == "invalid_for_research"
-    assert verdict["data_mode"] != "mixed"
-    assert verdict["eligible_for_real_research"] is False
+    assert "no price history" in body["error"].lower()
 
 
 def test_model_analyze_ships_real_verdict_for_uploaded_model(client, monkeypatch):
@@ -374,8 +366,8 @@ def test_headline_stats_exclude_demo_entries_but_report_them():
     summary = signal_journal.summarize_entries(entries)
     assert summary["total_count"] == 2
     assert summary["measured_count"] == 1
-    assert summary["demo_count"] == 1
-    assert summary["demo_measured_count"] == 1
+    assert summary["ineligible_count"] == 1
+    assert summary["ineligible_measured_count"] == 1
     assert summary["avg_alpha_pct"] == 4.0
     assert summary["avg_forward_result_pct"] == 5.0
     assert summary["hit_rate_pct"] == 100.0
@@ -383,11 +375,11 @@ def test_headline_stats_exclude_demo_entries_but_report_them():
     spy = next(row for row in signal_journal.benchmark_comparison(entries) if row["benchmark"] == "SPY")
     assert spy["measured_count"] == 1
     assert spy["avg_alpha_pct"] == 4.0
-    assert spy["demo_measured_count"] == 1
+    assert spy["ineligible_measured_count"] == 1
 
     model_row = next(row for row in signal_journal.model_evidence(entries) if row["target_id"] == "M1")
     assert model_row["measured_count"] == 1
-    assert model_row["demo_count"] == 1
+    assert model_row["ineligible_count"] == 1
     assert model_row["avg_alpha_pct"] == 4.0
 
     drift = signal_journal.drift_series(entries)
@@ -402,7 +394,7 @@ def test_benchmark_comparison_reports_demo_only_benchmarks_with_zero_stats():
 
     qqq = next(row for row in rows if row["benchmark"] == "QQQ")
     assert qqq["measured_count"] == 0
-    assert qqq["demo_measured_count"] == 1
+    assert qqq["ineligible_measured_count"] == 1
     assert qqq["avg_alpha_pct"] is None
     assert qqq["hit_rate_pct"] is None
 

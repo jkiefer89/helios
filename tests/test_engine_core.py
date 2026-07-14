@@ -1,4 +1,3 @@
-import hashlib
 import math
 
 import pandas as pd
@@ -44,11 +43,8 @@ def test_parse_csv_rejects_too_few_rows():
         data.parse_csv(price_csv(10), "short")
 
 
-def test_ticker_seed_is_sha256_based_and_stable_by_construction():
-    expected = int.from_bytes(hashlib.sha256(b"helios:ZZZ").digest()[:8], "big") % (2**31)
-
-    assert data._ticker_seed("ZZZ") == expected
-    assert data._ticker_seed("ZZZ") == data._ticker_seed("ZZZ")
+def test_production_data_layer_has_no_synthetic_ticker_seed():
+    assert not hasattr(data, "_ticker_seed")
 
 
 def test_indicators_metrics_are_finite_and_drawdown_is_negative_for_losses():
@@ -130,6 +126,8 @@ def test_short_forecast_returns_expected_shape():
     assert {"p05", "p25", "p50", "p75", "p95"} <= set(fc["bands"])
     assert "quality" in fc
     assert "expected_return_pct" in fc
+    assert fc["simulation_basis"] == "log_return_paths"
+    assert fc["quality"]["evaluation_method"] == "rolling_origin_expanding"
 
 
 def test_long_forecast_returns_mandate_fields_and_disclaimer():

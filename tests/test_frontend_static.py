@@ -176,6 +176,26 @@ def test_analysis_view_prefers_engine_data_provenance_verdict():
     assert "illustrative fit indication" in analysis_source
 
 
+def test_analysis_exposes_deliberate_signal_recording_and_hides_blocked_calculations():
+    analysis_source = (ROOT / "frontend" / "src" / "views" / "Analysis.tsx").read_text()
+    client_source = (ROOT / "frontend" / "src" / "api" / "client.ts").read_text()
+
+    assert "Record Helios signal" in analysis_source
+    assert "api.recordInstrumentSignal" in analysis_source
+    assert "api.recordModelSignal" in analysis_source
+    assert "No calculations exposed" in analysis_source
+    assert "recordInstrumentSignal:" in client_source
+    assert "recordModelSignal:" in client_source
+
+
+def test_playwright_teardown_only_removes_its_owned_temp_directory():
+    teardown = (ROOT / "frontend" / "e2e" / "global-teardown.ts").read_text()
+
+    assert "HELIOS_E2E_TEMP_DIR" in teardown
+    assert "HELIOS_DB_PATH" not in teardown
+    assert "HELIOS_DB_KEY_FILE" not in teardown
+
+
 def test_opportunity_radar_renders_blocked_models_panel():
     opportunity_source = (ROOT / "frontend" / "src" / "views" / "OpportunityRadar.tsx").read_text()
     type_source = (ROOT / "frontend" / "src" / "api" / "types.ts").read_text()
@@ -185,8 +205,8 @@ def test_opportunity_radar_renders_blocked_models_panel():
     assert "payload?.blocked_items" in opportunity_source
     assert "missing_tickers" in opportunity_source
     assert "required_action" in opportunity_source
-    # Reuses the existing locked-state styling; no new design surface.
-    assert 'className="locked-table-row"' in opportunity_source
+    assert 'className="terminal-data-table gate-checklist-data-table"' in opportunity_source
+    assert '<th scope="col">Model</th>' in opportunity_source
     assert "BlockedOpportunityItem" in type_source
     assert "blocked_items?: BlockedOpportunityItem[]" in type_source
 
@@ -592,7 +612,7 @@ def test_csp_script_src_is_self_with_no_cdn_exception(tmp_path, monkeypatch):
 
 
 def test_deep_review_completion_ui_prescriptions():
-    """Review completion batch: Results workspace, no silent auto-selection,
+    """Review completion batch: Reports workspace, no silent auto-selection,
     palette aliases, net-cost companions, rebalance proposals, jobs panel."""
     shell = (ROOT / "frontend" / "src" / "components" / "layout" / "AppShell.tsx").read_text()
     app = (ROOT / "frontend" / "src" / "App.tsx").read_text()
@@ -602,8 +622,9 @@ def test_deep_review_completion_ui_prescriptions():
     decisions = (ROOT / "frontend" / "src" / "views" / "Decisions.tsx").read_text()
     quality = (ROOT / "frontend" / "src" / "views" / "DataQuality.tsx").read_text()
 
-    # Output workspace renamed to Results.
-    assert '{ label: "Results", ids: ["reports"] }' in shell
+    # The client-facing evidence workspace has one stable, literal name.
+    assert '{ label: "Reports", ids: ["reports"] }' in shell
+    assert 'label: "Results"' not in shell
     assert '"Output"' not in shell
 
     # No silent first-ticker/model selection anywhere in the app shell flow —

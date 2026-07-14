@@ -361,7 +361,7 @@ def client():
 
 
 def test_endpoint_lookthrough_fund(client):
-    body = client.get("/api/lookthrough?ticker=VTEST").get_json()
+    body = client.post("/api/lookthrough/refresh", json={"ticker": "VTEST"}).get_json()
     assert body["resolved"] and body["kind"] == "fund"
     assert body["forward"]["forward_mode"] == "ready"
     assert body["summary"]["n_positions"] == 3
@@ -369,7 +369,7 @@ def test_endpoint_lookthrough_fund(client):
 
 
 def test_endpoint_lookthrough_partial_fund_is_not_ready(client):
-    body = client.get("/api/lookthrough?ticker=VPART").get_json()
+    body = client.post("/api/lookthrough/refresh", json={"ticker": "VPART"}).get_json()
     assert body["resolved"] and body["summary"]["covered_weight_pct"] == 60.0
     assert body["forward"]["forward_mode"] == "partial"
 
@@ -380,7 +380,7 @@ def test_endpoint_lookthrough_requires_symbol(client):
 
 def test_endpoint_model_lookthrough(client):
     portfolio.register(_model(("VTEST", 0.6), ("AAPL", 0.4)))
-    body = client.get("/api/model/lookthrough?id=MTEST").get_json()
+    body = client.post("/api/model/lookthrough/refresh", json={"id": "MTEST"}).get_json()
     assert body["coverage"]["composition_coverage_pct"] == 100.0
     assert body["forward"]["forward_mode"] == "ready"
     assert body["exposure"]["n_underlying"] >= 3

@@ -11,7 +11,7 @@ def _use_db(monkeypatch, tmp_path):
     return store
 
 
-def test_analysis_endpoint_records_signal_journal_entry(monkeypatch, tmp_path):
+def test_explicit_analysis_action_records_signal_journal_entry(monkeypatch, tmp_path):
     _use_db(monkeypatch, tmp_path)
     client = helios.app.test_client()
     data.parse_csv(price_csv(days=120), "SIGX", "Signal X", source_filename="sigx.csv")
@@ -19,6 +19,9 @@ def test_analysis_endpoint_records_signal_journal_entry(monkeypatch, tmp_path):
     resp = client.get("/api/analyze?ticker=SIGX&horizon=21")
 
     assert resp.status_code == 200
+    assert client.get("/api/signal-journal").get_json()["entries"] == []
+    recorded = client.post("/api/signals/record", json={"ticker": "SIGX", "horizon": 21})
+    assert recorded.status_code == 200
     journal = client.get("/api/signal-journal").get_json()
     assert journal["entries"]
     entry = journal["entries"][0]
@@ -88,6 +91,7 @@ def test_live_refresh_resolves_pending_forward_results(monkeypatch, tmp_path):
     # Same start/daily, 10 synthetic future bars: the refresh now covers the
     # 5-bar forward window that was pending at record time.
     refreshed = price_series(days=90, start=100.0, daily=0.001, future_days=10)
+    monkeypatch.setattr(data, "_future_cutoff", lambda: refreshed.index.max())
 
     def fake_fetch(symbol):
         assert symbol == "JOURNALX"
@@ -239,3 +243,28 @@ def test_refresh_cannot_starve_old_pending_entries(monkeypatch, tmp_path):
     signal_journal.refresh_forward_results(limit=2)
     statuses = {e["target_id"]: e["forward_status"] for e in store.signal_journal(limit=20)}
     assert statuses["OLDPEND"] == "measured"
+
+
+def test_duplicate_signal_key_cannot_mutate_recorded_fact(monkeypatch, tmp_path):
+    _use_db(monkeypatch, tmp_path)
+    close = price_series(days=90, start=100.0, daily=0.001)
+    first = signal_journal.record_signal(
+        target_kind="instrument", target_id="IMMUTABLE", target_name="Original name",
+        close=close, input_close=close, signal={"action": "HOLD", "score": 0.25},
+        horizon_days=21, benchmark="SPY", source_counts={"upload": 1},
+        eligible_for_real_research=True, data_mode="real",
+        metadata={"marker": "original"},
+    )
+    duplicate = signal_journal.record_signal(
+        target_kind="instrument", target_id="IMMUTABLE", target_name="Mutated name",
+        close=close, input_close=close, signal={"action": "HOLD", "score": 0.25},
+        horizon_days=21, benchmark="OTHER", source_counts={"live": 99},
+        eligible_for_real_research=False, data_mode="invalid_for_research",
+        metadata={"marker": "mutated"},
+    )
+
+    assert duplicate == first
+    assert duplicate["target_name"] == "Original name"
+    assert duplicate["benchmark"] == "SPY"
+    assert duplicate["source_counts"] == {"upload": 1}
+    assert duplicate["metadata"]["marker"] == "original"

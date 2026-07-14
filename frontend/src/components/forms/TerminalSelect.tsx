@@ -25,6 +25,7 @@ export function TerminalSelect({
   placeholder = "Select",
 }: TerminalSelectProps) {
   const [open, setOpen] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(0);
   const id = useId();
   const rootRef = useRef<HTMLDivElement | null>(null);
   const selectedIndex = Math.max(0, options.findIndex((option) => option.value === value));
@@ -53,45 +54,72 @@ export function TerminalSelect({
     setOpen(false);
   };
 
-  const moveSelection = (direction: -1 | 1) => {
+  const moveActive = (direction: -1 | 1) => {
     if (!hasOptions) return;
-    const next = (selectedIndex + direction + options.length) % options.length;
-    onChange(options[next].value);
+    setActiveIndex((current) => (current + direction + options.length) % options.length);
   };
 
   return (
-    <div className={`terminal-select ${open ? "open" : ""} ${isDisabled ? "disabled" : ""}`} ref={rootRef}>
+    <div
+      className={`terminal-select ${open ? "open" : ""} ${isDisabled ? "disabled" : ""}`}
+      ref={rootRef}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false);
+      }}
+    >
       {name && <input type="hidden" name={name} value={value} />}
       <button
         type="button"
+        role="combobox"
         className="terminal-select__button"
         aria-label={ariaLabel}
         aria-haspopup="listbox"
+        aria-autocomplete="none"
         aria-expanded={open}
         aria-controls={`${id}-listbox`}
-        aria-activedescendant={hasOptions ? optionIds[selectedIndex] : undefined}
+        aria-activedescendant={open && hasOptions ? optionIds[activeIndex] : undefined}
         disabled={isDisabled}
-        onClick={() => setOpen((next) => !next)}
+        onClick={() => {
+          setActiveIndex(selectedIndex);
+          setOpen((next) => !next);
+        }}
         onKeyDown={(event) => {
+          if (event.key === "Tab") {
+            setOpen(false);
+            return;
+          }
           if (event.key === "Escape") {
             setOpen(false);
             return;
           }
           if (event.key === "ArrowDown") {
             event.preventDefault();
-            if (!open) setOpen(true);
-            else moveSelection(1);
+            if (!open) {
+              setActiveIndex(selectedIndex);
+              setOpen(true);
+            }
+            else moveActive(1);
             return;
           }
           if (event.key === "ArrowUp") {
             event.preventDefault();
+            if (!open) {
+              setActiveIndex(selectedIndex);
+              setOpen(true);
+            }
+            else moveActive(-1);
+            return;
+          }
+          if (event.key === "Home" || event.key === "End") {
+            event.preventDefault();
             if (!open) setOpen(true);
-            else moveSelection(-1);
+            setActiveIndex(event.key === "Home" ? 0 : options.length - 1);
             return;
           }
           if (event.key === "Enter" || event.key === " ") {
             event.preventDefault();
-            setOpen((next) => !next);
+            if (open && options[activeIndex]) choose(options[activeIndex].value);
+            else setOpen(true);
           }
         }}
       >
@@ -101,17 +129,24 @@ export function TerminalSelect({
       {open && (
         <div className="terminal-select__menu" id={`${id}-listbox`} role="listbox" aria-label={ariaLabel}>
           {options.map((option, index) => (
-            <button
-              type="button"
+            <div
               key={option.value}
               id={optionIds[index]}
               role="option"
+              tabIndex={-1}
               aria-selected={option.value === value}
-              className={option.value === value ? "selected" : ""}
-              onClick={() => choose(option.value)}
+              className={`${option.value === value ? "selected" : ""} ${index === activeIndex ? "active" : ""}`.trim()}
+              onPointerMove={() => setActiveIndex(index)}
+              onPointerDown={(event) => {
+                // Prevent the enclosing form label from re-activating the
+                // combobox after the option closes the menu.
+                event.preventDefault();
+                event.stopPropagation();
+                choose(option.value);
+              }}
             >
               <span>{option.label}</span>
-            </button>
+            </div>
           ))}
         </div>
       )}

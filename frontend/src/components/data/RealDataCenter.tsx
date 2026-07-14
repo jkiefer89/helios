@@ -6,9 +6,9 @@ import { EmptyState } from "../empty-states/EmptyState";
 import { fmtNumber, fmtTimestamp } from "../../utils/format";
 
 const templates = [
-  { label: "Close-only price CSV", body: "Date,Close\n2026-01-02,100.25\n2026-01-05,101.40" },
-  { label: "OHLCV price CSV", body: "Date,Open,High,Low,Close,Volume\n2026-01-02,100,102,99,101,1250000" },
-  { label: "Model holdings CSV", body: "Ticker,Weight\nAAPL,30\nMSFT,25\nSPY,45" },
+  { label: "Close-only price CSV", body: "Date,Close" },
+  { label: "OHLCV price CSV", body: "Date,Open,High,Low,Close,Volume" },
+  { label: "Model holdings CSV", body: "Ticker,Weight" },
 ];
 
 export function RealDataCenter({
@@ -77,7 +77,7 @@ export function RealDataCenter({
         </Panel>
         <Panel title="Refresh Control" meta={liveCount ? `${liveCount} live symbols` : "no live symbols"}>
           <div className="refresh-control">
-            <p>Refresh only updates symbols already imported as live data. Samples and uploads are never converted into live evidence by refresh.</p>
+            <p>Refresh updates only symbols originally fetched from an approved live provider. Uploaded histories retain their original provenance.</p>
             <button type="button" onClick={refreshAll} disabled={!liveCount || pendingRefresh !== ""}>
               {pendingRefresh === "all" ? "Refreshing..." : "Refresh all live"}
             </button>
@@ -141,18 +141,19 @@ export function RealDataCenter({
                 <button type="button" onClick={() => window.dispatchEvent(new Event("helios:reveal-data-intake"))}>Open data intake</button>
               </EmptyState>
             ) : (
-              <div className="terminal-table real-data-table" tabIndex={0} aria-label="Persisted real data instruments">
-                <div className="terminal-table__head">
-                  <span>Symbol</span><span>Source</span><span>Rows</span><span>Date range</span><span>Last refresh</span><span>Action</span>
-                </div>
-                {realRows.map((ticker) => (
-                  <div className="table-row" key={ticker.symbol}>
-                    <span><strong>{ticker.symbol}</strong><small>{ticker.name}</small></span>
-                    <SourcePill source={ticker.source} />
-                    <span>{fmtNumber(ticker.row_count, 0)}</span>
-                    <span>{formatDateRange(ticker)}</span>
-                    <span>{fmtTimestamp(ticker.last_refresh?.attempted_at)}</span>
-                    <span className="row-actions">
+              <div className="terminal-table terminal-data-table-shell" tabIndex={0} aria-label="Scrollable persisted real data instruments">
+                <table className="terminal-data-table real-data-table">
+                <thead><tr>
+                  <th scope="col">Symbol</th><th scope="col">Source</th><th scope="col">Rows</th><th scope="col">Date range</th><th scope="col">Last refresh</th><th scope="col">Action</th>
+                </tr></thead>
+                <tbody>{realRows.map((ticker) => (
+                  <tr key={ticker.symbol}>
+                    <td><strong>{ticker.symbol}</strong><small>{ticker.name}</small></td>
+                    <td><SourcePill source={ticker.source} /></td>
+                    <td>{fmtNumber(ticker.row_count, 0)}</td>
+                    <td>{formatDateRange(ticker)}</td>
+                    <td>{fmtTimestamp(ticker.last_refresh?.attempted_at)}</td>
+                    <td className="row-actions">
                       <button type="button" onClick={() => onOpenInstrument(ticker.symbol)}>Open</button>
                       <button
                         type="button"
@@ -161,13 +162,14 @@ export function RealDataCenter({
                       >
                         {pendingRefresh === ticker.symbol ? "Refreshing" : "Refresh"}
                       </button>
-                    </span>
-                  </div>
-                ))}
+                    </td>
+                  </tr>
+                ))}</tbody>
+                </table>
               </div>
             )}
           </Panel>
-          <Panel title="Import Templates" meta={copied || "copyable examples"}>
+          <Panel title="Import Schemas" meta={copied || "header-only formats"}>
             <div className="template-grid">
               {templates.map((template) => (
                 <div className="template-card" key={template.label}>

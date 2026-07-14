@@ -31,15 +31,25 @@ interface HashRoute {
   id?: string;
 }
 
+function decodeHashPart(part: string): string | null {
+  try {
+    return decodeURIComponent(part);
+  } catch {
+    return null;
+  }
+}
+
 // Minimal hash routing (#/view or #/view/instrument|model/id) without a router library.
-function parseHash(hash: string): HashRoute | null {
-  const [view, kind, id] = hash.replace(/^#\/?/, "").split("/").map((part) => decodeURIComponent(part));
+export function parseHash(hash: string): HashRoute | null {
+  const decoded = hash.replace(/^#\/?/, "").split("/").map(decodeHashPart);
+  if (decoded.some((part) => part === null)) return null;
+  const [view, kind, id] = decoded as string[];
   if (!view || !isViewId(view)) return null;
   if ((kind === "instrument" || kind === "model") && id) return { view, kind, id };
   return { view };
 }
 
-function buildHash(view: ViewId, selectedInstrument: string, selectedModel: string): string {
+export function buildHash(view: ViewId, selectedInstrument: string, selectedModel: string): string {
   if (selectedModel) return `#/${view}/model/${encodeURIComponent(selectedModel)}`;
   if (selectedInstrument) return `#/${view}/instrument/${encodeURIComponent(selectedInstrument)}`;
   return `#/${view}`;
@@ -66,39 +76,49 @@ export default function App() {
   const [opportunities, setOpportunities] = useState<OpportunitiesResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState<string>("");
+  const [setupNotice, setSetupNotice] = useState<string>("");
+  const [commandError, setCommandError] = useState<string>("");
 
   const refreshLists = async () => {
-    const [tickerPayload, modelPayload, governancePayload, libraryPayload, mandatePayload, statusPayload] = await Promise.all([
-      api.tickers(),
-      api.models(),
-      api.modelGovernance(),
-      api.modelLibrary(),
-      api.mandates(),
-      api.dataStatus(),
-    ]);
-    setTickers(tickerPayload.tickers);
-    setModels(modelPayload.models);
-    setModelGovernance(governancePayload);
-    setModelLibrary(libraryPayload.templates);
-    setMandates(mandatePayload.mandates);
-    setDataStatus(statusPayload);
-    setLiveAvailable(tickerPayload.live_available);
+    const requests = [
+      ["instruments", api.tickers(), (value: TickerSummary[] | unknown) => {
+        const payload = value as Awaited<ReturnType<typeof api.tickers>>;
+        setTickers(payload.tickers);
+        setLiveAvailable(payload.live_available);
+      }],
+      ["models", api.models(), (value: unknown) => setModels((value as Awaited<ReturnType<typeof api.models>>).models)],
+      ["model governance", api.modelGovernance(), (value: unknown) => setModelGovernance(value as ModelGovernanceResponse)],
+      ["model library", api.modelLibrary(), (value: unknown) => setModelLibrary((value as Awaited<ReturnType<typeof api.modelLibrary>>).templates)],
+      ["mandates", api.mandates(), (value: unknown) => setMandates((value as Awaited<ReturnType<typeof api.mandates>>).mandates)],
+      ["data status", api.dataStatus(), (value: unknown) => setDataStatus(value as DataStatusResponse)],
+    ] as const;
+    const results = await Promise.allSettled(requests.map(([, request]) => request));
+    const failures: string[] = [];
+    results.forEach((result, index) => {
+      if (result.status === "fulfilled") requests[index][2](result.value);
+      else failures.push(requests[index][0]);
+    });
+    setSetupNotice(
+      failures.length ? `Some setup panels could not refresh: ${failures.join(", ")}.` : "",
+    );
     // No automatic first-ticker/model selection (review finding): analysis
     // context is always something the operator chose — via the sidebar, the
     // search palette, or a deep link — never a silent default.
   };
 
   const refreshCommand = async () => {
-    const payload = await api.commandCenter();
-    setCommand(payload);
+    try {
+      const payload = await api.commandCenter();
+      setCommand(payload);
+      setCommandError("");
+    } catch (error) {
+      setCommandError(error instanceof Error ? error.message : "Command Center could not refresh.");
+    }
   };
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([refreshLists(), refreshCommand()])
-      .catch((error: Error) => {
-        if (!cancelled) setNotice(error.message);
-      })
+    Promise.allSettled([refreshLists(), refreshCommand()])
       .finally(() => {
         if (!cancelled) setLoading(false);
       });
@@ -154,7 +174,7 @@ export default function App() {
       setNotice(`Uploaded ${result.symbol} with ${result.rows} rows.`);
       await Promise.all([refreshLists(), refreshCommand()]);
       selectInstrumentOnly(result.symbol);
-      setActiveView("analysis");
+      setActiveView("data-quality");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Price upload failed.");
       throw error;
@@ -167,7 +187,7 @@ export default function App() {
       setNotice(`Imported ${result.name} with ${result.n_holdings} holdings.`);
       await Promise.all([refreshLists(), refreshCommand()]);
       selectModelOnly(result.id);
-      setActiveView("clinic");
+      setActiveView("models");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Model upload failed.");
       throw error;
@@ -180,7 +200,7 @@ export default function App() {
       setNotice(`Imported ${result.name} with ${result.n_holdings} governed holdings.`);
       await Promise.all([refreshLists(), refreshCommand()]);
       selectModelOnly(result.id);
-      setActiveView("clinic");
+      setActiveView("models");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Model template import failed.");
       throw error;
@@ -223,7 +243,7 @@ export default function App() {
       setNotice(`Fetched ${result.symbol} with ${result.rows} rows.`);
       await Promise.all([refreshLists(), refreshCommand()]);
       selectInstrumentOnly(result.symbol);
-      setActiveView("analysis");
+      setActiveView("data-quality");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Live data fetch failed.");
       throw error;
@@ -256,7 +276,7 @@ export default function App() {
   const content = (() => {
     if (loading) return <div className="loading">Loading Helios Pro APIs...</div>;
     if (activeView === "command") {
-      return <CommandCenter payload={command} dataStatus={dataStatus} onOpenInstrument={openInstrument} onOpenModel={openModel} onOpenView={setActiveView} />;
+      return <CommandCenter payload={command} dataStatus={dataStatus} onOpenInstrument={openInstrument} onOpenModel={openModel} onOpenView={setActiveView} onRetry={refreshCommand} />;
     }
     if (activeView === "instruments") {
       return (
@@ -373,7 +393,7 @@ export default function App() {
       onUploadModel={onUploadModel}
       onFetchLive={onFetchLive}
       liveAvailable={liveAvailable}
-      notice={notice}
+      notice={[notice, setupNotice, commandError].filter(Boolean).join(" ")}
       dataStatus={dataStatus}
       onRefreshData={onRefreshData}
     >

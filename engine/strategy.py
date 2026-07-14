@@ -33,6 +33,12 @@ def analyze_strategy(
     position = raw_position.shift(1).fillna(0.0)
     rets = px.pct_change().fillna(0.0)
     turnover = position.diff().abs().fillna(0.0)
+    terminal_liquidation = bool(float(position.iloc[-1]) > 0.0)
+    if terminal_liquidation:
+        # Backtest evidence is evaluated on a fully liquidated book so every
+        # episode carries both entry and exit costs. The signal position is
+        # retained separately in trade_stats for an honest as-of view.
+        turnover.iloc[-1] += float(position.iloc[-1])
     all_in_cost = max(0.0, float(cost_bps)) + max(0.0, float(slippage_bps))
     strategy_rets = position * rets - turnover * (all_in_cost / 10000.0)
     benchmark_rets = rets
@@ -43,10 +49,21 @@ def analyze_strategy(
     rolling = _rolling_sharpe(strategy_rets)
     # Episodes compound NET strategy returns so per-trade stats reconcile with
     # the (net) equity curve rather than overstating raw asset moves.
-    episodes, open_episode = _trade_episodes(position, strategy_rets)
+    episodes, open_episode = _trade_episodes(
+        position,
+        strategy_rets,
+        close_terminal=terminal_liquidation,
+        include_exit_return=True,
+    )
     idx = _downsample_index(len(px), 420)
     dates = [px.index[i].strftime("%Y-%m-%d") for i in idx]
-    trade_stats = _trade_stats(episodes, open_episode, position, turnover)
+    trade_stats = _trade_stats(
+        episodes,
+        open_episode,
+        position,
+        turnover,
+        terminal_liquidated=terminal_liquidation,
+    )
 
     return {
         "dates": dates,
@@ -69,12 +86,16 @@ def analyze_strategy(
             "round_trip_cost_bps": float(2.0 * all_in_cost),
             "risk_free_rate_pct": float(mandate.RF * 100),
             "cash_return_assumption_pct": 0.0,
+            "terminal_liquidation": terminal_liquidation,
         },
         "methodology": {
             "no_lookahead": True,
             "position_rule": "Signal is observed at close and applied starting the next session.",
             "benchmark": "Buy-and-hold on the same price series.",
-            "costs": "Costs and slippage are deducted whenever exposure changes.",
+            "costs": (
+                "Costs and slippage are deducted whenever exposure changes; "
+                "an open end-of-window signal is liquidated for evaluation."
+            ),
             "analysis_only": True,
         },
     }
@@ -141,11 +162,19 @@ def _rolling_sharpe(rets: pd.Series, window: int = 63) -> pd.Series:
     return ((mean - mandate.RF) / vol).replace([np.inf, -np.inf], np.nan)
 
 
-def _trade_episodes(position: pd.Series, rets: pd.Series) -> tuple[list[float], float | None]:
+def _trade_episodes(
+    position: pd.Series,
+    rets: pd.Series,
+    *,
+    close_terminal: bool = False,
+    include_exit_return: bool = False,
+) -> tuple[list[float], float | None]:
     """Compound per-episode returns over exactly the exposure days.
 
     Returns (completed episodes, still-open episode or None). The flat day the
-    exit lands on carries no exposure, so its return is never compounded in.
+    exit lands on may carry an exit-side trading cost in an already-net return
+    series. ``include_exit_return`` is explicit so callers passing raw asset
+    returns never attribute a flat post-exit market move to the prior trade.
     """
     episodes: list[float] = []
     in_pos = False
@@ -157,13 +186,19 @@ def _trade_episodes(position: pd.Series, rets: pd.Series) -> tuple[list[float], 
                 cumulative = 1.0
             cumulative *= 1.0 + float(r)
         elif in_pos:
+            if include_exit_return:
+                cumulative *= 1.0 + float(r)
             in_pos = False
             episodes.append(cumulative - 1.0)
+    if in_pos and close_terminal:
+        episodes.append(cumulative - 1.0)
+        in_pos = False
     return episodes, (cumulative - 1.0 if in_pos else None)
 
 
 def _trade_stats(episodes: list[float], open_episode: float | None,
-                 position: pd.Series, turnover: pd.Series) -> dict:
+                 position: pd.Series, turnover: pd.Series,
+                 *, terminal_liquidated: bool = False) -> dict:
     wins = [r for r in episodes if r > 0]
     losses = [r for r in episodes if r <= 0]
     gross_win = sum(wins)
@@ -180,6 +215,10 @@ def _trade_stats(episodes: list[float], open_episode: float | None,
         "exposure_pct": float(position.mean() * 100),
         "turnover": float(turnover.sum()),
         "current_position": "long" if float(position.iloc[-1]) > 0 else "cash",
+        "evaluation_end_position": "cash" if terminal_liquidated else (
+            "long" if float(position.iloc[-1]) > 0 else "cash"
+        ),
+        "terminal_liquidation_applied": bool(terminal_liquidated),
     }
 
 
@@ -192,4 +231,3 @@ def _downsample_index(n: int, target: int) -> list[int]:
 
 def _finite_or_none(value: float) -> float | None:
     return None if not np.isfinite(value) else round(float(value), 4)
-

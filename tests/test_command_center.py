@@ -48,10 +48,14 @@ def test_command_center_response_shape_is_analysis_only():
         "research_queue",
         "generated_at",
         "disclaimer",
+        "readiness",
+        "blockers",
+        "recent_changes",
+        "next_action",
     }
-    assert body["regime"]["label"] in {"risk-on", "neutral", "risk-off"}
+    assert body["regime"]["label"] in {"risk-on", "neutral", "risk-off", "unavailable"}
     assert isinstance(body["regime"]["drivers"], list)
-    assert body["data_mode"] == "demo"
+    assert body["data_mode"] == "invalid_for_research"
     assert body["eligible_for_real_research"] is False
     assert body["top_opportunities"] == []
     assert body["top_risks"] == []
@@ -59,6 +63,14 @@ def test_command_center_response_shape_is_analysis_only():
     assert "upload real" in body["required_action"].lower()
     assert "analysis only" in body["disclaimer"].lower()
     assert "execution" in body["disclaimer"].lower()
+    assert body["readiness"]["state"] in {"no_data", "invalid", "stale", "mixed", "blocked", "ready"}
+    assert len(body["readiness"]["checks"]) == 5
+    assert body["next_action"]["label"]
+    assert body["next_action"]["view"] in {
+        "command", "instruments", "models", "opportunities", "strategy",
+        "evidence", "clinic", "risk", "reports", "journal", "decisions",
+        "data-quality", "analysis",
+    }
 
 
 def test_command_center_uses_uploaded_real_data_for_research_rankings():

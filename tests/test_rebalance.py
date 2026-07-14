@@ -1,7 +1,7 @@
 """Current-to-target rebalance proposals (deep-review implementation slice).
 
 Constrained proposals with named infeasibility, honest price/liquidity
-sourcing, dust suppression, and the no-cvxpy projection fallback.
+sourcing, dust suppression, and fail-closed optimization.
 """
 from __future__ import annotations
 
@@ -70,7 +70,7 @@ def test_infeasible_constraints_are_named_not_relaxed(store):
         "ACC-R2", "RINF", constraints={"max_single_position_pct": 25.0})
     # The QP lands ON the cap (best feasible) — but the unreachable target is
     # NAMED, never silently absorbed (review: block or resize, explicitly).
-    assert out["status"] == "proposed"
+    assert out["status"] == "constrained"
     assert out["target_reachable"] is False
     kinds = {v["constraint"] for v in out["violations"]}
     assert "max_single_position_pct" in kinds
@@ -87,7 +87,7 @@ def test_liquidity_cap_limits_move_and_reports_days(store):
         holdings=[portfolio.Holding("DDD", 0.20)]))
     _snapshot(store, "ACC-R3", [], cash=100000.0)
     out = rebalance.propose_rebalance("ACC-R3", "RLIQ")
-    assert out["status"] == "proposed"
+    assert out["status"] == "constrained"
     trade = next(t for t in out["trades"] if t["ticker"] == "DDD")
     assert abs(trade["trade_usd"]) <= 5000 + 1        # liquidity-capped, not 20000
     assert trade["est_days_to_trade"] is not None
@@ -133,7 +133,7 @@ def test_dust_trades_suppressed(store):
     assert out["summary"]["residual_to_target_pct"] < 0.25
 
 
-def test_projection_fallback_without_cvxpy(store, monkeypatch):
+def test_optimizer_unavailable_blocks_without_fallback(store, monkeypatch):
     monkeypatch.setattr(rebalance, "HAS_CVXPY", False)
     for sym, px in (("FFF", 100.0), ("GGG", 50.0)):
         _register_priced(sym, px)
@@ -142,20 +142,17 @@ def test_projection_fallback_without_cvxpy(store, monkeypatch):
         holdings=[portfolio.Holding("FFF", 0.20), portfolio.Holding("GGG", 0.20)]))
     _snapshot(store, "ACC-R6", [], cash=100000.0)
     out = rebalance.propose_rebalance("ACC-R6", "RFALL")
-    assert out["status"] == "proposed"
-    assert out["method"] == "capped_projection_fallback"
-    assert any("projection" in n for n in out["solver_notes"])
-    by_ticker = {t["ticker"]: t for t in out["trades"]}
-    assert by_ticker["FFF"]["proposed_weight_pct"] == pytest.approx(20.0, abs=0.5)
+    assert out["status"] == "blocked"
+    assert "optimization contract" in out["reason"]
+    assert "no fallback" in out["solver_notes"][0].lower()
 
 
 # --------------------------------------------------------------------------- #
 # Adversarial-review locks (confirmed defects, fixed)
 # --------------------------------------------------------------------------- #
-def test_fallback_never_teleports_overcap_positions(store, monkeypatch):
+def test_solver_never_teleports_overcap_positions(store):
     """An over-cap current weight must unwind only as fast as the liquidity
-    budget allows — the old final clip jumped it straight to the cap."""
-    monkeypatch.setattr(rebalance, "HAS_CVXPY", False)
+    budget allows."""
     # Tiny ADV: $10k/day @ 10% x 5d = $5k budget = 5pp of a $100k account.
     _register_priced("OVW", 100.0, adv_usd=10_000.0)
     portfolio.register(portfolio.Model(
@@ -165,11 +162,28 @@ def test_fallback_never_teleports_overcap_positions(store, monkeypatch):
               [{"ticker": "OVW", "shares": 400, "price": 100.0, "market_value": 40000.0}],
               cash=60000.0)
     out = rebalance.propose_rebalance("ACC-R7", "ROVC", constraints={"max_single_position_pct": 25.0})
-    assert out["status"] == "proposed"
-    trade = next(t for t in out["trades"] if t["ticker"] == "OVW")
-    # 40% -> at most 5pp of movement, NOT a 15pp teleport to the 25% cap.
-    assert trade["proposed_weight_pct"] >= 34.5
-    assert abs(trade["trade_usd"]) <= 5000 + 1
+    assert out["status"] == "infeasible"
+    kinds = {row["constraint"] for row in out["violations"]}
+    assert {"max_single_position_pct", "max_adv_participation_pct"} <= kinds
+    assert "trades" not in out
+
+
+def test_sell_proposal_never_exceeds_custodian_shares(store):
+    _register_priced("SHARECAP", 100.0)
+    portfolio.register(portfolio.Model(
+        id="RSHARES", name="Share Cap", mandate_key="balanced", mandate_context="",
+        holdings=[]))
+    _snapshot(store, "ACC-SHARES", [{
+        "ticker": "SHARECAP", "shares": 100, "price": 400.0, "market_value": 40000.0,
+    }], cash=60000.0)
+
+    out = rebalance.propose_rebalance("ACC-SHARES", "RSHARES")
+
+    trade = next(row for row in out["trades"] if row["ticker"] == "SHARECAP")
+    assert trade["side"] == "SELL"
+    assert trade["est_shares"] <= 100
+    assert trade["shares_available"] == 100
+    assert trade["share_cap_applied"] is True
     assert out["target_reachable"] is False
 
 
@@ -189,3 +203,68 @@ def test_snapshot_and_positions_must_share_a_date(store):
     out = rebalance.propose_rebalance("ACC-R8", "RMIX")
     assert out["status"] == "blocked"
     assert "2026-07-10" in out["reason"] and "no position rows" in out["reason"]
+
+
+def test_rebalance_prices_are_aligned_to_snapshot_date(store):
+    index = pd.to_datetime(["2026-07-09", "2026-07-10", "2026-07-13"])
+    frame = pd.DataFrame({"close": [99.0, 100.0, 200.0], "volume": [100_000, 100_000, 100_000]}, index=index)
+    data.register(data.Instrument("ASOF", "As Of", frame, "upload", []))
+    portfolio.register(portfolio.Model(
+        id="RASOF", name="As Of", mandate_key="balanced", mandate_context="",
+        holdings=[portfolio.Holding("ASOF", 0.20)]))
+    _snapshot(store, "ACC-ASOF", [], cash=100000.0)
+
+    out = rebalance.propose_rebalance("ACC-ASOF", "RASOF")
+
+    trade = next(row for row in out["trades"] if row["ticker"] == "ASOF")
+    assert trade["price_used"] == 100.0
+    assert trade["price_as_of"] == "2026-07-10"
+
+
+def test_stale_as_of_price_blocks_trade_sizing(store):
+    index = pd.bdate_range(end="2026-06-20", periods=100)
+    frame = pd.DataFrame({"close": np.linspace(90.0, 100.0, len(index)), "volume": 100_000}, index=index)
+    data.register(data.Instrument("STALEPX", "Stale Price", frame, "upload", []))
+    portfolio.register(portfolio.Model(
+        id="RSTALE", name="Stale As Of", mandate_key="balanced", mandate_context="",
+        holdings=[portfolio.Holding("STALEPX", 0.20)]))
+    _snapshot(store, "ACC-STALE", [], cash=100000.0)
+
+    out = rebalance.propose_rebalance("ACC-STALE", "RSTALE")
+
+    assert out["status"] == "blocked"
+    assert out["stale_price_tickers"][0]["ticker"] == "STALEPX"
+    assert out["stale_price_tickers"][0]["age_days"] > 7
+
+
+def test_cash_aware_turnover_counts_purchases_from_cash(store):
+    _register_priced("CASHBUY", 100.0)
+    portfolio.register(portfolio.Model(
+        id="RCASH", name="Cash Buy", mandate_key="balanced", mandate_context="",
+        holdings=[portfolio.Holding("CASHBUY", 0.20)]))
+    _snapshot(store, "ACC-CASH", [], cash=100000.0)
+
+    out = rebalance.propose_rebalance("ACC-CASH", "RCASH")
+
+    assert out["summary"]["one_way_turnover_pct"] == pytest.approx(20.0, abs=0.5)
+
+
+def test_post_cost_cash_floor_is_enforced(store):
+    _register_priced("COSTCASH", 100.0)
+    portfolio.register(portfolio.Model(
+        id="RCOST", name="Cost Cash", mandate_key="balanced", mandate_context="",
+        holdings=[portfolio.Holding("COSTCASH", 0.99)]))
+    _snapshot(store, "ACC-COST", [], cash=100000.0)
+
+    out = rebalance.propose_rebalance(
+        "ACC-COST", "RCOST",
+        constraints={
+            "max_single_position_pct": 100.0,
+            "max_turnover_pct": 100.0,
+            "min_cash_pct": 1.0,
+            "cost_bps_per_side": 100.0,
+        },
+    )
+
+    assert out["summary"]["proposed_cash_pct"] >= 1.0 - 0.01
+    assert out["summary"]["est_total_cost_usd"] > 0

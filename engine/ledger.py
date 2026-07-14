@@ -324,7 +324,7 @@ def import_positions(raw: bytes, account_id: str, as_of: str = "") -> dict[str, 
 # --------------------------------------------------------------------------- #
 # Real performance: Modified-Dietz sub-periods chain-linked to TWR
 # --------------------------------------------------------------------------- #
-def account_performance(account_id: str) -> dict[str, Any]:
+def account_performance(account_id: str, *, start: str | None = None, end: str | None = None) -> dict[str, Any]:
     """ACTUAL account return between snapshots, gross and net of fees.
 
     Modified Dietz per sub-period: r = (V1 - V0 - F) / (V0 + sum(w_i * f_i))
@@ -334,6 +334,12 @@ def account_performance(account_id: str) -> dict[str, Any]:
     """
     store = persistence.get_store()
     snaps = store.account_snapshots(account_id)
+    if start:
+        start_ts = pd.Timestamp(start)
+        snaps = [row for row in snaps if pd.Timestamp(row["as_of"]) >= start_ts]
+    if end:
+        end_ts = pd.Timestamp(end)
+        snaps = [row for row in snaps if pd.Timestamp(row["as_of"]) <= end_ts]
     if len(snaps) < 2:
         return {
             "status": "insufficient_snapshots",
@@ -466,9 +472,9 @@ def account_performance(account_id: str) -> dict[str, Any]:
     }
 
 
-def actual_vs_paper(account_id: str) -> dict[str, Any]:
+def actual_vs_paper(account_id: str, *, start: str | None = None, end: str | None = None) -> dict[str, Any]:
     """Side-by-side: the account's ACTUAL TWR vs the mapped model's PAPER series."""
-    actual = account_performance(account_id)
+    actual = account_performance(account_id, start=start, end=end)
     out: dict[str, Any] = {"actual": actual}
     account = next((a for a in persistence.get_store().ledger_accounts()
                     if a["account_id"] == account_id), None)

@@ -32,12 +32,19 @@ def test_mandates_endpoint_returns_presets(client):
     assert any(m["key"] == "balanced" for m in resp.get_json()["mandates"])
 
 
-def test_analyze_valid_sample_ticker(client):
-    resp = client.get("/api/analyze?ticker=AAPL&horizon=10")
+def test_analyze_valid_uploaded_ticker(client):
+    upload = client.post(
+        "/api/upload",
+        data={"file": (BytesIO(price_csv(days=260)), "real-analysis.csv"), "symbol": "REALAN"},
+        content_type="multipart/form-data",
+    )
+    assert upload.status_code == 200
+
+    resp = client.get("/api/analyze?ticker=REALAN&horizon=10")
 
     assert resp.status_code == 200
     body = resp.get_json()
-    assert body["symbol"] == "AAPL"
+    assert body["symbol"] == "REALAN"
     assert body["forecast"]["horizon_days"] == 10
 
 
@@ -249,7 +256,11 @@ def test_data_quality_alerts_track_active_and_resolved_research_readiness(client
     )
     assert model_upload.status_code == 200
 
-    first = client.get("/api/data-quality")
+    initial = client.get("/api/data-quality")
+    assert initial.status_code == 200
+    assert initial.get_json()["alerts"]["summary"]["active_count"] == 0
+
+    first = client.post("/api/data-quality/sync")
 
     assert first.status_code == 200
     first_body = first.get_json()
@@ -271,13 +282,16 @@ def test_data_quality_alerts_track_active_and_resolved_research_readiness(client
     assert second.status_code == 200
     second_alerts = second.get_json()["alerts"]
     assert second_alerts["summary"]["new_count"] == 0
-    # Idempotent re-sync: an unchanged alert re-observed by a GET keeps its
-    # occurrence_count (it counts distinct raisings, not page views).
+    # A pure GET reads the persisted alert ledger without changing it.
     assert next(alert for alert in second_alerts["active"] if alert["id"] == readiness_alert["id"])["occurrence_count"] == 1
 
     data.parse_csv(price_csv(days=260), "NEEDPRICE", "Need Price", source_filename="need-price.csv")
 
-    resolved = client.get("/api/data-quality")
+    unresolved_read = client.get("/api/data-quality")
+    assert unresolved_read.status_code == 200
+    assert unresolved_read.get_json()["alerts"]["summary"]["active_count"] >= 3
+
+    resolved = client.post("/api/data-quality/sync")
 
     assert resolved.status_code == 200
     resolved_body = resolved.get_json()
@@ -294,6 +308,13 @@ def test_data_quality_alerts_track_active_and_resolved_research_readiness(client
 
 def test_model_upload_and_analyze_smoke(client, monkeypatch):
     monkeypatch.setattr(data, "HAS_YF", False)
+    for symbol in ("AAPL", "MSFT"):
+        upload_price = client.post(
+            "/api/upload",
+            data={"file": (BytesIO(price_csv(days=260)), f"{symbol.lower()}.csv"), "symbol": symbol},
+            content_type="multipart/form-data",
+        )
+        assert upload_price.status_code == 200
     payload = {
         "file": (BytesIO(b"Ticker,Weight\nAAPL,60\nMSFT,40\n"), "model.csv"),
         "name": "Smoke Model",
@@ -343,14 +364,14 @@ def test_model_analyze_unavailable_long_horizon_clears_stale_label(client, monke
         holdings=[{
             "ticker": "AAPL",
             "weight": 1.0,
-            "source": "sample",
+            "source": "upload",
             "window_return_pct": 0.0,
             "mrc_pct": 100.0,
             "excluded": False,
             "note": "",
         }],
         n_days=130,
-        sources={"sample": 1},
+        sources={"upload": 1},
         warnings=[],
         provenance={
             "n_holdings": 1,
@@ -358,11 +379,14 @@ def test_model_analyze_unavailable_long_horizon_clears_stale_label(client, monke
             "n_excluded": 0,
             "excluded": [],
             "n_live": 0,
-            "n_sample": 1,
+            "n_sample": 0,
             "n_simulated": 0,
             "simulated_weight_pct": 0.0,
             "simulated_symbols": [],
             "honesty": "real",
+            "source_weight_pct": {"upload": 100.0},
+            "source_by_symbol": {"AAPL": "upload"},
+            "missing_symbols": [],
         },
     )
     monkeypatch.setattr(portfolio, "get", lambda _model_id: mdl)
@@ -392,9 +416,9 @@ def test_same_origin_and_direct_posts_are_allowed(client, monkeypatch):
     monkeypatch.setattr(data, "HAS_YF", False)
     for headers in ({}, {"Sec-Fetch-Site": "same-origin"}, {"Sec-Fetch-Site": "none"}):
         resp = client.post("/api/live", json={"symbol": "AAPL"}, headers=headers)
-        # Reaches the handler (yfinance unavailable), not the CSRF gate.
+        # Reaches the handler (provider unavailable), not the CSRF gate.
         assert resp.status_code == 400
-        assert "yfinance" in resp.get_json()["error"]
+        assert "unavailable" in resp.get_json()["error"].lower()
 
 
 def test_mismatched_origin_post_is_rejected(client):
@@ -410,7 +434,7 @@ def test_matching_origin_post_is_allowed(client, monkeypatch):
                        headers={"Origin": "http://localhost"})
 
     assert resp.status_code == 400
-    assert "yfinance" in resp.get_json()["error"]
+    assert "unavailable" in resp.get_json()["error"].lower()
 
 
 def test_cross_site_get_requests_remain_allowed(client):
@@ -516,6 +540,13 @@ def test_upload_is_rejected_when_parse_semaphore_is_saturated(client):
 
 
 def test_analyze_sanitizes_ticker_and_requires_symbol(client):
+    upload = client.post(
+        "/api/upload",
+        data={"file": (BytesIO(price_csv(days=260)), "aapl.csv"), "symbol": "AAPL"},
+        content_type="multipart/form-data",
+    )
+    assert upload.status_code == 200
+
     lower = client.get("/api/analyze?ticker=aapl&horizon=10")
     assert lower.status_code == 200
     assert lower.get_json()["symbol"] == "AAPL"

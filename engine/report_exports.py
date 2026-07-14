@@ -59,6 +59,11 @@ def build_snapshot(
     prepared_by = _text(prepared_by)[:160]
     reviewer = _text(reviewer)[:160]
     report_purpose = _text(report_purpose)[:80] or "advisor_review"
+    external_ready = bool(
+        report.get("eligible_for_real_research")
+        and report_purpose in {"client_review", "investment_committee"}
+    )
+    report_package = "institutional_advisor_report" if external_ready else "internal_research_evidence"
     output_formats = ["html", "pdf", "print"]
     disclosure_blocks = _disclosure_blocks(report)
     signal_journal_payload = _dict(signal_journal_evidence)
@@ -72,7 +77,7 @@ def build_snapshot(
     snapshot = {
         "id": secrets.token_urlsafe(12),
         "created_at": created_at,
-        "report_package": "institutional_advisor_report",
+        "report_package": report_package,
         "version": safe_version,
         "version_label": version_label,
         "target_kind": target_kind,
@@ -105,12 +110,12 @@ def build_snapshot(
         "output_formats": output_formats,
         "metadata": {
             "snapshot_version": 2,
-            "institutional_report": True,
-            "report_package": "institutional_advisor_report",
+            "institutional_report": external_ready,
+            "report_package": report_package,
             "version": safe_version,
             "version_label": version_label,
             "pdf_engine": "reportlab",
-            "pdf_layout": "designer_grade_institutional",
+            "pdf_layout": "designer_grade_institutional" if external_ready else "internal_evidence",
             "prepared_for": prepared_for,
             "prepared_by": prepared_by,
             "reviewer": reviewer,
@@ -195,7 +200,7 @@ def render_html(snapshot: dict[str, Any]) -> str:
         "<body>",
         "<main>",
         "<header class=\"cover\">",
-        "<p class=\"eyebrow\">Institutional Advisor Report / Helios Report Snapshot</p>",
+        f"<p class=\"eyebrow\">{_esc(_package_label(snapshot))} / Helios Report Snapshot</p>",
         f"<h1>{_esc(snapshot.get('title'))}</h1>",
         f"<p class=\"muted\">{_esc(snapshot.get('version_label') or 'v1')} / Saved {_esc(snapshot.get('created_at'))} / {_esc(snapshot.get('target_kind'))}:{_esc(snapshot.get('target_id'))}</p>",
         "</header>",
@@ -221,7 +226,7 @@ def render_html(snapshot: dict[str, Any]) -> str:
         _ai_html(snapshot),
         "<section>",
         "<h2>Report Sections</h2>",
-        _render_value(sections),
+        _render_value(_report_sections_for_render(sections)),
         "</section>",
         f"<p class=\"footer\">{_esc(DISCLAIMER)}</p>",
         "</div>",
@@ -242,11 +247,12 @@ def render_pdf(snapshot: dict[str, Any]) -> bytes:
     buffer = BytesIO()
     pdf = canvas.Canvas(buffer, pagesize=letter, pageCompression=0)
     width, height = letter
+    risk_section = "CLIENT-GRADE RISK PACK" if _is_external_package(snapshot) else "RISK EVIDENCE"
     pages = [
-        ("CLIENT-READY PDF PACKAGE", _rl_cover_page),
+        (_package_label(snapshot).upper(), _rl_cover_page),
         ("EXECUTIVE SUMMARY", _rl_summary_page),
         ("PROVENANCE DASHBOARD", _rl_provenance_page),
-        ("CLIENT-GRADE RISK PACK", _rl_risk_pack_page),
+        (risk_section, _rl_risk_pack_page),
         ("SIGNAL JOURNAL EVIDENCE", _rl_signal_journal_page),
         ("EVIDENCE DETAIL", _rl_evidence_page),
     ]
@@ -264,8 +270,16 @@ def render_pdf(snapshot: dict[str, Any]) -> bytes:
 
 def _rl_cover_page(pdf, snapshot: dict[str, Any], width: float, height: float, page_no: int, total: int, section: str, colors) -> None:
     _rl_header(pdf, width, height, section, colors)
-    _rl_text(pdf, "CLIENT-READY PDF PACKAGE", 42, 650, 10, colors.HexColor("#55a7ff"), bold=True)
-    _rl_text(pdf, "INSTITUTIONAL ADVISOR REPORT", 42, 632, 10, colors.HexColor("#ffd24a"), bold=True)
+    _rl_text(pdf, _package_label(snapshot).upper(), 42, 650, 10, colors.HexColor("#55a7ff"), bold=True)
+    _rl_text(
+        pdf,
+        "APPROVED EXTERNAL REVIEW PACK" if _is_external_package(snapshot) else "INTERNAL ANALYSIS-ONLY EVIDENCE",
+        42,
+        632,
+        10,
+        colors.HexColor("#ffd24a"),
+        bold=True,
+    )
     _rl_wrapped(pdf, str(snapshot.get("title") or "Helios Report Snapshot"), 42, 602, 520, 26, colors.HexColor("#f8fafc"), bold=True, max_lines=3)
     _rl_text(pdf, f"REPORT VERSION {snapshot.get('version_label') or 'v1'}", 42, 528, 12, colors.HexColor("#ffd24a"), bold=True)
     _rl_text(pdf, "Helios Report Snapshot", 42, 508, 10, colors.HexColor("#9fb2c8"))
@@ -334,10 +348,22 @@ def _rl_summary_page(pdf, snapshot: dict[str, Any], width: float, height: float,
         width - 84,
         100,
         "REPORT GOVERNANCE",
-        "This page is a frozen advisor/client-ready summary. Calculations remain deterministic Helios outputs; any AI narrative is explanatory only and requires advisor review.",
+        (
+            "This page is an approved external-review summary. Calculations remain deterministic Helios outputs; any AI narrative is explanatory only and requires advisor review."
+            if _is_external_package(snapshot)
+            else "This page is an internal analysis-only evidence draft and is not approved for client or investment-committee distribution."
+        ),
         colors,
         accent="#55a7ff",
     )
+
+
+def _is_external_package(snapshot: dict[str, Any]) -> bool:
+    return snapshot.get("report_package") == "institutional_advisor_report"
+
+
+def _package_label(snapshot: dict[str, Any]) -> str:
+    return "Institutional Advisor Report" if _is_external_package(snapshot) else "Internal Research Evidence Draft"
 
 
 def _rl_provenance_page(pdf, snapshot: dict[str, Any], width: float, height: float, page_no: int, total: int, section: str, colors) -> None:
@@ -452,10 +478,16 @@ def _rl_signal_journal_page(pdf, snapshot: dict[str, Any], width: float, height:
 
 def _rl_risk_pack_page(pdf, snapshot: dict[str, Any], width: float, height: float, page_no: int, total: int, section: str, colors) -> None:
     _rl_header(pdf, width, height, section, colors)
-    _rl_text(pdf, "CLIENT-GRADE RISK PACK", 42, 674, 18, colors.HexColor("#f8fafc"), bold=True)
+    external = _is_external_package(snapshot)
+    heading = "CLIENT-GRADE RISK PACK" if external else "RISK EVIDENCE"
+    _rl_text(pdf, heading, 42, 674, 18, colors.HexColor("#f8fafc"), bold=True)
     _rl_wrapped(
         pdf,
-        "Stress scenarios, benchmark-relative drawdown, concentration warnings, liquidity flags, correlation clusters, and breakpoints are analysis-only evidence for advisor review.",
+        (
+            "Stress scenarios, benchmark-relative drawdown, concentration warnings, liquidity flags, correlation clusters, and breakpoints are analysis-only evidence for advisor review."
+            if external
+            else "Internal analysis-only risk evidence. This draft is not approved for client or investment-committee distribution."
+        ),
         42,
         648,
         520,
@@ -472,7 +504,7 @@ def _rl_risk_pack_page(pdf, snapshot: dict[str, Any], width: float, height: floa
             width - 84,
             78,
             "RISK PACK LOCKED",
-            str((pack or {}).get("required_action") or "Eligible real model history is required before rendering a client-grade risk pack."),
+            str((pack or {}).get("required_action") or "Eligible real model history is required before rendering risk evidence."),
             colors,
             accent="#ffd24a",
         )
@@ -724,9 +756,11 @@ def _client_risk_pack_html(snapshot: dict[str, Any]) -> str:
     pack = _risk_pack(snapshot)
     if not pack:
         return ""
+    external = _is_external_package(snapshot)
+    heading = "Client Risk Pack" if external else "Risk Evidence"
     if not pack.get("available"):
         return (
-            "<section><h2>Client Risk Pack</h2>"
+            f"<section><h2>{heading}</h2>"
             f"<p class=\"warn\">{_esc(pack.get('required_action') or 'Eligible real model history is required before rendering risk-pack evidence.')}</p>"
             "</section>"
         )
@@ -735,8 +769,12 @@ def _client_risk_pack_html(snapshot: dict[str, Any]) -> str:
     liquidity = pack.get("liquidity_flags") if isinstance(pack.get("liquidity_flags"), dict) else {}
     html_parts = [
         "<section>",
-        "<h2>Client Risk Pack</h2>",
-        "<p class=\"muted\">Stress scenarios, benchmark-relative drawdown, concentration warnings, liquidity flags, correlation clusters, and breakpoints are analysis-only evidence for advisor review.</p>",
+        f"<h2>{heading}</h2>",
+        (
+            "<p class=\"muted\">Stress scenarios, benchmark-relative drawdown, concentration warnings, liquidity flags, correlation clusters, and breakpoints are analysis-only evidence for advisor review.</p>"
+            if external
+            else "<p class=\"muted\">Internal analysis-only risk evidence. This draft is not approved for client or investment-committee distribution.</p>"
+        ),
         _render_dict({
             "Risk Posture": summary.get("risk_posture"),
             "Benchmark Relative Drawdown": _fmt_html_pct(drawdown.get("relative_drawdown_pct")),
@@ -802,6 +840,14 @@ def _risk_pack(snapshot: dict[str, Any]) -> dict[str, Any]:
     sections = report.get("sections") if isinstance(report.get("sections"), dict) else {}
     pack = sections.get("client_risk_pack")
     return pack if isinstance(pack, dict) else {}
+
+
+def _report_sections_for_render(sections: dict[str, Any]) -> dict[str, Any]:
+    """Avoid duplicating sections that have governed, purpose-aware renderers."""
+    return {
+        key: value for key, value in sections.items()
+        if key not in {"client_risk_pack"}
+    }
 
 
 def _signal_journal_html(snapshot: dict[str, Any]) -> str:
@@ -940,7 +986,21 @@ def _render_value(value: Any) -> str:
 
 def _render_dict(value: dict[str, Any]) -> str:
     rows = []
-    for key, item in value.items():
+    preferred = {
+        "executive_summary": 0,
+        "action": 1,
+        "assumptions": 2,
+        "data_quality": 3,
+        "evidence": 4,
+        "forecast": 5,
+        "provenance": 6,
+        "risk": 7,
+        "strategy": 8,
+    }
+    for key, item in sorted(
+        value.items(),
+        key=lambda row: (preferred.get(str(row[0]).lower(), 100), _label(row[0]).casefold()),
+    ):
         rows.append(f"<dt>{_esc(_label(key))}</dt><dd>{_render_value(item)}</dd>")
     return "<dl>" + "".join(rows) + "</dl>"
 

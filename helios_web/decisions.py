@@ -42,6 +42,8 @@ def record_decision():
         )
     except ValueError as exc:
         return err(str(exc), 400)
+    except RuntimeError as exc:
+        return err(str(exc), 503)
     if not entry.get("decision_id"):
         return err(entry.get("warning") or "Decision could not be recorded (persistence unavailable).", 503)
     return ok({"decision": entry, "disclaimer": ANALYSIS_ONLY_DISCLAIMER})

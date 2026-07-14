@@ -56,12 +56,12 @@ def test_decision_scoreboard_reports_net_alpha():
 def test_validation_segment_stats_net_companion():
     rows = [
         {"paper_hit": True, "alpha_pct": 1.2, "action_label": "BUY", "false_positive": False},
-        {"paper_hit": False, "alpha_pct": -0.2, "action_label": "SELL", "false_positive": True},
+        {"paper_hit": True, "alpha_pct": -0.2, "action_label": "SELL", "false_positive": False},
     ]
     seg = model_validation._segment_stats(rows)
-    assert seg["avg_alpha_pct"] == pytest.approx(0.5)
+    assert seg["avg_alpha_pct"] == pytest.approx(0.7)
     assert seg["avg_alpha_after_default_costs_pct"] == pytest.approx(
-        0.5 - costs.ROUND_TRIP_COST_PCT)
+        0.7 - costs.ROUND_TRIP_COST_PCT)
 
 
 def test_selection_adjusted_ci_has_net_endpoints():

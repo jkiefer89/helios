@@ -5,6 +5,7 @@ pandas>=2.0
 openpyxl>=3.1
 cryptography>=42.0
 reportlab>=4.2
-# Optional: enables live market data + free news headlines.
-# The platform runs fully offline on bundled sample data without it.
+cvxpy>=1.9,<2
+# Optional: enables live market data + free news headlines. Research remains
+# blocked when a licensed/eligible real-data source is unavailable.
 yfinance>=0.2

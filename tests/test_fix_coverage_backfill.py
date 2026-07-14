@@ -27,7 +27,11 @@ def _client():
 # (a) provenance gate branches
 # --------------------------------------------------------------------------- #
 def test_provenance_universe_pure_real_mode():
-    instruments = [SimpleNamespace(source="upload"), SimpleNamespace(source="live")]
+    frame = {"close": price_series(days=90)}
+    instruments = [
+        SimpleNamespace(source="upload", df=frame, price_provider=""),
+        SimpleNamespace(source="live", df=frame, price_provider=""),
+    ]
 
     result = provenance.universe(instruments)
 
@@ -40,7 +44,14 @@ def test_provenance_universe_pure_real_mode():
 
 
 def test_provenance_universe_invalid_for_research_without_eligible_sources():
-    for instruments in ([], [SimpleNamespace(source="missing"), SimpleNamespace(source="unknown")]):
+    empty_frame = {"close": price_series(days=0)}
+    for instruments in (
+        [],
+        [
+            SimpleNamespace(source="missing", df=empty_frame),
+            SimpleNamespace(source="unknown", df=empty_frame),
+        ],
+    ):
         result = provenance.universe(instruments)
 
         assert result["data_mode"] == "invalid_for_research"
@@ -59,9 +70,9 @@ def test_provenance_instrument_blocked_for_unknown_source():
     assert result["required_action"] == provenance.DEMO_ACTION
     assert result["warnings"] == [result["reason"]]
 
-    # Real source with too little history stays "real" but is not eligible.
+    # A real source with too little history remains blocked until quality passes.
     short = provenance.instrument("upload", history_days=10, min_history=60)
-    assert short["data_mode"] == "real"
+    assert short["data_mode"] == "invalid_for_research"
     assert short["eligible_for_real_research"] is False
     assert "60 sessions" in short["reason"]
 
@@ -81,7 +92,7 @@ def test_provenance_portfolio_mixed_with_partially_real_weight():
     assert result["non_real_weight_pct"] == 40.0
     assert result["required_action"] == provenance.DEMO_ACTION
     assert result["missing_tickers"] == ["NOHIST9"]
-    assert any("simulated" in w for w in result["warnings"])
+    assert any("lacks retained market prices" in w for w in result["warnings"])
     assert any("NOHIST9" in w for w in result["warnings"])
 
 
@@ -152,7 +163,12 @@ def test_xlsx_named_non_zip_bytes_rejected():
 # --------------------------------------------------------------------------- #
 def test_signals_evaluate_emits_sell_on_bearish_evidence():
     close = price_series(days=300, daily=-0.002)
-    forecast_result = {"expected_return_pct": -4.0, "horizon_days": 21, "prob_up": 0.25, "quality": {}}
+    forecast_result = {
+        "expected_return_pct": -4.0,
+        "horizon_days": 21,
+        "prob_up": 0.25,
+        "quality": {"directional_accuracy": 0.70, "n_test": 100},
+    }
     sentiment_result = {"aggregate_score": -0.6, "aggregate_label": "negative", "count": 4}
 
     sig = signals.evaluate(close, forecast_result, sentiment_result)

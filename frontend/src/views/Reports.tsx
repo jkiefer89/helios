@@ -31,6 +31,7 @@ export function Reports({
   const [target, setTarget] = useState(defaultTarget);
   const { payload, error, isLoading, load, isCurrentTarget } = useViewFetch<ReportResponse>({ failureMessage: "Report build failed." });
   const [journalEntries, setJournalEntries] = useState<SignalJournalEntry[]>([]);
+  const [journalError, setJournalError] = useState("");
   const [snapshots, setSnapshots] = useState<ReportSnapshot[]>([]);
   const [snapshotError, setSnapshotError] = useState("");
   const [savingSnapshot, setSavingSnapshot] = useState(false);
@@ -94,19 +95,25 @@ export function Reports({
     void loadSnapshots();
   }, [loadSnapshots]);
 
-  useEffect(() => {
+  const loadJournal = useCallback(() => {
     let cancelled = false;
     api.signalJournal()
       .then((journal) => {
-        if (!cancelled) setJournalEntries(journal.entries);
+        if (!cancelled) {
+          setJournalEntries(journal.entries);
+          setJournalError("");
+        }
       })
-      .catch(() => {
-        if (!cancelled) setJournalEntries([]);
+      .catch((err) => {
+        if (!cancelled) {
+          setJournalEntries([]);
+          setJournalError(err instanceof Error ? err.message : "Signal Journal unavailable.");
+        }
       });
-    return () => {
-      cancelled = true;
-    };
-  }, [payload]);
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => loadJournal(), [loadJournal, payload]);
 
   const saveSnapshot = async () => {
     const [kind, id] = target.split(":");
@@ -160,8 +167,8 @@ export function Reports({
         </div>
       </Panel>
       {error && <div className="notice danger" role="alert">{error}</div>}
-      {snapshotError && <div className="notice warning no-print" role="alert">{snapshotError}</div>}
-      <SignalJournalPanel entries={journalEntries} />
+      {snapshotError && <div className="notice warning no-print" role="alert">{snapshotError} <button type="button" onClick={() => void loadSnapshots()}>Retry history</button></div>}
+      <SignalJournalPanel entries={journalEntries} error={journalError} onRetry={() => { loadJournal(); }} />
       <ReportHistoryPanel snapshots={snapshots} storage={snapshotStorage} />
       {isLoading ? (
         <div className="loading" role="status">Building the analysis-only report preview...</div>
@@ -180,50 +187,56 @@ function ReportHistoryPanel({ snapshots, storage }: { snapshots: ReportSnapshot[
       {snapshots.length === 0 ? (
         <EmptyState title="No saved report snapshots" body="Build a report and save a snapshot to preserve the evidence pack with provenance." />
       ) : (
-        <div className="terminal-table report-history-table" tabIndex={0} aria-label="Saved report snapshots">
-          <div className="terminal-table__head">
-            <span>Saved</span><span>Report Version</span><span>Source</span><span>Input Range</span><span>Audit Trail</span><span>Exports</span>
-          </div>
-          {snapshots.slice(0, 12).map((snapshot) => (
-            <div className="table-row" key={snapshot.id}>
-              <span>{fmtTimestamp(snapshot.created_at)}</span>
-              <span><strong>{snapshot.version_label || "v1"} · {snapshot.title}</strong><small>{snapshot.prepared_for || snapshot.target_name} · {snapshot.target_kind} · {snapshot.target_id}</small></span>
-              <span>{snapshot.source || "unknown"}<small>{formatSourceCounts(snapshot.source_counts)}</small></span>
-              <span>{snapshot.first_date || "—"} → {snapshot.last_date || "—"}<small>{snapshot.row_count} rows</small></span>
-              <span>{snapshot.audit_trail?.length || 0} events<small>{snapshot.ai_narrative_included ? "AI included" : snapshot.ai_narrative_status || "AI not included"}</small></span>
-              <span className="report-export-links">
-                <a href={snapshot.html_url} target="_blank" rel="noreferrer">HTML Snapshot</a>
-                <a href={snapshot.pdf_url}>PDF Export</a>
-              </span>
-            </div>
-          ))}
+        <div className="terminal-table terminal-data-table-shell" tabIndex={0} aria-label="Scrollable saved report snapshots">
+          <table className="terminal-data-table report-history-data-table" aria-label="Saved report snapshots">
+            <thead><tr>
+              <th scope="col">Saved</th><th scope="col">Report Version</th><th scope="col">Package</th><th scope="col">Research Status</th><th scope="col">Source</th><th scope="col">Input Range</th><th scope="col">Audit Trail</th><th scope="col">Exports</th>
+            </tr></thead>
+            <tbody>{snapshots.slice(0, 12).map((snapshot) => (
+              <tr key={snapshot.id}>
+                <td>{fmtTimestamp(snapshot.created_at)}</td>
+                <th scope="row"><strong>{snapshot.version_label || "v1"} · {snapshot.title}</strong><small>{snapshot.prepared_for || snapshot.target_name} · {snapshot.target_kind} · {snapshot.target_id}</small></th>
+                <td>{titleCase(snapshot.report_package || "report snapshot")}<small>{titleCase(snapshot.report_purpose || "advisor review")}</small></td>
+                <td><strong>{snapshot.eligible_for_real_research ? "Research ready" : "Not eligible"}</strong><small>{snapshot.display_label || titleCase(snapshot.data_mode)}</small></td>
+                <td>{snapshot.source || "unknown"}<small>{formatSourceCounts(snapshot.source_counts)}</small></td>
+                <td>{snapshot.first_date || "—"} → {snapshot.last_date || "—"}<small>{snapshot.row_count} rows</small></td>
+                <td>{snapshot.audit_trail?.length || 0} events<small>{snapshot.ai_narrative_included ? "AI included" : snapshot.ai_narrative_status || "AI not included"}</small></td>
+                <td className="report-export-links">
+                  <a href={snapshot.html_url} target="_blank" rel="noreferrer">HTML Snapshot</a>
+                  <a href={snapshot.pdf_url}>PDF Export</a>
+                </td>
+              </tr>
+            ))}</tbody>
+          </table>
         </div>
       )}
     </Panel>
   );
 }
 
-function SignalJournalPanel({ entries }: { entries: SignalJournalEntry[] }) {
+function SignalJournalPanel({ entries, error, onRetry }: { entries: SignalJournalEntry[]; error: string; onRetry: () => void }) {
   return (
     <Panel title="Signal Journal" meta="Paper tracking only" className="no-print signal-journal-panel">
-      {entries.length === 0 ? (
+      {error ? (
+        <div className="notice warning" role="alert">{error} <button type="button" onClick={onRetry}>Retry journal</button></div>
+      ) : entries.length === 0 ? (
         <EmptyState title="No signals logged yet" body="Run an instrument or model analysis to start tracking forward paper results." />
       ) : (
-        <div className="terminal-table signal-journal-table" tabIndex={0} aria-label="Signal Journal paper performance table">
-          <div className="terminal-table__head">
-            <span>Date</span><span>Target</span><span>Action</span><span>Score</span><span>Input Range</span><span>Benchmark</span><span>Forward Result</span>
-          </div>
-          {entries.slice(0, 12).map((entry) => (
-            <div className="table-row" key={entry.id}>
-              <span>{fmtTimestamp(entry.created_at)}</span>
-              <span><strong>{entry.target_name}</strong><small>{entry.target_kind} · {entry.target_id}</small></span>
-              <span>{entry.action_label}</span>
-              <span>{fmtNumber(entry.score, 2)}</span>
-              <span>{entry.input_start_date} → {entry.input_end_date}<small>{entry.input_rows} rows · {entry.horizon_days}d</small></span>
-              <span>{entry.benchmark || "—"}</span>
-              <span>{entry.forward_status === "measured" ? fmtPct(entry.forward_result_pct) : "Pending"}<small>{entry.alpha_pct == null ? "" : `Alpha ${fmtPct(entry.alpha_pct)}`}</small></span>
-            </div>
-          ))}
+        <div className="terminal-table terminal-data-table-shell" tabIndex={0} aria-label="Scrollable Signal Journal paper performance">
+          <table className="terminal-data-table report-signal-journal-data-table">
+            <thead><tr><th scope="col">Date</th><th scope="col">Target</th><th scope="col">Action</th><th scope="col">Score</th><th scope="col">Input Range</th><th scope="col">Benchmark</th><th scope="col">Forward Result</th></tr></thead>
+            <tbody>{entries.slice(0, 12).map((entry) => (
+              <tr key={entry.id}>
+                <td>{fmtTimestamp(entry.created_at)}</td>
+                <th scope="row"><strong>{entry.target_name}</strong><small>{entry.target_kind} · {entry.target_id}</small></th>
+                <td>{entry.action_label}</td>
+                <td>{fmtNumber(entry.score, 2)}</td>
+                <td>{entry.input_start_date} → {entry.input_end_date}<small>{entry.input_rows} rows · {entry.horizon_days}d</small></td>
+                <td>{entry.benchmark || "—"}</td>
+                <td>{entry.forward_status === "measured" ? fmtPct(entry.forward_result_pct) : "Pending"}<small>{entry.alpha_pct == null ? "" : `Alpha ${fmtPct(entry.alpha_pct)}`}</small></td>
+              </tr>
+            ))}</tbody>
+          </table>
         </div>
       )}
     </Panel>
@@ -373,11 +386,13 @@ function ReportValue({ value, labelKey = "" }: { value: unknown; labelKey?: stri
 }
 
 function reportTitle(payload: ReportResponse) {
-  const lowerTitle = payload.title.toLowerCase();
   const mode = String(payload.data_mode || payload.data_provenance?.data_mode || "").toLowerCase();
   const label = String(payload.display_label || payload.data_provenance?.display_label || "").toLowerCase();
   if (mode === "invalid_for_research" || label.includes("blocked")) return "Data Quality Blocked — Upload Real History";
-  if (mode === "demo" && !lowerTitle.includes("demo report")) return `Demo Report — Not Real Market Evidence: ${payload.title}`;
+  if (mode === "demo" || mode === "sample" || mode === "simulated") {
+    return `Not Real Market Evidence — ${payload.title}`;
+  }
+  if (mode === "mixed") return `Mixed Data — Research Ineligible — ${payload.title}`;
   return payload.title;
 }
 

@@ -2,6 +2,7 @@ from io import BytesIO
 
 import numpy as np
 import pandas as pd
+import pytest
 
 import app as helios
 from tests.conftest import price_csv, price_series
@@ -38,6 +39,30 @@ def test_strategy_costs_and_slippage_reduce_total_return():
     assert costly["assumptions"]["round_trip_cost_bps"] == 70
 
 
+def test_strategy_charges_terminal_exit_and_closes_last_episode(monkeypatch):
+    from engine.strategy import analyze_strategy
+
+    close = pd.Series(
+        np.full(80, 100.0),
+        index=pd.bdate_range("2024-01-02", periods=80),
+        name="close",
+    )
+    monkeypatch.setattr(
+        "engine.strategy.signals.historical_signals",
+        lambda px: pd.Series(np.ones(len(px)), index=px.index),
+    )
+
+    result = analyze_strategy(close, cost_bps=100, slippage_bps=0)
+
+    assert result["trade_stats"]["turnover"] == 2.0
+    assert result["trade_stats"]["completed_trades"] == 1
+    assert result["trade_stats"]["open_position_episode_return_pct"] is None
+    assert result["trade_stats"]["current_position"] == "long"
+    assert result["trade_stats"]["evaluation_end_position"] == "cash"
+    assert result["trade_stats"]["terminal_liquidation_applied"] is True
+    assert result["strategy"]["total_return_pct"] == pytest.approx(-1.99)
+
+
 def test_strategy_drawdown_curve_uses_negative_percentage_convention():
     from engine.strategy import analyze_strategy
 
@@ -64,11 +89,21 @@ def test_rolling_sharpe_is_null_for_near_zero_variance_windows():
     assert np.isfinite(_rolling_sharpe(real).iloc[63:]).all()
 
 
-def test_strategy_rolling_sharpe_has_no_degenerate_outliers_on_demo_data(monkeypatch):
+def test_strategy_rolling_sharpe_has_no_degenerate_outliers_on_uploaded_data(monkeypatch):
     monkeypatch.setattr("engine.data.HAS_YF", False)
     client = _client()
+    upload = client.post(
+        "/api/upload",
+        data={
+            "file": (BytesIO(price_csv(days=260)), "ROLL.csv"),
+            "symbol": "ROLL",
+            "name": "Rolling evidence",
+        },
+        content_type="multipart/form-data",
+    )
+    assert upload.status_code == 200
 
-    resp = client.get("/api/strategy/analyze?ticker=AAPL")
+    resp = client.get("/api/strategy/analyze?ticker=ROLL")
     assert resp.status_code == 200
     curve = resp.get_json()["rolling_sharpe_curve"]
     finite = [v for v in curve if v is not None]
@@ -77,7 +112,7 @@ def test_strategy_rolling_sharpe_has_no_degenerate_outliers_on_demo_data(monkeyp
     assert all(abs(v) < 100 for v in finite)
 
 
-def test_strategy_endpoint_labels_sample_data_as_demo_not_real_evidence(monkeypatch):
+def test_strategy_endpoint_blocks_ineligible_history(monkeypatch):
     monkeypatch.setattr("engine.data.HAS_YF", False)
     client = _client()
 
@@ -85,11 +120,12 @@ def test_strategy_endpoint_labels_sample_data_as_demo_not_real_evidence(monkeypa
     assert instrument.status_code == 200
     ibody = instrument.get_json()
     assert ibody["symbol"] == "AAPL"
-    assert "beat_benchmark" in ibody
+    assert "beat_benchmark" not in ibody
+    assert "strategy" not in ibody
     assert ibody["methodology"]["no_lookahead"] is True
     assert ibody["eligible_for_real_research"] is False
-    assert ibody["data_mode"] == "demo"
-    assert "demo strategy result" in ibody["display_label"].lower()
+    assert ibody["data_mode"] == "invalid_for_research"
+    assert "research blocked" in ibody["display_label"].lower()
 
 
 def test_strategy_endpoints_work_with_uploaded_real_instrument_and_model(monkeypatch):

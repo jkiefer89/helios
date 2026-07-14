@@ -104,7 +104,7 @@ def test_walk_forward_windows_match_per_prefix_reference():
         prefix = px.iloc[: idx + 1]
         expected_score = round(float(signals._historical_signals_loop(prefix).iloc[-1]), 4)
         assert row["signal_score"] == expected_score
-        assert row["input_rows"] == idx + 1
+        assert row["input_rows"] == min(126, idx + 1)
         expected_regime = str(regime.classify_regime(bench.loc[:signal_date]).get("label") or "neutral")
         assert row["regime"] == expected_regime
 

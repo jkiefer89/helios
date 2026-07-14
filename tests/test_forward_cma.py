@@ -274,7 +274,7 @@ def client():
 def test_endpoint_model_forward(client):
     portfolio.register(portfolio.Model(id="MFWD", name="Fwd Model", mandate_key="balanced",
                                        mandate_context="", holdings=[portfolio.Holding("VEQ", 1.0)]))
-    body = client.get("/api/model/forward?id=MFWD").get_json()
+    body = client.post("/api/model/forward?id=MFWD").get_json()
     fr = body["forward_return"]
     assert fr["coverage_pct"] == 100.0
     assert fr["method"] == "building_block_cma"
@@ -285,7 +285,7 @@ def test_endpoint_model_forward(client):
 
 
 def test_endpoint_model_forward_unknown(client):
-    assert client.get("/api/model/forward?id=NOPE").status_code == 404
+    assert client.post("/api/model/forward?id=NOPE").status_code == 404
 
 
 def test_forward_enriches_cusip_only_holdings_via_figi(client):
@@ -299,7 +299,7 @@ def test_forward_enriches_cusip_only_holdings_via_figi(client):
                                                           "earnings_growth": 0.25, "sector": "Technology"}}.get(t.upper(), {}))
     portfolio.register(portfolio.Model(id="MCUS", name="Cusip Model", mandate_key="balanced",
                                        mandate_context="", holdings=[portfolio.Holding("VCUS", 1.0)]))
-    fr = client.get("/api/model/forward?id=MCUS").get_json()["forward_return"]
+    fr = client.post("/api/model/forward?id=MCUS").get_json()["forward_return"]
     assert fr["coverage_pct"] == 100.0 and fr["n_usable"] == 1
     assert any(c["ticker"] == "NVDA" and c["basis"] == "fundamentals" for c in fr["top_contributions"])
 

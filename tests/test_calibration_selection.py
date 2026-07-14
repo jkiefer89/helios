@@ -16,7 +16,11 @@ def _signal_xy(n=400, noise=0.01, seed=7):
 
 def test_calibration_rewards_informative_models_only():
     X, y = _signal_xy()
-    cal = forecast._evaluate(X, y)["calibration"]
+    evaluated = forecast._evaluate(X, y)
+    cal = evaluated["calibration"]
+    assert evaluated["evaluation_method"] == "rolling_origin_expanding"
+    assert evaluated["initial_train_size"] >= 60
+    assert evaluated["refit_interval"] == 5
     assert cal["status"] == "ok"
     assert cal["brier_score"] < 0.25            # beats the coin
     assert cal["brier_skill"] > 0.3

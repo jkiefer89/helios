@@ -1,4 +1,5 @@
-export type DataMode = "demo" | "real" | "mixed" | "invalid_for_research" | string;
+export type DataMode = "real" | "mixed" | "invalid_for_research" | string;
+export type ResearchState = "no_data" | "invalid" | "stale" | "mixed" | "blocked" | "ready";
 
 export interface DataQuality {
   data_mode?: DataMode;
@@ -590,6 +591,39 @@ export interface CommandCenterResponse extends ProvenancePayload {
   top_risks: CommandItem[];
   model_alerts: ModelAlert[];
   research_queue: ResearchQueueItem[];
+  readiness: {
+    state: ResearchState;
+    ready: boolean;
+    summary: string;
+    checks: Array<{
+      key: string;
+      label: string;
+      passed: boolean;
+      detail: string;
+      view: string;
+    }>;
+  };
+  blockers: Array<{
+    id: string;
+    severity: string;
+    title: string;
+    detail: string;
+    required_action: string;
+    view: string;
+  }>;
+  recent_changes: Array<{
+    id: string;
+    kind: string;
+    title: string;
+    detail: string;
+    created_at: string;
+    view: string;
+  }>;
+  next_action: {
+    label: string;
+    detail: string;
+    view: string;
+  };
   generated_at: string;
 }
 
@@ -847,6 +881,7 @@ export interface EvidenceLabWindow {
   forward_end_date: string;
   input_start_date: string;
   input_rows: number;
+  validation_method: "rolling" | "anchored" | string;
   horizon_days: number;
   signal_score: number;
   action_label: string;
@@ -927,8 +962,26 @@ export interface EvidenceProspectiveValidation {
 export interface EvidenceLabResponse extends ProvenancePayload {
   target: { kind: "instrument" | "model" | string; id: string; name: string; mandate?: string; source?: string };
   benchmark: { symbol: string; status: string };
-  parameters: { horizon_days?: number; train_window?: number; step?: number; decay_horizons?: number[] };
+  parameters: { horizon_days?: number; train_window?: number; step?: number; decay_horizons?: number[]; validation_methods?: string[] };
   summary: EvidenceLabSummary;
+  validation_methods: Record<"rolling" | "anchored", {
+    mode: string;
+    training_policy: string;
+    summary: EvidenceLabSummary;
+    confidence_bands: {
+      alpha_pct: EvidenceConfidenceBand;
+      hit_rate_pct: EvidenceConfidenceBand;
+    };
+    regime_sensitivity: Array<{
+      regime: string;
+      count: number;
+      hit_rate_pct?: number | null;
+      avg_alpha_pct?: number | null;
+      avg_alpha_after_default_costs_pct?: number | null;
+      avg_forward_result_pct?: number | null;
+      false_positive_rate_pct?: number | null;
+    }>;
+  }>;
   false_positives: {
     count: number;
     rate_pct?: number | null;
@@ -949,6 +1002,25 @@ export interface EvidenceLabResponse extends ProvenancePayload {
     avg_forward_result_pct?: number | null;
     false_positive_rate_pct?: number | null;
   }>;
+  regime_robustness: {
+    status: string;
+    passed: boolean;
+    coverage_passed: boolean;
+    performance_consistent: boolean;
+    false_positive_control: boolean;
+    covered_regimes: number;
+    required_regimes: number;
+    min_windows_per_regime: number;
+    worst_net_alpha_pct?: number | null;
+    worst_false_positive_rate_pct?: number | null;
+    basis: string;
+  };
+  multiplicity: {
+    evaluated_horizons: number;
+    familywise_alpha: number;
+    bonferroni_alpha?: number | null;
+    selection_warning?: string;
+  };
   decay: Array<{
     horizon_days: number;
     measured_count: number;
@@ -1211,12 +1283,21 @@ export interface SignalJournalEntry {
   evaluated_at?: string | null;
 }
 
+export interface SignalRecordResponse {
+  signal_journal_entry: SignalJournalEntry | Record<string, unknown>;
+  disclaimer: string;
+}
+
 export interface SignalJournalSummary {
   total_count: number;
+  outcome_count: number;
   measured_count: number;
   pending_count: number;
   hit_count: number;
   hit_rate_pct?: number | null;
+  hold_measured_count: number;
+  hold_preserved_count: number;
+  hold_preservation_rate_pct?: number | null;
   avg_score?: number | null;
   avg_forward_result_pct?: number | null;
   avg_benchmark_result_pct?: number | null;
@@ -1229,6 +1310,7 @@ export interface SignalJournalSummary {
 
 export interface SignalJournalBenchmarkComparison {
   benchmark: string;
+  outcome_count?: number;
   measured_count: number;
   avg_forward_result_pct?: number | null;
   avg_benchmark_result_pct?: number | null;
@@ -1242,8 +1324,10 @@ export interface SignalJournalModelEvidence {
   target_name: string;
   signal_count: number;
   measured_count: number;
+  outcome_count?: number;
   pending_count: number;
   hit_rate_pct?: number | null;
+  hold_preservation_rate_pct?: number | null;
   avg_score?: number | null;
   avg_alpha_pct?: number | null;
   avg_alpha_after_default_costs_pct?: number | null;
@@ -1270,8 +1354,11 @@ export interface SignalJournalDriftPoint {
   benchmark_result_pct?: number | null;
   alpha_pct?: number | null;
   paper_hit?: boolean | null;
+  hold_preserved?: boolean | null;
   cumulative_measured_count: number;
   cumulative_hit_rate_pct?: number | null;
+  cumulative_hold_measured_count?: number;
+  cumulative_hold_preservation_rate_pct?: number | null;
   cumulative_avg_alpha_pct?: number | null;
 }
 
@@ -1562,7 +1649,7 @@ export interface AnalysisResponse {
   provenance?: Record<string, unknown>;
   // Engine-issued provenance verdict (same shape as /api/live). Optional for
   // backward compatibility with older cached responses; when present it is
-  // authoritative and the client must not re-derive the demo/real gate.
+  // authoritative and the client must not re-derive provenance eligibility.
   data_provenance?: DataQuality;
   mandate?: AnalysisMandate;
   horizon?: AnalysisHorizon;
@@ -1776,4 +1863,261 @@ export interface DataJobsResponse {
   vault_recent: Array<{ id: number; provider: string; endpoint: string; symbol: string; retrieved_at: string }>;
   price_revisions_recent: Array<{ symbol: string; bar_date: string; old_close: number; new_close: number; change_pct: number; observed_at: string }>;
   basis: string;
+}
+
+export interface TrialProtocol {
+  hypothesis: string;
+  primary_metric: string;
+  horizon_days: number;
+  step_days: number;
+  benchmark: string;
+  cost_assumptions: {
+    commission_bps_per_side: number;
+    spread_bps_per_side: number;
+    slippage_bps_per_side: number;
+    market_impact_bps_per_side: number;
+    tax_drag_bps: number;
+    idle_cash_pct: number;
+  };
+  success_thresholds: {
+    min_observations: number;
+    min_hit_rate_pct: number;
+    min_net_alpha_pct: number;
+    max_false_positive_rate_pct: number;
+    confidence_level_pct: number;
+  };
+  regimes: string[];
+  owner: string;
+  allowed_sources: string[];
+  freshness_days: number;
+  expected_aum_usd: number;
+  max_position_pct: number;
+  max_adv_participation_pct: number;
+  planned_variants: string[];
+  deleted_variants: string[];
+}
+
+export interface TrialImplementationLayer {
+  status: string;
+  measured_count?: number;
+  scheduled_count?: number;
+  decision_count?: number;
+  linked_fill_count?: number;
+  linked_decision_count?: number;
+  avg_net_directional_alpha_pct?: number | null;
+  observed_notional_usd?: number;
+  observed_fees_usd?: number;
+  observed_fee_bps?: number | null;
+  observed_shortfall_bps?: number | null;
+  cost_basis?: string;
+  observed_components?: string[];
+  modeled_components?: string[];
+  unobserved_components?: string[];
+}
+
+export interface ProspectiveTrialAssessment {
+  state: string;
+  passed: boolean;
+  checks: Record<string, boolean>;
+  observations: {
+    scheduled_count: number;
+    measured_directional_count: number;
+    pending_count: number;
+    hold_count: number;
+  };
+  metrics: {
+    directional_hit_rate_pct?: number | null;
+    avg_net_directional_alpha_pct?: number | null;
+    false_positive_rate_pct?: number | null;
+    hit_rate_confidence_interval_pct: { low?: number | null; high?: number | null };
+  };
+  multiplicity: {
+    declared_variant_count: number;
+    familywise_alpha: number;
+    bonferroni_alpha: number;
+    adjusted_confidence_pct: number;
+    enforced_in_confidence_check: boolean;
+    deleted_variants: string[];
+  };
+  regime_robustness: {
+    status: string;
+    coverage_passed: boolean;
+    performance_passed: boolean;
+    minimum_observations_per_regime: number;
+    rows: Array<{
+      regime: string;
+      count: number;
+      avg_net_directional_alpha_pct?: number | null;
+      false_positive_rate_pct?: number | null;
+      coverage_passed: boolean;
+      performance_passed: boolean;
+    }>;
+    basis: string;
+  };
+  implementation_evidence: {
+    paper: TrialImplementationLayer;
+    proposed: TrialImplementationLayer;
+    actual: TrialImplementationLayer;
+    analysis_only: boolean;
+    no_execution: boolean;
+  };
+  capacity: Record<string, unknown> & { passed?: boolean; status?: string; expected_aum_usd?: number };
+}
+
+export interface ProspectiveTrial {
+  trial_id: string;
+  created_at: string;
+  actor: string;
+  target_kind: "instrument" | "model";
+  target_id: string;
+  model_version: number;
+  starts_on: string;
+  status: string;
+  closed_at?: string;
+  close_note?: string;
+  protocol: TrialProtocol;
+  protocol_hash: string;
+  registration_snapshot_hash: string;
+  assessment: ProspectiveTrialAssessment;
+}
+
+export interface ProspectiveTrialsResponse {
+  trials: ProspectiveTrial[];
+  storage_available: boolean;
+  disclaimer: string;
+}
+
+export interface ProviderControl {
+  key: string;
+  name: string;
+  domains: string[];
+  configured: boolean;
+  licensed: boolean;
+  entitled: boolean;
+  sla_owner: string;
+  research_only: boolean;
+  institutional_ready: boolean;
+  roles: string[];
+}
+
+export interface ProviderCutover {
+  cutover_id: string;
+  created_at: string;
+  data_domain: string;
+  primary_provider: string;
+  backup_provider: string;
+  reconciliation_id: string;
+  status: string;
+  note: string;
+}
+
+export interface ProviderReconciliation {
+  reconciliation_id: string;
+  created_at: string;
+  data_domain: string;
+  primary_provider: string;
+  backup_provider: string;
+  symbol_count: number;
+  compared_count: number;
+  mismatch_count: number;
+  max_abs_difference_pct: number | null;
+  status: string;
+  note: string;
+}
+
+export interface ProvidersResponse {
+  controls_required: boolean;
+  providers: ProviderControl[];
+  cutovers: ProviderCutover[];
+  reconciliations: ProviderReconciliation[];
+  reconciliation_policy: {
+    minimum_symbol_count: number;
+    maximum_age_days: number;
+    maximum_absolute_difference_pct: number;
+    evidence_origin: "server_fetch" | string;
+  };
+  disclaimer: string;
+}
+
+export interface OperationalIncident {
+  incident_id: string;
+  category: string;
+  severity: string;
+  target: string;
+  detail: string;
+  status: string;
+  owner: string;
+  updated_at: string;
+}
+
+export interface OperationsStatusResponse {
+  incidents: OperationalIncident[];
+  summary: { open: number; acknowledged: number; critical: number };
+  incident_owner: string;
+  notification_adapter: { configured: boolean; mode: string; automatic_delivery: boolean };
+  backup: { count?: number; latest?: string; encrypted?: boolean; warning?: string };
+  latest_backup_verification: {
+    created_at: string;
+    outcome: string;
+    details: { passed?: boolean; isolated_restore_tested?: boolean; live_data_mutated?: boolean };
+  } | null;
+  audit_chain: { status: string; entries?: number; total_entries?: number; warning?: string };
+  privileged_chain: { status: string; entries?: number; total_entries?: number; warning?: string };
+}
+
+export interface SecurityStatusResponse {
+  principal: { user: string; roles: string[]; auth_method: string; mfa_verified: boolean };
+  authentication: {
+    enabled: boolean;
+    sso_enabled: boolean;
+    mfa_required_for_privileged_actions: boolean;
+    session_idle_seconds: number;
+    session_absolute_seconds: number;
+  };
+  transport: { trusted_tls_asserted: boolean; trusted_hosts_configured: boolean; trusted_proxy_count: number };
+  audit: {
+    privileged_chain: OperationsStatusResponse["privileged_chain"];
+    application_chain: OperationsStatusResponse["audit_chain"];
+  };
+  external_requirements: string[];
+}
+
+export interface IndependentValidationReview {
+  review_id: string;
+  model_id: string;
+  model_version: number;
+  sponsor: string;
+  validator: string;
+  outcome: string;
+  reviewed_at: string;
+  next_review_due: string;
+  controls: Record<string, unknown>;
+  findings: unknown[];
+  note: string;
+}
+
+export interface IndependentValidationException {
+  exception_id: string;
+  model_id: string;
+  model_version: number;
+  control_key: string;
+  owner: string;
+  approver: string;
+  reason: string;
+  compensating_controls: string[];
+  expires_at: string;
+  status: string;
+}
+
+export interface IndependentValidationResponse {
+  status: {
+    passed: boolean;
+    state: string;
+    model_id: string;
+    model_version: number;
+    detail: string;
+    required_action: string;
+  };
+  reviews: IndependentValidationReview[];
+  exceptions: IndependentValidationException[];
 }

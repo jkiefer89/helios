@@ -17,10 +17,16 @@ DISCLAIMER = (
 
 def instrument_report(inst) -> dict:
     close = inst.df["close"].dropna()
-    p = provenance.instrument(inst.source, len(close))
+    p = provenance.instrument(
+        inst.source, len(close), price_provider=getattr(inst, "price_provider", ""),
+    )
     fc = forecast.forecast(close, horizon=21, n_paths=700)
     sent = sentiment.score_headlines(inst.headlines)
-    fwd = cma.instrument_forward(inst.symbol, fundamentals.fetch(inst.symbol))
+    cached_fundamentals = fundamentals.fetch_cached(inst.symbol) or fundamentals.Fundamentals(
+        ticker=inst.symbol,
+        source="none",
+    )
+    fwd = cma.instrument_forward(inst.symbol, cached_fundamentals)
     sig = signals.evaluate(close, fc, sent, history_days=len(close), fundamental_result=fwd)
     try:
         st = strategy.analyze_strategy(close)
@@ -53,8 +59,8 @@ def instrument_report(inst) -> dict:
     warnings = list(scored["warnings"])
     if strategy_note:
         warnings.append(strategy_note)
-    if inst.source == "sample":
-        warnings.append("This report uses bundled sample data; verify with current client/live data before use.")
+    if not provenance.is_real_source(inst.source):
+        warnings.append("This report is blocked because the history is not an eligible live or uploaded source.")
     return _base_report(
         kind="instrument",
         identity={"symbol": inst.symbol, "name": inst.name, "source": inst.source},
@@ -105,7 +111,7 @@ def model_report(model: portfolio.Model) -> dict:
             "display_label": clinic.get("display_label", "Data Quality Blocked"),
             "eligible_for_real_research": False,
             "reason": clinic.get("reason", "Model data quality is blocked."),
-            "required_action": clinic.get("required_action", provenance.DEMO_ACTION),
+            "required_action": clinic.get("required_action", provenance.RESEARCH_DATA_ACTION),
             "missing_tickers": clinic.get("missing_tickers", []),
             "warnings": clinic.get("warnings", []),
             "source_weight_pct": clinic.get("data_provenance", {}).get("source_weight_pct", {}),
@@ -116,7 +122,7 @@ def model_report(model: portfolio.Model) -> dict:
             sections={
                 "executive_summary": {
                     "headline": "Data quality blocked",
-                    "summary": "Helios will not generate advisor evidence from sample, simulated, or missing prices.",
+                    "summary": "Helios will not generate advisor evidence from ineligible or missing prices.",
                 },
                 "data_quality": p,
                 "clinic": {
@@ -281,8 +287,6 @@ def _last_refresh(symbol: str) -> dict | None:
 
 def _title(kind: str, identity: dict, data_quality: dict) -> str:
     name = identity.get("name") or identity.get("symbol") or identity.get("id") or kind
-    if data_quality.get("data_mode") == "demo":
-        return f"Demo Report — Not Real Market Evidence: {name}"
     if data_quality.get("data_mode") == "invalid_for_research":
         return f"Data Quality Blocked — Upload Real History: {name}"
     if data_quality.get("data_mode") == "mixed":
@@ -323,6 +327,6 @@ def _assumptions() -> dict:
             "Confirm data source and date range.",
             "Review Strategy Lab after costs and slippage.",
             "Document risks that would invalidate the recommendation.",
-            "For models, inspect Portfolio Clinic suggestions and simulated-data caveats.",
+            "For models, inspect Portfolio Clinic suggestions and data-quality caveats.",
         ],
     }

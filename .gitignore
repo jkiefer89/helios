@@ -15,6 +15,10 @@ logs/
 frontend/node_modules/
 frontend/dist/
 frontend/*.tsbuildinfo
+frontend/playwright-report/
+frontend/test-results/
+output/
+.claude/worktrees/
 
 # Client data (kept local, never published)
 *.numbers

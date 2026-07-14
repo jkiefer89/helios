@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import { api } from "../api/client";
-import type { ModelEditPreviewResponse, ModelGovernanceApprovalPacket, ModelGovernanceResponse, ModelGovernanceRow, ModelSummary, ModelTemplate, ModelValidationResponse, ModelValidationRow } from "../api/types";
+import type { IndependentValidationResponse, ModelEditPreviewResponse, ModelGovernanceApprovalPacket, ModelGovernanceResponse, ModelGovernanceRow, ModelSummary, ModelTemplate, ModelValidationResponse, ModelValidationRow } from "../api/types";
 import { Panel } from "../components/cards/Panel";
 import { EmptyState } from "../components/empty-states/EmptyState";
+import { TerminalSelect } from "../components/forms/TerminalSelect";
 import { fmtNumber, fmtPct } from "../utils/format";
 
 export function Models({
@@ -273,17 +274,16 @@ export function Models({
         {models.length === 0 ? (
           <EmptyState title="No models imported" body="Upload a model CSV or Excel file to unlock model diagnostics." />
         ) : (
-          <div className="terminal-table models-table" tabIndex={0} aria-label="Scrollable imported models table" onKeyDown={scrollTableByKey}>
-            <div className="terminal-table__head">
-              <span>Name</span><span>Mandate</span><span>Coverage</span><span>Missing</span><span>Actions</span>
-            </div>
-            {models.map((model) => (
-              <div className="table-row" key={model.id}>
-                <span><strong>{model.name}</strong><small>{model.id}</small></span>
-                <span>{model.mandate_label}</span>
-                <span>{model.real_coverage_count || 0}/{model.n_holdings}</span>
-                <span>{model.missing_tickers?.slice(0, 3).join(", ") || "None"}</span>
-                <span className="row-actions">
+          <div className="terminal-table terminal-data-table-shell" tabIndex={0} aria-label="Scrollable imported models table" onKeyDown={scrollTableByKey}>
+            <table className="terminal-data-table models-data-table">
+              <thead><tr><th scope="col">Name</th><th scope="col">Mandate</th><th scope="col">Coverage</th><th scope="col">Missing</th><th scope="col">Actions</th></tr></thead>
+              <tbody>{models.map((model) => (
+              <tr key={model.id}>
+                <th scope="row"><strong>{model.name}</strong><small>{model.id}</small></th>
+                <td>{model.mandate_label}</td>
+                <td>{model.real_coverage_count || 0}/{model.n_holdings}</td>
+                <td>{model.missing_tickers?.slice(0, 3).join(", ") || "None"}</td>
+                <td className="row-actions">
                   <button type="button" onClick={() => startEdit(model)}>Edit</button>
                   <button type="button" onClick={() => onOpenModel(model.id)}>Analysis</button>
                   <button type="button" onClick={() => onOpenClinic(model.id)}>Clinic</button>
@@ -297,9 +297,10 @@ export function Models({
                       {fetchingMissing === model.id ? "Fetching..." : "Fetch missing"}
                     </button>
                   )}
-                </span>
-              </div>
-            ))}
+                </td>
+              </tr>
+            ))}</tbody>
+            </table>
           </div>
         )}
       </Panel>
@@ -310,6 +311,7 @@ export function Models({
         modelCount={models.length}
         onRefresh={loadValidation}
       />
+      <IndependentValidationPanel models={models} />
       <Panel title="Model Editor" meta={editingModel ? editingModel.name : "native editing"}>
         {!editingModel ? (
           <EmptyState title="Select a model to edit" body="Change holdings and target weights directly from Imported Models, then preview governance breaches before saving." />
@@ -327,15 +329,17 @@ export function Models({
               </div>
             </div>
             {editorNotice && <div className="form-feedback" role="status">{editorNotice}</div>}
-            <div className="terminal-table model-editor-table" tabIndex={0} aria-label="Model Editor holdings table">
-              <div className="terminal-table__head"><span>Ticker</span><span>Target Weight</span><span>Action</span></div>
-              {editorRows.map((row, index) => (
-                <div className="table-row" key={`${index}-${row.ticker}`}>
-                  <input aria-label={`Ticker ${index + 1}`} value={row.ticker} onChange={(event) => updateEditorRow(index, { ticker: event.target.value })} />
-                  <input aria-label={`Target weight ${index + 1}`} value={row.weight_pct} inputMode="decimal" onChange={(event) => updateEditorRow(index, { weight_pct: event.target.value })} />
-                  <button type="button" onClick={() => removeEditorRow(index)} disabled={editorRows.length <= 1}>Remove</button>
-                </div>
-              ))}
+            <div className="terminal-table terminal-data-table-shell" tabIndex={0} aria-label="Scrollable Model Editor holdings">
+              <table className="terminal-data-table model-editor-data-table">
+                <thead><tr><th scope="col">Ticker</th><th scope="col">Target Weight</th><th scope="col">Action</th></tr></thead>
+                <tbody>{editorRows.map((row, index) => (
+                <tr key={`${index}-${row.ticker}`}>
+                  <td><input aria-label={`Ticker ${index + 1}`} value={row.ticker} onChange={(event) => updateEditorRow(index, { ticker: event.target.value })} /></td>
+                  <td><input aria-label={`Target weight ${index + 1}`} value={row.weight_pct} inputMode="decimal" onChange={(event) => updateEditorRow(index, { weight_pct: event.target.value })} /></td>
+                  <td><button type="button" onClick={() => removeEditorRow(index)} disabled={editorRows.length <= 1}>Remove</button></td>
+                </tr>
+              ))}</tbody>
+              </table>
             </div>
             <button className="side-secondary-action" type="button" onClick={addEditorRow}>Add holding</button>
             {editorPreview && (
@@ -432,22 +436,21 @@ export function Models({
               </div>
               <p>{governance.disclaimer}</p>
             </div>
-            <div className="terminal-table governance-table" tabIndex={0} aria-label="Scrollable model governance table" onKeyDown={scrollTableByKey}>
-              <div className="terminal-table__head">
-                <span>Model</span><span>Approval Status</span><span>Mandate / Risk Limits</span><span>Rebalance History</span><span>Archived Snapshots</span><span>Who changed what</span><span>Actions</span>
-              </div>
-              {governanceRows.map((row) => (
-                <div className="table-row governance-row" key={row.id}>
-                  <span><strong>{row.name}</strong><small>v{row.version} / {row.holdings_count} holdings / top {row.top_holding || "n/a"} {fmtPct(row.top_weight_pct)}</small></span>
-                  <span><b className={row.approval_status === "approved" ? "tone-positive" : "tone-warning"}>{formatStatus(row.approval_status)}</b><small>{row.approved_by || "Not approved"}</small></span>
-                  <span>
+            <div className="terminal-table terminal-data-table-shell" tabIndex={0} aria-label="Scrollable model governance table" onKeyDown={scrollTableByKey}>
+              <table className="terminal-data-table governance-data-table">
+                <thead><tr><th scope="col">Model</th><th scope="col">Approval Status</th><th scope="col">Mandate / Risk Limits</th><th scope="col">Rebalance History</th><th scope="col">Archived Snapshots</th><th scope="col">Who changed what</th><th scope="col">Actions</th></tr></thead>
+                <tbody>{governanceRows.map((row) => (
+                <tr className="governance-row" key={row.id}>
+                  <th scope="row"><strong>{row.name}</strong><small>v{row.version} / {row.holdings_count} holdings / top {row.top_holding || "n/a"} {fmtPct(row.top_weight_pct)}</small></th>
+                  <td><b className={row.approval_status === "approved" ? "tone-positive" : "tone-warning"}>{formatStatus(row.approval_status)}</b><small>{row.approved_by || "Not approved"}</small></td>
+                  <td>
                     <b className={row.risk_limit_state === "breach" ? "tone-warning" : "tone-positive"}>{row.can_approve ? formatStatus(row.risk_limit_state) : "Risk-limit blocked"}</b>
                     <small>{row.approval_blocked_reason || row.risk_limit_violations[0]?.message || `Single ${row.risk_limits.max_single_position_pct}% max / min ${row.risk_limits.min_holdings} holdings`}</small>
-                  </span>
-                  <span><b>{formatStatus(row.rebalance_status)}</b><small>{row.last_rebalance_at ? formatDate(row.last_rebalance_at) : `${row.rebalance_rules.frequency} / ${row.rebalance_rules.drift_band_pct}% band`}</small></span>
-                  <span><b>{row.snapshot_count}</b><small>{row.provenance.version ? `Template v${row.provenance.version}` : row.provenance.source_type}</small></span>
-                  <span><b>{row.updated_by || "No changes"}</b><small>{row.latest_change_note || "Add a change note before committee review."}</small></span>
-                  <span className="governance-actions">
+                  </td>
+                  <td><b>{formatStatus(row.rebalance_status)}</b><small>{row.last_rebalance_at ? formatDate(row.last_rebalance_at) : `${row.rebalance_rules.frequency} / ${row.rebalance_rules.drift_band_pct}% band`}</small></td>
+                  <td><b>{row.snapshot_count}</b><small>{row.provenance.version ? `Template v${row.provenance.version}` : row.provenance.source_type}</small></td>
+                  <td><b>{row.updated_by || "No changes"}</b><small>{row.latest_change_note || "Add a change note before committee review."}</small></td>
+                  <td className="governance-actions">
                     <input
                       value={notes[row.id] || ""}
                       onChange={(event) => setNotes((current) => ({ ...current, [row.id]: event.target.value }))}
@@ -469,9 +472,10 @@ export function Models({
                     <button type="button" disabled={Boolean(packetLoading)} onClick={() => void loadApprovalPacket(row.id)}>
                       {packetLoading === row.id ? "Loading..." : "Approval Packet"}
                     </button>
-                  </span>
-                </div>
-              ))}
+                  </td>
+                </tr>
+              ))}</tbody>
+              </table>
             </div>
             {approvalPacket && (
               <section className="governance-packet-panel">
@@ -559,6 +563,158 @@ export function Models({
   );
 }
 
+function IndependentValidationPanel({ models }: { models: ModelSummary[] }) {
+  const [modelId, setModelId] = useState("");
+  const [payload, setPayload] = useState<IndependentValidationResponse | null>(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState("");
+  const [sponsor, setSponsor] = useState("");
+  const [outcome, setOutcome] = useState("approved");
+  const [nextReviewDue, setNextReviewDue] = useState("");
+  const [note, setNote] = useState("");
+  const [exception, setException] = useState({ control_key: "", owner: "", reason: "", expires_at: "", controls: "" });
+  const options = models.map((model) => ({ value: model.id, label: `${model.name} · ${model.id}` }));
+
+  const load = async (id = modelId) => {
+    if (!id) return;
+    setBusy("load");
+    setError("");
+    try {
+      setPayload(await api.independentValidation(id));
+    } catch (caught) {
+      setPayload(null);
+      setError(caught instanceof Error ? caught.message : "Independent validation unavailable.");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const recordReview = async () => {
+    if (!modelId) return;
+    setBusy("review");
+    setError("");
+    try {
+      await api.recordIndependentValidation(modelId, {
+        sponsor,
+        outcome,
+        next_review_due: nextReviewDue || undefined,
+        note,
+        controls: {
+          provenance: "reviewed",
+          out_of_sample_evidence: "reviewed",
+          implementation_controls: "reviewed",
+          risk_limits: "reviewed",
+        },
+      });
+      setNote("");
+      await load(modelId);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Independent review could not be recorded.");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const createException = async () => {
+    if (!modelId) return;
+    setBusy("exception");
+    setError("");
+    try {
+      await api.recordValidationException(modelId, {
+        control_key: exception.control_key,
+        owner: exception.owner,
+        reason: exception.reason,
+        expires_at: exception.expires_at,
+        compensating_controls: exception.controls.split("\n").map((row) => row.trim()).filter(Boolean),
+      });
+      setException({ control_key: "", owner: "", reason: "", expires_at: "", controls: "" });
+      await load(modelId);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Validation exception could not be recorded.");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  return (
+    <Panel title="Independent Model Validation" meta={payload ? formatStatus(payload.status.state) : "separate sponsor and validator"}>
+      <div className="independent-validation-controls">
+        <label>Model<TerminalSelect ariaLabel="Independent validation model" value={modelId} onChange={(value) => { setModelId(value); setPayload(null); }} options={options} placeholder="Select a model" /></label>
+        <button type="button" onClick={() => void load()} disabled={!modelId || Boolean(busy)}>{busy === "load" ? "Loading..." : "Load validation record"}</button>
+      </div>
+      {error && <div className="notice warning" role="alert">{error}</div>}
+      {!modelId ? (
+        <EmptyState title="Select a governed model" body="Independent review is version-specific and remains separate from the model sponsor's approval workflow." />
+      ) : payload ? (
+        <div className="independent-validation-workspace">
+          <div className={`readiness-verdict ${payload.status.passed ? "ready" : "blocked"}`}>
+            <strong>{payload.status.passed ? "Independent validation current" : "Independent validation required"}</strong>
+            <span>{payload.status.detail}</span>
+          </div>
+          <section className="dashboard-grid">
+            <div className="validation-control-form">
+              <h3>Record independent review</h3>
+              <label>Model sponsor<input value={sponsor} onChange={(event) => setSponsor(event.target.value)} placeholder="Must differ from signed-in validator" /></label>
+              <label>Outcome<TerminalSelect ariaLabel="Independent review outcome" value={outcome} onChange={setOutcome} options={[
+                { value: "approved", label: "Approved" },
+                { value: "conditional", label: "Conditional" },
+                { value: "rejected", label: "Rejected" },
+              ]} /></label>
+              <label>Next review due<input type="date" value={nextReviewDue} onChange={(event) => setNextReviewDue(event.target.value)} /></label>
+              <label>Review note<textarea rows={3} value={note} onChange={(event) => setNote(event.target.value)} placeholder="Scope, evidence reviewed, and committee conclusion" /></label>
+              <button type="button" onClick={() => void recordReview()} disabled={Boolean(busy) || sponsor.trim().length < 2}>{busy === "review" ? "Recording..." : "Record independent review"}</button>
+            </div>
+            <div className="validation-control-form">
+              <h3>Controlled exception</h3>
+              <label>Control key<input value={exception.control_key} onChange={(event) => setException((current) => ({ ...current, control_key: event.target.value }))} placeholder="e.g. liquidity_data" /></label>
+              <label>Owner<input value={exception.owner} onChange={(event) => setException((current) => ({ ...current, owner: event.target.value }))} /></label>
+              <label>Expires<input type="date" value={exception.expires_at} onChange={(event) => setException((current) => ({ ...current, expires_at: event.target.value }))} /></label>
+              <label>Reason<textarea rows={2} value={exception.reason} onChange={(event) => setException((current) => ({ ...current, reason: event.target.value }))} /></label>
+              <label>Compensating controls<textarea rows={3} value={exception.controls} onChange={(event) => setException((current) => ({ ...current, controls: event.target.value }))} placeholder="One control per line" /></label>
+              <button type="button" onClick={() => void createException()} disabled={Boolean(busy) || !exception.control_key || !exception.owner || !exception.reason || !exception.expires_at}>{busy === "exception" ? "Recording..." : "Open controlled exception"}</button>
+            </div>
+          </section>
+          <section className="dashboard-grid">
+            <div className="governance-log-grid">
+              <section>
+                <h2>Review history</h2>
+                {payload.reviews.length === 0 ? <p className="muted">No independent reviews recorded.</p> : payload.reviews.slice(0, 6).map((review) => (
+                  <article key={review.review_id}><strong>{formatStatus(review.outcome)}</strong><span>{review.validator} · due {review.next_review_due}</span><p>{review.note || `${review.sponsor} sponsor / version ${review.model_version}`}</p></article>
+                ))}
+              </section>
+            </div>
+            <div className="governance-log-grid">
+              <section>
+                <h2>Exceptions</h2>
+                {payload.exceptions.length === 0 ? <p className="muted">No validation exceptions recorded.</p> : payload.exceptions.slice(0, 8).map((row) => (
+                  <article key={row.exception_id}>
+                    <strong>{row.control_key} · {formatStatus(row.status)}</strong>
+                    <span>{row.owner} · expires {row.expires_at}</span>
+                    <p>{row.reason}</p>
+                    {row.status === "open" && <button type="button" onClick={async () => {
+                      setBusy(`resolve:${row.exception_id}`);
+                      try {
+                        await api.resolveValidationException(modelId, row.exception_id, "Control owner confirmed resolution in the Helios validation workspace.");
+                        await load(modelId);
+                      } catch (caught) {
+                        setError(caught instanceof Error ? caught.message : "Exception resolution failed.");
+                      } finally {
+                        setBusy("");
+                      }
+                    }} disabled={Boolean(busy)}>{busy === `resolve:${row.exception_id}` ? "Resolving..." : "Resolve exception"}</button>}
+                  </article>
+                ))}
+              </section>
+            </div>
+          </section>
+        </div>
+      ) : (
+        <EmptyState title="Load the validation record" body="Review cadence, version status, findings, and controlled exceptions are loaded on demand." />
+      )}
+    </Panel>
+  );
+}
+
 function ModelValidationDashboard({
   validation,
   loading,
@@ -623,21 +779,21 @@ function ModelValidationDashboard({
               })()}
             </p>
           )}
-          <div className="terminal-table model-validation-table" tabIndex={0} aria-label="Model Validation Dashboard table" onKeyDown={scrollTableByKey}>
-            <div className="terminal-table__head">
-              <span>Model</span><span>Champion / Challenger</span><span>Walk-Forward Evidence</span><span>False Positives</span><span>Regime Sensitivity</span><span>Signal Decay</span><span>Drift Alerts</span>
-            </div>
-            {rows.map((row) => (
-              <div className="table-row validation-row" key={row.model_id}>
-                <span><strong>{row.model_name}</strong><small>{row.model_id} · {formatStatus(row.mandate)}</small></span>
-                <span><b className={row.role === "champion" ? "tone-positive" : row.validation_state === "blocked" ? "tone-warning" : ""}>{formatStatus(row.role)}</b><small>Score {fmtNumber(row.validation_score, 1)} · Grade {row.validation_grade}</small></span>
-                <span>{fmtPct(row.walk_forward.hit_rate_pct)} hit rate<small>{row.walk_forward.window_count || 0} windows · alpha {fmtPct(row.walk_forward.avg_alpha_pct)}</small></span>
-                <span>{row.false_positives.count || 0} flagged<small>{fmtPct(row.false_positives.rate_pct)} FP rate</small></span>
-                <span>{bestRegime(row) || "No regime bucket"}<small>{row.regime_sensitivity.length} buckets</small></span>
-                <span>{decaySummary(row)}<small>{row.decay.length} horizons</small></span>
-                <span>{row.drift_alerts[0]?.title || "No drift alert"}<small>{row.drift_alerts[0]?.detail || row.required_action}</small></span>
-              </div>
-            ))}
+          <div className="terminal-table terminal-data-table-shell" tabIndex={0} aria-label="Scrollable Model Validation Dashboard" onKeyDown={scrollTableByKey}>
+            <table className="terminal-data-table model-validation-data-table">
+              <thead><tr><th scope="col">Model</th><th scope="col">Champion / Challenger</th><th scope="col">Walk-Forward Evidence</th><th scope="col">False Positives</th><th scope="col">Regime Sensitivity</th><th scope="col">Signal Decay</th><th scope="col">Drift Alerts</th></tr></thead>
+              <tbody>{rows.map((row) => (
+              <tr className="validation-row" key={row.model_id}>
+                <th scope="row"><strong>{row.model_name}</strong><small>{row.model_id} · {formatStatus(row.mandate)}</small></th>
+                <td><b className={row.role === "champion" ? "tone-positive" : row.validation_state === "blocked" ? "tone-warning" : ""}>{formatStatus(row.role)}</b><small>Score {fmtNumber(row.validation_score, 1)} · Grade {row.validation_grade}</small></td>
+                <td>{fmtPct(row.walk_forward.hit_rate_pct)} hit rate<small>{row.walk_forward.window_count || 0} windows · alpha {fmtPct(row.walk_forward.avg_alpha_pct)}</small></td>
+                <td>{row.false_positives.count || 0} flagged<small>{fmtPct(row.false_positives.rate_pct)} FP rate</small></td>
+                <td>{bestRegime(row) || "No regime bucket"}<small>{row.regime_sensitivity.length} buckets</small></td>
+                <td>{decaySummary(row)}<small>{row.decay.length} horizons</small></td>
+                <td>{row.drift_alerts[0]?.title || "No drift alert"}<small>{row.drift_alerts[0]?.detail || row.required_action}</small></td>
+              </tr>
+            ))}</tbody>
+            </table>
           </div>
           <div className="governance-log-grid validation-detail-grid">
             <section>

@@ -13,10 +13,12 @@ or a guarantee engine.
 - `app.py`: thin entry point/facade; loads the repo-local `.env`, then wires
   `helios_web.init_app()`.
 - `helios_web/`: Flask web layer, one blueprint per section (`core`, `data`,
-  `analysis`, `models`, `reports`, `ai`, `spa`, plus `localenv`); auth gate,
-  CSRF heuristic, security headers, React static serving.
-- `serve.py`: local/LAN production entrypoint using waitress, or self-signed
-  HTTPS when `HELIOS_TLS=1` (TLS setup failures abort rather than fall back).
+  `analysis`, `models`, `reports`, `ai`, `evidence`, `trials`, `institutional`,
+  `security`, `ledger`, and `spa`, plus `localenv`); auth/RBAC/MFA gate, CSRF
+  heuristic, security headers, React static serving.
+- `serve.py`: localhost production entrypoint using waitress, or loopback-only
+  development HTTPS when `HELIOS_TLS=1`. Institutional mode refuses direct
+  public/LAN binds; use a production reverse proxy while Helios stays loopback.
 - `run.sh`: setup/start wrapper; creates `.venv`, installs pinned Python deps
   from `requirements.lock`, then runs `app.py` or `serve.py`.
 - `engine/`: deterministic analytics, persistence, portfolio parsing, signals,
@@ -60,7 +62,7 @@ secrets out of docs, tests, source, and logs.
 ## Common Commands
 
 ```bash
-# Local/LAN server. Installs runtime Python deps if needed.
+# Local production server. Installs runtime Python deps if needed.
 ./run.sh
 
 # Localhost Flask dev server.
@@ -75,17 +77,24 @@ npm --prefix frontend run typecheck
 # Frontend lint (ESLint).
 npm --prefix frontend run lint
 
+# Frontend component tests.
+npm --prefix frontend run test
+
 # Frontend production build.
 npm --prefix frontend run build
+
+# Browser workflow tests (after the frontend build and Chromium install).
+npx --prefix frontend playwright install chromium
+npm --prefix frontend run test:e2e
 
 # Python tests.
 ./.venv/bin/python -m pytest
 
 # Python tests with coverage (CI flags).
-./.venv/bin/python -m pytest --cov=engine --cov=app --cov-report=term-missing
+./.venv/bin/python -m pytest --cov=engine --cov=helios_web --cov=app --cov-report=term-missing --cov-fail-under=80
 
 # Python syntax compile.
-./.venv/bin/python -m compileall app.py serve.py engine tests
+./.venv/bin/python -m compileall app.py serve.py engine helios_web tests
 
 # Design spec JSON validation.
 ./.venv/bin/python -m json.tool .design_spec.json >/dev/null
@@ -97,10 +106,14 @@ Full CI-equivalent local verification:
 ./.venv/bin/python -m pip install -r requirements.lock
 npm --prefix frontend ci
 npm --prefix frontend run typecheck
+npm --prefix frontend run lint
+npm --prefix frontend run test
 npm --prefix frontend run build
-./.venv/bin/python -m compileall app.py serve.py engine tests
+npx --prefix frontend playwright install chromium
+npm --prefix frontend run test:e2e
+./.venv/bin/python -m compileall app.py serve.py engine helios_web tests
 ./.venv/bin/python -m json.tool .design_spec.json >/dev/null
-./.venv/bin/python -m pytest --cov=engine --cov=app --cov-report=term-missing
+./.venv/bin/python -m pytest --cov=engine --cov=helios_web --cov=app --cov-report=term-missing --cov-fail-under=80
 ```
 
 Python lint/format commands are not configured. Do not invent them; if adding a

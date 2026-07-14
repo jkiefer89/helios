@@ -89,7 +89,7 @@ def test_opportunities_endpoint_blocks_demo_only_rankings():
     body = resp.get_json()
     assert body["items"] == []
     assert body["eligible_for_real_research"] is False
-    assert body["data_mode"] == "demo"
+    assert body["data_mode"] == "invalid_for_research"
     assert "upload real" in body["required_action"].lower()
     assert body["disclaimer"]
     assert "analysis only" in body["disclaimer"].lower()

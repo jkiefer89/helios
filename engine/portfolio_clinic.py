@@ -114,7 +114,7 @@ def _blocked_clinic(
         "display_label": "Data Quality Blocked",
         "eligible_for_real_research": False,
         "reason": reason,
-        "required_action": provenance.DEMO_ACTION,
+        "required_action": provenance.RESEARCH_DATA_ACTION,
         "missing_tickers": missing_tickers,
         "data_provenance": raw_provenance or {"missing_tickers": missing_tickers},
         "mandate": {"key": model.mandate_key, **m},
@@ -143,7 +143,7 @@ def _blocked_clinic(
         "refusals": ["Portfolio Clinic requires live or uploaded price history for every analyzed holding."],
         "explanation": (
             "Data quality is blocked, so Helios will not fabricate risk, concentration, "
-            "or rebalance evidence from sample or simulated prices."
+            "or rebalance evidence from ineligible or missing prices."
         ),
     }
 

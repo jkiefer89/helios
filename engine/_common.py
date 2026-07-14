@@ -72,19 +72,26 @@ def clean_close(close: pd.Series | None) -> pd.Series:
 def paper_hit(action: str, forward: float | None, alpha: float | None) -> bool | None:
     """Paper-tracking hit rule shared by Evidence Lab and the Signal Journal.
 
-    Evidence is alpha when a benchmark result exists, otherwise the raw forward
-    return. Directional actions must land on the right side of zero; hold-style
-    actions tolerate a small drawdown.
+    A directional call is measurable only against benchmark-relative alpha.
+    HOLD/REVIEW are abstentions and are measured separately by
+    :func:`hold_preserved`; missing benchmark evidence is never replaced with
+    an absolute return.
     """
-    reference = alpha if alpha is not None else forward
-    if reference is None:
-        return None
     action = str(action or "").upper()
+    if action in {"HOLD", "REVIEW"} or alpha is None:
+        return None
     if action in {"SELL", "REDUCE", "UNDERWEIGHT"}:
-        return reference < 0
-    if action in {"HOLD", "REVIEW"}:
-        return reference >= -1.0
-    return reference > 0
+        return alpha < 0
+    if action in {"BUY", "ADD", "OVERWEIGHT"}:
+        return alpha > 0
+    return None
+
+
+def hold_preserved(action: str, forward: float | None, tolerance_pct: float = 1.0) -> bool | None:
+    """Whether a HOLD/REVIEW abstention stayed inside a disclosed move band."""
+    if str(action or "").upper() not in {"HOLD", "REVIEW"} or forward is None:
+        return None
+    return abs(float(forward)) <= abs(float(tolerance_pct))
 
 
 def journal_paper_hit(entry: dict[str, Any]) -> bool | None:
@@ -95,4 +102,15 @@ def journal_paper_hit(entry: dict[str, Any]) -> bool | None:
         str(entry.get("action_label") or ""),
         finite(entry.get("forward_result_pct")),
         finite(entry.get("alpha_pct")),
+    )
+
+
+def journal_hold_preserved(entry: dict[str, Any], tolerance_pct: float = 1.0) -> bool | None:
+    """Apply the HOLD-preservation rule to a measured journal entry."""
+    if entry.get("forward_status") != "measured":
+        return None
+    return hold_preserved(
+        str(entry.get("action_label") or ""),
+        finite(entry.get("forward_result_pct")),
+        tolerance_pct,
     )

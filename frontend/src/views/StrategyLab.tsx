@@ -90,9 +90,9 @@ export function StrategyLab({
       )}
       {payload && <DataQualityBanner payload={payload} />}
       {payload && !payload.eligible_for_real_research && (
-        <div className="strategy-demo-warning" role="status">
-          <strong>Demo strategy result — synthetic/sample data, not real market evidence.</strong>
-          <span>{payload.required_action || payload.reason || "Replace demo history with live or uploaded data before using strategy evidence."}</span>
+        <div className="strategy-blocked-warning" role="status">
+          <strong>Strategy evidence blocked - eligible market history required.</strong>
+          <span>{payload.required_action || payload.reason || "Provide live or uploaded data before using strategy evidence."}</span>
         </div>
       )}
       {payload && !payload.strategy ? (
