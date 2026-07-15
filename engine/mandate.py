@@ -131,6 +131,24 @@ def anchor_return(key: str) -> float:
     return RF + ERP * get(key)["growth_orientation"]
 
 
+def mandate_from_profile(vol_annual_pct: float | None = None) -> str:
+    """Infer the mandate whose risk budget matches an instrument's OWN realized
+    volatility — the honest form of 'judge the fund on its own risk profile,
+    not the portfolio it sits in'. Picks the mandate whose target_vol_pct is
+    nearest the instrument's annualized vol (pure_growth 22 / balanced 12 /
+    income 10 / capital_preservation 6 / cd_alternative 4); ties resolve toward
+    the higher-risk mandate so a borderline holding is never under-stated.
+    Falls back to the default when vol is unavailable (e.g. a brand-new fund).
+    """
+    if vol_annual_pct is None or vol_annual_pct <= 0:
+        return DEFAULT
+    return min(
+        MANDATES,
+        key=lambda k: (abs(MANDATES[k]["target_vol_pct"] - vol_annual_pct),
+                       -MANDATES[k]["target_vol_pct"]),
+    )
+
+
 def blended_anchor(key: str, cma_return: float | None = None, coverage: float = 0.0) -> float:
     """Forward anchor that blends the generic CAPM anchor with a holdings-derived
     CMA expected return by look-through coverage.

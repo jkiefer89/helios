@@ -292,12 +292,19 @@ def evaluate(close: pd.Series, forecast_result: dict, sentiment_result: dict,
 
     caveats = _caveats(forecast_result, history_days, data_honesty)
     if not has_fundamentals:
-        if (fundamental_result or {}).get("product_structure") == "leveraged_daily_reset":
+        _structure = (fundamental_result or {}).get("product_structure")
+        if _structure == "leveraged_daily_reset":
             caveats.append(
                 "Leveraged/daily-reset product: fundamentals, sector anchors, and "
                 "long-horizon projections do not model daily-reset compounding or "
                 "financing cost — rating is technical (tactical) signals only, and the "
                 "forecast cone assumes no leverage decay.")
+        elif _structure == "fund_wrapper":
+            caveats.append(
+                "Fund wrapper (ETF/ETN): single-security fundamentals and sector "
+                "anchors don't apply to a diversified basket — rating is technical "
+                "(tactical) signals only. Import the fund as a model for a "
+                "holdings-level fundamentals view.")
         else:
             caveats.append("No usable fundamentals for this instrument — rating is the "
                            "technical blend only (no strategic track).")

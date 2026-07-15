@@ -1700,6 +1700,17 @@ export interface AnalysisResponse {
   // authoritative and the client must not re-derive provenance eligibility.
   data_provenance?: DataQuality;
   mandate?: AnalysisMandate;
+  // Which mandate anchor the strategic (CMA) track was judged against for a
+  // standalone instrument, and why (operator-selected / auto-by-risk / default).
+  mandate_anchor?: {
+    requested: string;
+    resolved: string;
+    label: string;
+    anchor_return_pct: number;
+    target_vol_pct: number;
+    realized_vol_pct: number;
+    basis: string;
+  };
   horizon?: AnalysisHorizon;
   fundamentals?: Record<string, unknown>;
   rates?: Record<string, unknown>;

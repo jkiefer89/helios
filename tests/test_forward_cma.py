@@ -402,3 +402,52 @@ def test_real_operating_company_unaffected_by_leverage_guard():
     fwd = cma.instrument_forward("JPM", f)
     assert fwd["usable"] is True and fwd.get("product_structure") is None
     assert fwd.get("expected_return_pct") is not None
+
+
+# --------------------------------------------------------------------------- #
+# Fund-wrapper guard + mandate anchor control (ETF sector contamination fix)
+# --------------------------------------------------------------------------- #
+def test_fund_wrapper_refuses_single_stock_fundamentals():
+    # FMP mis-tags equity ETFs "Financial Services" with a P/E; a single-stock
+    # reversion/sector anchor is a category error on a basket. Refuse it even
+    # though a P/E is present (is_fund is the tell).
+    f = _f(ticker="SOXX", name="iShares Semiconductor ETF", is_fund=True,
+           trailing_pe=40.0, dividend_yield=0.005, sector="Financial Services")
+    hr = cma.holding_expected_return("SOXX", 100.0, "equity", f)
+    assert hr.usable is False and hr.expected_return is None
+    assert hr.blocks.get("product_structure") == "fund_wrapper"
+    fwd = cma.instrument_forward("SOXX", f)
+    assert fwd["usable"] is False and fwd.get("product_structure") == "fund_wrapper"
+    assert "fund wrapper" in (fwd.get("reason") or "").lower()
+    assert "expected_return_pct" not in fwd          # never a fabricated number
+
+
+def test_non_fund_stock_in_financials_still_rates():
+    # A real bank (JPM) is legitimately Financial Services and NOT a fund — it
+    # must keep a real fundamentals rating.
+    f = _f(ticker="JPM", name="JPMorgan Chase & Co.", is_fund=False,
+           trailing_pe=13.0, dividend_yield=0.021, earnings_growth=0.06,
+           sector="Financial Services")
+    fwd = cma.instrument_forward("JPM", f)
+    assert fwd["usable"] is True and fwd.get("product_structure") is None
+    assert fwd.get("expected_return_pct") is not None
+
+
+def test_mandate_from_profile_matches_own_risk():
+    assert mandate.mandate_from_profile(4.0) == "cd_alternative"
+    assert mandate.mandate_from_profile(6.0) == "capital_preservation"
+    assert mandate.mandate_from_profile(10.0) == "income"
+    assert mandate.mandate_from_profile(12.0) == "balanced"
+    assert mandate.mandate_from_profile(30.0) == "pure_growth"
+    assert mandate.mandate_from_profile(None) == mandate.DEFAULT
+
+
+def test_mandate_override_changes_the_anchor():
+    f = _f(ticker="X", dividend_yield=0.01, forward_pe=20.0, earnings_growth=0.10,
+           sector="Technology")
+    bal = cma.instrument_forward("X", f, mandate_key="balanced")
+    grw = cma.instrument_forward("X", f, mandate_key="pure_growth")
+    # pure_growth is a HIGHER hurdle than balanced, so the same E[r] shows a
+    # smaller (more demanding) gap — the honest direction.
+    assert grw["anchor_pct"] > bal["anchor_pct"]
+    assert grw["gap_vs_anchor_pct"] < bal["gap_vs_anchor_pct"]

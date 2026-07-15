@@ -89,6 +89,24 @@ def holding_expected_return(ticker, weight_pct, asset_class, fundamentals,
                              {"asset_class_anchor": round(er, 4)})
 
     if fundamentals is not None and getattr(fundamentals, "usable", False):
+        # Fund wrappers (ETF/ETN/mutual fund): a single-security P/E mean-
+        # reversion and a sector-growth anchor are a category error on a
+        # diversified basket — and FMP mis-tags most equity ETFs "Financial
+        # Services" (SOXX/QQQ/ARTY verified live), which fabricated ~2% E[r]
+        # and spurious strategic SELLs across the operator's book. Refuse the
+        # single-security block; the rating falls back to the technical blend,
+        # and a real fundamentals view comes from importing the fund as a
+        # model (its holdings look through to a genuine aggregate CMA).
+        # (Non-equity fund sleeves — bond/commodity ETFs with a known
+        # asset_class — are handled by the asset-class branch above and keep
+        # their sleeve anchor.)
+        if getattr(fundamentals, "is_fund", False):
+            return HoldingReturn(ticker, weight_pct, None, "generic", False, {
+                "reason": ("fund wrapper (ETF/ETN/fund) — single-security fundamentals "
+                           "and sector anchors do not apply to a diversified basket; "
+                           "technical signals only. Import it as a model for a "
+                           "look-through fundamentals view."),
+                "product_structure": "fund_wrapper"})
         pe = fundamentals.forward_pe or fundamentals.trailing_pe
         # Equity evidence means a real earnings signal: reported growth or a
         # positive P/E. A provider-stamped SECTOR label alone does not count —

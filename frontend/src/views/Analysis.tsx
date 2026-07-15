@@ -7,6 +7,7 @@ import type {
   AnalysisSignal,
   DataMode,
   LongForecast,
+  MandateSummary,
   MetricSet,
   ModelInsight,
   ModelSummary,
@@ -31,6 +32,7 @@ const LONG_HORIZON_PRESETS = ["6M", "1Y", "3Y", "5Y"] as const;
 export function Analysis({
   tickers,
   models,
+  mandates,
   selectedInstrument,
   selectedModel,
   onSelectInstrument,
@@ -38,6 +40,7 @@ export function Analysis({
 }: {
   tickers: TickerSummary[];
   models: ModelSummary[];
+  mandates?: MandateSummary[];
   selectedInstrument?: string;
   selectedModel?: string;
   onSelectInstrument: (symbol: string) => void;
@@ -47,6 +50,10 @@ export function Analysis({
   const defaultTarget = selectedModel ? `model:${selectedModel}` : selectedInstrument ? `instrument:${selectedInstrument}` : "";
   const [target, setTarget] = useState(defaultTarget);
   const [horizon, setHorizon] = useState<string | number>(21);
+  // Which mandate anchor a standalone instrument is judged against. "auto"
+  // matches the instrument's own realized-vol risk profile; models always use
+  // their own mandate, so the selector is disabled for model targets.
+  const [mandateSel, setMandateSel] = useState<string>("balanced");
   const { payload, failure, staleResult, isLoading, load, retry, isCurrentTarget } = useViewFetch<AnalysisResponse>({ failureMessage: "Analysis failed." });
   const options = useMemo(() => [
     ...tickers.map((ticker) => ({ value: `instrument:${ticker.symbol}`, label: `${ticker.symbol} · ${ticker.name}` })),
@@ -67,9 +74,12 @@ export function Analysis({
       });
     } else {
       onSelectInstrument(id);
-      void load(requestedTarget, () => api.analyzeInstrument(id, Number(requestedHorizon) || 21));
+      // Omit the default so the payload honestly reads "default" until the
+      // operator actually changes the anchor.
+      const m = mandateSel === "balanced" ? undefined : mandateSel;
+      void load(requestedTarget, () => api.analyzeInstrument(id, Number(requestedHorizon) || 21, m));
     }
-  }, [load, onSelectInstrument, onSelectModel]);
+  }, [load, onSelectInstrument, onSelectModel, mandateSel]);
 
   useEffect(() => {
     if (!defaultTarget || isCurrentTarget(defaultTarget)) return;
@@ -81,6 +91,25 @@ export function Analysis({
     setHorizon(label);
     runAnalysis(target || defaultTarget, label);
   };
+
+  // Changing the anchor re-runs the current instrument immediately (models
+  // ignore it — they carry their own mandate).
+  const applyMandate = (value: string) => {
+    setMandateSel(value);
+    const current = target || defaultTarget;
+    if (current.startsWith("instrument:")) {
+      const [, id] = current.split(":");
+      onSelectInstrument(id);
+      const m = value === "balanced" ? undefined : value;
+      void load(current, () => api.analyzeInstrument(id, Number(horizon) || 21, m));
+    }
+  };
+  const mandateOptions = [
+    { value: "auto", label: "Auto (by risk)" },
+    ...(mandates && mandates.length
+      ? mandates.map((m) => ({ value: m.key, label: m.label }))
+      : [{ value: "balanced", label: "Balanced" }]),
+  ];
 
   return (
     <div className="view-stack">
@@ -95,6 +124,16 @@ export function Analysis({
               max={90}
               value={typeof horizon === "number" ? horizon : 21}
               onChange={(event) => setHorizon(Math.max(5, Math.min(90, Number(event.target.value) || 21)))}
+            />
+          </label>
+          <label title={targetIsModel ? "Models are judged against their own mandate" : "Anchor the strategic (fundamentals) rating is judged against"}>
+            Anchor
+            <TerminalSelect
+              ariaLabel="Strategic mandate anchor"
+              value={mandateSel}
+              onChange={applyMandate}
+              options={mandateOptions}
+              disabled={targetIsModel}
             />
           </label>
           <div className="horizon-presets" role="group" aria-label="Strategic projection horizon">
@@ -157,7 +196,7 @@ function AnalysisPayload({ payload }: { payload: AnalysisResponse }) {
           <p>{payload.signal.headline_rationale || payload.signal.rationale}</p>
           <span>{eligible ? `${fmtNumber(payload.signal.conviction_pct, 0)}% conviction${payload.signal.conviction_band ? ` (${payload.signal.conviction_band})` : ""}` : "Research locked"}</span>
         </div>
-        {eligible && <SignalTracks signal={payload.signal} />}
+        {eligible && <SignalTracks signal={payload.signal} mandateAnchor={payload.mandate_anchor} />}
         {eligible && <DecisionQuickLog payload={payload} />}
         {!eligible && <div className="warning-list"><span>{quality.required_action || "Replace ineligible or incomplete inputs before treating this as research evidence."}</span></div>}
         {payload.signal.caveats?.length ? <div className="warning-list">{payload.signal.caveats.map((caveat) => <span key={caveat}>{caveat}</span>)}</div> : null}
@@ -863,12 +902,21 @@ function toneFor(value: unknown): string {
   return value >= 0 ? "positive" : "negative";
 }
 
-function SignalTracks({ signal }: { signal: AnalysisSignal }) {
+function SignalTracks({ signal, mandateAnchor }: { signal: AnalysisSignal; mandateAnchor?: AnalysisResponse["mandate_anchor"] }) {
   const tactical = signal.tactical;
   const strategic = signal.strategic;
   if (!tactical && !strategic) return null;
   return (
     <div className="signal-tracks">
+      {mandateAnchor && (
+        <p className="signal-tracks__anchor forecast-note">
+          Strategic anchor: <b>{mandateAnchor.label}</b> ({fmtNumber(mandateAnchor.anchor_return_pct, 1)}%/yr hurdle)
+          {mandateAnchor.basis.startsWith("auto")
+            ? ` · auto-matched to this instrument's ${fmtNumber(mandateAnchor.realized_vol_pct, 0)}%/yr realized vol`
+            : mandateAnchor.basis === "operator-selected" ? " · operator-selected" : " · default"}
+          {" — change it with the Anchor selector above."}
+        </p>
+      )}
       {tactical && (
         <div className="signal-track">
           <span className="signal-track__label">Tactical · horizon-sensitive</span>
@@ -892,7 +940,7 @@ function SignalTracks({ signal }: { signal: AnalysisSignal }) {
       ) : strategic ? (
         <div className="signal-track signal-track--empty">
           <span className="signal-track__label">Strategic · fundamentals</span>
-          <span className="signal-track__detail">No usable fundamentals — technical rating only.</span>
+          <span className="signal-track__detail">{strategic.reason || "No usable fundamentals — technical rating only."}</span>
         </div>
       ) : null}
     </div>

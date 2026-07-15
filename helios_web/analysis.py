@@ -9,7 +9,7 @@ from flask import Blueprint, request
 
 from engine import (
     backtest, cma, costs, data, data_quality, evidence_lab, forecast,
-    fundamentals, holdings, indicators, macro, macro_events, opportunity,
+    fundamentals, holdings, indicators, macro, macro_events, mandate, opportunity,
     persistence, portfolio, provenance, provider_registry, regime, sec_events,
     sentiment, signal_journal, signals, strategy, trials,
 )
@@ -666,11 +666,28 @@ def analyze():
             409,
         )
 
+    # Mandate anchor the strategic (CMA) track is judged against. Operator-
+    # selectable per evaluation; "auto" infers it from the instrument's OWN
+    # realized-vol risk profile (never the portfolio it happens to sit in), so
+    # a high-risk growth fund is judged against a growth hurdle, not a blended
+    # one. Default balanced for backward compatibility.
+    requested_mandate = (request.args.get("mandate") or "").strip().lower()
+    vol_pct = indicators.annualized_vol(close) * 100.0
+    if requested_mandate == "auto":
+        resolved_mandate = mandate.mandate_from_profile(vol_pct)
+        mandate_basis = f"auto — matched to realized vol {vol_pct:.0f}%/yr"
+    elif requested_mandate in mandate.MANDATES:
+        resolved_mandate = requested_mandate
+        mandate_basis = "operator-selected"
+    else:
+        resolved_mandate = mandate.DEFAULT
+        mandate_basis = "default"
+
     fc = forecast.forecast(close, horizon=horizon)
     sent = sentiment.score_headlines(list(inst.headlines or []))
     fnd = fundamentals.fetch_cached(inst.symbol) or fundamentals.Fundamentals(
         ticker=inst.symbol, source="none")
-    fwd = cma.instrument_forward(inst.symbol, fnd)
+    fwd = cma.instrument_forward(inst.symbol, fnd, mandate_key=resolved_mandate)
     macro_snap = macro_events.snapshot_cached()
     macro_ctx = macro_events.build_macro_context(fwd.get("sector") or "", macro_snap)
     sec = sec_events.events_cached(inst.symbol) or {
@@ -678,7 +695,8 @@ def analyze():
         "reason": "No cached SEC event evidence is available; refresh real-data context explicitly.",
     }
     sig = signals.evaluate(close, fc, sent, history_days=len(close),
-                           fundamental_result=fwd, macro_context=macro_ctx)
+                           fundamental_result=fwd, macro_context=macro_ctx,
+                           mandate_key=resolved_mandate)
     bt = backtest.run(close)
     metrics = indicators.metrics_summary(close)
     return ok({
@@ -692,6 +710,17 @@ def analyze():
         "forecast": fc,
         "sentiment": sent,
         "fundamentals": fwd,
+        # Which mandate anchor the strategic track was judged against, and why —
+        # so the operator sees (and can change) the hurdle behind a BUY/SELL.
+        "mandate_anchor": {
+            "requested": requested_mandate or "balanced",
+            "resolved": resolved_mandate,
+            "label": mandate.get(resolved_mandate)["label"],
+            "anchor_return_pct": round(mandate.anchor_return(resolved_mandate) * 100, 2),
+            "target_vol_pct": mandate.get(resolved_mandate)["target_vol_pct"],
+            "realized_vol_pct": round(vol_pct, 1),
+            "basis": mandate_basis,
+        },
         "rates": macro.rate_context(cached_only=True),
         # Regulatory event context (8-K material events + Form 4 insider trades).
         # Cached 1h; offline -> {"available": False} rather than fabricated calm.

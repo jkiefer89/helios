@@ -297,3 +297,18 @@ def test_leveraged_product_surfaces_caveat_and_refuses_strategic():
     # The composite still rates on the technical blend (never blocked, just honest).
     names = [c["name"] for c in sig["components"]]
     assert names == ["trend", "momentum", "forecast", "sentiment"]
+
+
+def test_fund_wrapper_surfaces_caveat_and_refuses_strategic():
+    """ETF holdings: strategic track refuses (no fabricated basket rating) with
+    a specific fund-wrapper caveat the operator + copilot can see."""
+    close = _close()
+    fc = forecast.forecast(close, horizon=21, n_paths=200)
+    fc = {**fc, "quality": {"directional_accuracy": 0.60, "n_test": 100}}
+    fund = cma.instrument_forward(
+        "SOXX", _fnd(ticker="SOXX", name="iShares Semiconductor ETF", is_fund=True,
+                     forward_pe=40.0, sector="Financial Services"))
+    sig = signals.evaluate(close, fc, _SENT, fundamental_result=fund)
+    assert sig["strategic"]["usable"] is False
+    assert sig["strategic"].get("product_structure") == "fund_wrapper"
+    assert any("fund wrapper" in c.lower() for c in sig["caveats"])

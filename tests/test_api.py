@@ -48,6 +48,29 @@ def test_analyze_valid_uploaded_ticker(client):
     assert body["forecast"]["horizon_days"] == 10
 
 
+def test_analyze_mandate_anchor_is_operator_selectable(client):
+    client.post(
+        "/api/upload",
+        data={"file": (BytesIO(price_csv(days=260)), "mandate-test.csv"), "symbol": "MANDX"},
+        content_type="multipart/form-data",
+    )
+    # Default -> balanced anchor.
+    default = client.get("/api/analyze?ticker=MANDX&horizon=21").get_json()
+    assert default["mandate_anchor"]["resolved"] == "balanced"
+    assert default["mandate_anchor"]["basis"] == "default"
+    # Operator override -> that anchor, with a higher hurdle for growth.
+    grw = client.get("/api/analyze?ticker=MANDX&horizon=21&mandate=pure_growth").get_json()
+    assert grw["mandate_anchor"]["resolved"] == "pure_growth"
+    assert grw["mandate_anchor"]["basis"] == "operator-selected"
+    assert grw["mandate_anchor"]["anchor_return_pct"] > default["mandate_anchor"]["anchor_return_pct"]
+    # Auto -> a valid mandate matched to the instrument's own realized vol.
+    auto = client.get("/api/analyze?ticker=MANDX&horizon=21&mandate=auto").get_json()
+    assert auto["mandate_anchor"]["resolved"] in {
+        "pure_growth", "balanced", "income", "capital_preservation", "cd_alternative"}
+    assert auto["mandate_anchor"]["basis"].startswith("auto")
+    assert auto["mandate_anchor"]["realized_vol_pct"] >= 0
+
+
 def test_analyze_invalid_ticker_returns_json_error(client):
     resp = client.get("/api/analyze?ticker=NOT_A_SAMPLE&horizon=10")
 
