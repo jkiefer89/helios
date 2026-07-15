@@ -1,6 +1,5 @@
 import type {
   AIChatResponse,
-  CloudAIConfirmation,
   AIResponse,
   AIStatusResponse,
   DecisionEntry,
@@ -28,6 +27,7 @@ import type {
   ReportSnapshotSaveRequest,
   ReportSnapshotSaveResponse,
   ReportResponse,
+  ResearchContext,
   RiskAnalyticsResponse,
   SignalJournalResponse,
   SignalRecordResponse,
@@ -217,6 +217,20 @@ export const api = {
         slippage_bps: String(slippageBps),
       })}`,
     ),
+  saveResearchContext: (body: {
+    target_kind: "instrument";
+    target_id: string;
+    thesis: string;
+    mandate_key: string;
+    benchmark: string;
+    horizon_days: number;
+    invalidation_criteria: string[];
+    change_note: string;
+  }) => request<{ research_context: ResearchContext }>("/api/research-context", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }),
   clinic: (id: string) => request<ClinicResponse>(`/api/model/clinic?id=${encodeURIComponent(id)}`),
   modelRisk: (id: string, aumUsd?: number) => request<RiskAnalyticsResponse>(
     `/api/model/risk?id=${encodeURIComponent(id)}${aumUsd ? `&aum=${encodeURIComponent(String(aumUsd))}` : ""}`),
@@ -314,23 +328,23 @@ export const api = {
       body: JSON.stringify({ symbol }),
     }),
   aiStatus: () => request<AIStatusResponse>("/api/ai/status"),
-  aiOpportunityExplain: (payload: Record<string, unknown>, regenerate = false, confirmation?: CloudAIConfirmation) =>
-    aiPost("/api/ai/opportunity/explain", payload, undefined, regenerate, confirmation),
-  aiOpportunityCritique: (payload: Record<string, unknown>, regenerate = false, confirmation?: CloudAIConfirmation) =>
-    aiPost("/api/ai/opportunity/critique", payload, undefined, regenerate, confirmation),
-  aiStrategySummary: (payload: Record<string, unknown>, regenerate = false, confirmation?: CloudAIConfirmation) =>
-    aiPost("/api/ai/strategy/summary", payload, undefined, regenerate, confirmation),
-  aiClinicSummary: (payload: Record<string, unknown>, regenerate = false, confirmation?: CloudAIConfirmation) =>
-    aiPost("/api/ai/clinic/summary", payload, undefined, regenerate, confirmation),
-  aiReport: (payload: Record<string, unknown>, regenerate = false, confirmation?: CloudAIConfirmation) =>
-    aiPost("/api/ai/report", payload, undefined, regenerate, confirmation),
-  aiQuestion: (payload: Record<string, unknown>, question: string, regenerate = false, confirmation?: CloudAIConfirmation) =>
-    aiPost("/api/ai/question", payload, question, regenerate, confirmation),
-  aiChat: (messages: Array<{ role: "user" | "assistant"; content: string }>, payload: Record<string, unknown>, confirmation?: CloudAIConfirmation) =>
+  aiOpportunityExplain: (payload: Record<string, unknown>, regenerate = false) =>
+    aiPost("/api/ai/opportunity/explain", payload, undefined, regenerate),
+  aiOpportunityCritique: (payload: Record<string, unknown>, regenerate = false) =>
+    aiPost("/api/ai/opportunity/critique", payload, undefined, regenerate),
+  aiStrategySummary: (payload: Record<string, unknown>, regenerate = false) =>
+    aiPost("/api/ai/strategy/summary", payload, undefined, regenerate),
+  aiClinicSummary: (payload: Record<string, unknown>, regenerate = false) =>
+    aiPost("/api/ai/clinic/summary", payload, undefined, regenerate),
+  aiReport: (payload: Record<string, unknown>, regenerate = false) =>
+    aiPost("/api/ai/report", payload, undefined, regenerate),
+  aiQuestion: (payload: Record<string, unknown>, question: string, regenerate = false) =>
+    aiPost("/api/ai/question", payload, question, regenerate),
+  aiChat: (messages: Array<{ role: "user" | "assistant"; content: string }>, payload: Record<string, unknown>) =>
     request<AIChatResponse>("/api/ai/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ messages, payload, cloud_confirmation: confirmation }),
+      body: JSON.stringify({ messages, payload }),
     }),
   macro: () => request<Record<string, unknown>>("/api/macro"),
   aiMacroBrief: (payload: Record<string, unknown>, regenerate = false) =>
@@ -467,11 +481,10 @@ function aiPost(
   payload: Record<string, unknown>,
   question?: string,
   regenerate = false,
-  confirmation?: CloudAIConfirmation,
 ) {
   return request<AIResponse>(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ payload, question, regenerate, cloud_confirmation: confirmation }),
+    body: JSON.stringify({ payload, question, regenerate }),
   });
 }

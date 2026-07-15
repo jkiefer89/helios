@@ -118,7 +118,6 @@ export function Decisions() {
                 ))}
               </div>
             )}
-            {board.disclaimer && <p className="forecast-note">{board.disclaimer}</p>}
           </Panel>
         )}
 
@@ -473,7 +472,7 @@ function RebalancePanel({ accountId, modelId }: { accountId: string; modelId: st
               </table>
             </div>
           )}
-          <p className="forecast-note">{proposal.basis} {proposal.disclaimer}</p>
+          <p className="forecast-note">{proposal.basis}</p>
         </>
       )}
     </div>

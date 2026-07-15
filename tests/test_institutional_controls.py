@@ -1223,6 +1223,7 @@ def test_model_editor_requires_model_sponsor_permission(monkeypatch):
     [
         ("/api/model-library/import", {"slug": "unknown"}),
         ("/api/model/thesis", {"id": "unknown", "change_note": "Governed change."}),
+        ("/api/research-context", {"target_id": "UNKNOWN"}),
         ("/api/trials", {"target_kind": "instrument", "target_id": "UNKNOWN", "protocol": {}}),
     ],
 )

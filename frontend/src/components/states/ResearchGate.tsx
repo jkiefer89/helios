@@ -67,6 +67,6 @@ function stateDescription(state: ResearchState): string {
     stale: "Refresh the underlying histories before treating this output as current.",
     mixed: "Resolve mixed source quality before presenting unified model evidence.",
     blocked: "A required research or governance control has not passed.",
-    ready: "Required provenance checks passed; analysis-only caveats still apply.",
+    ready: "Required provenance checks passed; research evidence is available.",
   }[state];
 }

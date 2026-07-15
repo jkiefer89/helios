@@ -230,6 +230,7 @@ def test_vol_penalty_below_085_triggers_info_insight():
     ins = by_id(out, "vol_penalty_active")
     assert ins["severity"] == "info"
     assert "reduced 30%" in ins["message"]
+    assert "floor 0.60 at vol>=115%" in ins["message"]
 
 
 def test_mild_vol_penalty_does_not_trigger():

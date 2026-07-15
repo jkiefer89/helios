@@ -197,9 +197,9 @@ export default function App() {
     try {
       const result = await api.uploadPrice(file, symbol);
       setNotice(`Uploaded ${result.symbol} with ${result.rows} rows.`);
-      await Promise.all([refreshLists(), refreshCommand()]);
       selectInstrumentOnly(result.symbol);
       setActiveView("setup");
+      await Promise.all([refreshLists(), refreshCommand()]);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Price upload failed.");
       throw error;
@@ -210,9 +210,9 @@ export default function App() {
     try {
       const result = await api.uploadModel(file, name, mandate, context);
       setNotice(`Imported ${result.name} with ${result.n_holdings} holdings.`);
-      await Promise.all([refreshLists(), refreshCommand()]);
       selectModelOnly(result.id);
       setActiveView("models");
+      await Promise.all([refreshLists(), refreshCommand()]);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Model upload failed.");
       throw error;
@@ -223,9 +223,9 @@ export default function App() {
     try {
       const result = await api.importModelTemplate(slug);
       setNotice(`Imported ${result.name} with ${result.n_holdings} governed holdings.`);
-      await Promise.all([refreshLists(), refreshCommand()]);
       selectModelOnly(result.id);
       setActiveView("models");
+      await Promise.all([refreshLists(), refreshCommand()]);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Model template import failed.");
       throw error;
@@ -266,9 +266,9 @@ export default function App() {
     try {
       const result = await api.fetchLive(symbol);
       setNotice(`Fetched ${result.symbol} with ${result.rows} rows.`);
-      await Promise.all([refreshLists(), refreshCommand()]);
       selectInstrumentOnly(result.symbol);
       setActiveView("setup");
+      await Promise.all([refreshLists(), refreshCommand()]);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Live data fetch failed.");
       throw error;
@@ -365,6 +365,7 @@ export default function App() {
         <StrategyLab
           tickers={tickers}
           models={models}
+          mandates={mandates}
           selectedInstrument={selectedInstrument}
           selectedModel={selectedModel}
           onSelectInstrument={selectInstrumentOnly}

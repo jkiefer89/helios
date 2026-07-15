@@ -41,6 +41,7 @@ class FakeProvider:
         self.model = "fake-model"
         self.last_payload = None
         self.last_question = None
+        self.last_messages = None
 
     def status(self):
         return {
@@ -62,8 +63,7 @@ class FakeProvider:
             "key_points": ["Score 42 was supplied by Helios."],
             "risks": ["Evidence can change when data source changes."],
             "what_would_invalidate": ["A failed provenance gate."],
-            "advisor_language": "Analysis only; review the Helios evidence pack before any action.",
-            "compliance_caveats": ["No return guarantee."],
+            "advisor_language": "Review the Helios evidence pack before changing the position.",
             "used_numbers": ["42"],
             "missing_information": ["Client suitability outside Helios."],
             "data_quality_statement": "Real data status depends on the payload provenance.",
@@ -89,6 +89,9 @@ class FakeProvider:
     def write_advisor_report(self, payload, regenerate=False):
         return self._result("report_narrative")
 
+    def macro_brief(self, payload, regenerate=False):
+        return self._result("macro_brief")
+
     def answer_question(self, payload, question, regenerate=False):
         self.last_payload = payload
         self.last_question = question
@@ -96,23 +99,26 @@ class FakeProvider:
         result["summary"] = f"Answered using supplied Helios facts: {question}"
         return result
 
+    def chat(self, messages, payload):
+        self.last_messages = messages
+        self.last_payload = payload
+        return {
+            "reply": "Dialogue response from supplied Helios facts.",
+            "provider": self.provider,
+            "model": self.model,
+        }
 
-def _confirmed_cloud_post(client, path, payload):
-    first = client.post(path, json=payload)
-    assert first.status_code == 409
-    first_body = first.get_json()
-    assert first_body["code"] == "cloud_ai_confirmation_required"
-    disclosure = first_body["cloud_transfer"]
+
+def _direct_cloud_post(client, path, payload):
+    response = client.post(path, json=payload)
+    assert response.status_code == 200, response.get_json()
+    body = response.get_json()
+    disclosure = body["cloud_transfer"]
     assert disclosure["cloud_transfer"] is True
-    assert disclosure["confirmed"] is False
-    confirmed = {
-        **payload,
-        "cloud_confirmation": {
-            "confirmed": True,
-            "disclosure_hash": disclosure["disclosure_hash"],
-        },
-    }
-    return first_body, client.post(path, json=confirmed)
+    assert disclosure["confirmed"] is True
+    assert disclosure["confirmation_required"] is False
+    assert disclosure["authorization_basis"] == "server_configured_provider"
+    return body, response
 
 
 def test_ai_disabled_status(client, monkeypatch):
@@ -146,19 +152,39 @@ def test_claude_fake_provider_success(client, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "TEST_ANTHROPIC_KEY_NEVER_RETURNED")
     monkeypatch.setattr(helios.ai_copilot, "get_provider", lambda: FakeProvider("anthropic"))
 
-    first, resp = _confirmed_cloud_post(
+    body, resp = _direct_cloud_post(
         client,
         "/api/ai/opportunity/explain",
         {"payload": {"symbol": "AAPL", "score": 42, "data_mode": "real"}},
     )
 
     assert resp.status_code == 200
-    body = resp.get_json()
     assert body["provider"] == "anthropic"
     assert body["result"]["summary"]
     assert body["cloud_transfer"]["confirmed"] is True
-    assert first["cloud_transfer"]["raw_values_returned"] is False
+    assert body["cloud_transfer"]["raw_values_returned"] is False
+    assert "disclaimer" not in body
     assert "TEST_ANTHROPIC_KEY_NEVER_RETURNED" not in json.dumps(body)
+
+
+@pytest.mark.parametrize(("path", "request_body", "expected_task"), (
+    ("/api/ai/opportunity/explain", {"payload": {"score": 42}}, "opportunity_explain"),
+    ("/api/ai/opportunity/critique", {"payload": {"score": 42}}, "opportunity_critique"),
+    ("/api/ai/strategy/summary", {"payload": {"score": 42}}, "strategy_summary"),
+    ("/api/ai/clinic/summary", {"payload": {"score": 42}}, "clinic_summary"),
+    ("/api/ai/report", {"payload": {"score": 42}}, "report_narrative"),
+    ("/api/ai/question", {"payload": {"score": 42}, "question": "Why?"}, "question"),
+    ("/api/ai/macro/brief", {"payload": {"score": 42}}, "macro_brief"),
+))
+def test_cloud_transfer_task_matches_provider_prompt(
+    client, monkeypatch, path, request_body, expected_task,
+):
+    monkeypatch.setattr(helios.ai_copilot, "get_provider", lambda: FakeProvider("anthropic"))
+
+    body, _response = _direct_cloud_post(client, path, request_body)
+
+    assert body["cloud_transfer"]["task"] == expected_task
+    assert body["result"]["task"] == expected_task
 
 
 def test_provider_timeout_returns_503(client, monkeypatch):
@@ -169,8 +195,8 @@ def test_provider_timeout_returns_503(client, monkeypatch):
     provider = TimeoutProvider()
     monkeypatch.setattr(helios.ai_copilot, "get_provider", lambda: provider)
 
-    _first, resp = _confirmed_cloud_post(
-        client, "/api/ai/opportunity/explain", {"payload": {"symbol": "AAPL"}},
+    resp = client.post(
+        "/api/ai/opportunity/explain", json={"payload": {"symbol": "AAPL"}},
     )
 
     assert resp.status_code == 503
@@ -205,6 +231,31 @@ def test_malformed_json_is_review_required():
 
     assert result["needs_review"] is True
     assert result["malformed_json"] is True
+
+
+def test_prompt_schema_omits_compliance_boilerplate():
+    sanitized = ai_copilot.sanitize_payload({
+        "data_mode": "real",
+        "score": 42,
+        "disclaimer": "Analysis only; not investment advice or order execution.",
+        "nested": {
+            "compliance_caveats": ["More boilerplate."],
+            "forecast": {
+                "disclaimer": (
+                    "Strategic statistical projection, not a trading forecast or guarantee. "
+                    "Model quality remains uncertain."
+                ),
+            },
+        },
+    }, _config())
+    prompt = ai_copilot.build_prompt("opportunity_explain", sanitized)
+    request = json.loads(prompt["user"])
+
+    assert "compliance_caveats" not in request["schema"]
+    assert "analysis_only_disclaimer" not in request["payload"]
+    assert "disclaimer" not in request["payload"]
+    assert "compliance_caveats" not in request["payload"]["nested"]
+    assert "Model quality remains uncertain." in request["payload"]["nested"]["forecast"]["disclaimer"]
 
 
 def test_unsupported_numeric_claim_detection():
@@ -249,7 +300,7 @@ def test_api_keys_never_appear_in_status_or_response(client, monkeypatch):
 
     provider = FakeProvider("anthropic")
     monkeypatch.setattr(helios.ai_copilot, "get_provider", lambda: provider)
-    _first, resp = _confirmed_cloud_post(
+    _body, resp = _direct_cloud_post(
         client,
         "/api/ai/question",
         {"payload": {"score": 42}, "question": "What matters?"},
@@ -258,7 +309,7 @@ def test_api_keys_never_appear_in_status_or_response(client, monkeypatch):
     assert sentinel not in json.dumps(resp.get_json())
 
 
-def test_cloud_confirmation_redacts_sensitive_values_before_provider_call(client, monkeypatch):
+def test_cloud_transfer_redacts_sensitive_values_before_provider_call(client, monkeypatch):
     provider = FakeProvider("anthropic")
     monkeypatch.setattr(helios.ai_copilot, "get_provider", lambda: provider)
     secret = "sk-" + "ant-api03-FAKE-DLP-TEST-SENTINEL"
@@ -276,10 +327,10 @@ def test_cloud_confirmation_redacts_sensitive_values_before_provider_call(client
         ),
     }
 
-    first, response = _confirmed_cloud_post(client, "/api/ai/question", request_payload)
+    body, response = _direct_cloud_post(client, "/api/ai/question", request_payload)
 
     assert response.status_code == 200
-    assert first["cloud_transfer"]["redaction_count"] >= 3
+    assert body["cloud_transfer"]["redaction_count"] >= 3
     transferred = json.dumps({"payload": provider.last_payload, "question": provider.last_question})
     assert "Jane Private" not in transferred
     assert "jane.private@example.com" not in transferred
@@ -287,26 +338,24 @@ def test_cloud_confirmation_redacts_sensitive_values_before_provider_call(client
     assert secret not in transferred
     assert "123456789" not in transferred
     assert "[redacted:" in transferred
-    assert first["cloud_transfer"]["task"] == "answer_question"
-    assert first["cloud_transfer"]["transfer_scope"] == "final_sanitized_provider_request"
-    assert first["cloud_transfer"]["disclosure_hash"] != first["cloud_transfer"]["dlp_payload_hash"]
+    assert body["cloud_transfer"]["task"] == "question"
+    assert body["cloud_transfer"]["transfer_scope"] == "final_sanitized_provider_request"
+    assert body["cloud_transfer"]["disclosure_hash"] != body["cloud_transfer"]["dlp_payload_hash"]
 
 
-def test_cloud_confirmation_is_bound_to_the_exact_redacted_payload(client, monkeypatch):
+def test_legacy_cloud_confirmation_is_ignored_and_request_runs_once(client, monkeypatch):
     provider = FakeProvider("anthropic")
     monkeypatch.setattr(helios.ai_copilot, "get_provider", lambda: provider)
     payload = {"payload": {"score": 42}, "question": "Explain the evidence."}
 
-    first = client.post("/api/ai/question", json=payload)
-    assert first.status_code == 409
-    rejected = client.post("/api/ai/question", json={
+    response = client.post("/api/ai/question", json={
         **payload,
         "cloud_confirmation": {"confirmed": True, "disclosure_hash": "wrong-payload-hash"},
     })
 
-    assert rejected.status_code == 409
-    assert rejected.get_json()["code"] == "cloud_ai_confirmation_required"
-    assert provider.last_payload is None
+    assert response.status_code == 200
+    assert provider.last_payload == {"score": 42}
+    assert response.get_json()["cloud_transfer"]["confirmation_required"] is False
 
 
 def test_cloud_chat_redacts_contextual_client_name_without_structured_identity(client, monkeypatch):
@@ -314,47 +363,49 @@ def test_cloud_chat_redacts_contextual_client_name_without_structured_identity(c
     monkeypatch.setattr(helios.ai_copilot, "get_provider", lambda: provider)
     request_payload = {
         "payload": {"score": 42},
-        "question": (
-            "Explain the evidence for my client Jane Private without adding facts. "
-            "Please review for John Smith household. Prepared for Smith Family Trust."
-        ),
+        "messages": [{
+            "role": "user",
+            "content": (
+                "Explain the evidence for my client Jane Private without adding facts. "
+                "Please review for John Smith household. Prepared for Smith Family Trust."
+            ),
+        }],
     }
 
-    first, response = _confirmed_cloud_post(client, "/api/ai/question", request_payload)
+    body, response = _direct_cloud_post(client, "/api/ai/chat", request_payload)
 
     assert response.status_code == 200
-    assert provider.last_question is not None
-    assert "Jane Private" not in provider.last_question
-    assert "John Smith" not in provider.last_question
-    assert "Smith Family Trust" not in provider.last_question
-    assert "[redacted:client_name]" in provider.last_question
-    assert first["cloud_transfer"]["redaction_categories"]["client_name"] >= 3
+    assert "disclaimer" not in body
+    transferred = json.dumps(provider.last_messages)
+    assert "Jane Private" not in transferred
+    assert "John Smith" not in transferred
+    assert "Smith Family Trust" not in transferred
+    assert "[redacted:client_name]" in transferred
+    assert body["cloud_transfer"]["redaction_categories"]["client_name"] >= 3
 
 
-def test_cloud_confirmation_hash_binds_provider_model_task_and_final_request():
+def test_cloud_transfer_hash_binds_provider_model_task_and_final_request():
     provider = FakeProvider("anthropic")
     value = {"payload": {"score": 42}, "question": "Explain the evidence."}
 
-    with pytest.raises(ai_copilot.CloudConfirmationRequired) as first:
-        ai_copilot.prepare_provider_transfer(
-            provider, value, task="answer_question",
-        )
-    with pytest.raises(ai_copilot.CloudConfirmationRequired) as changed_task:
-        ai_copilot.prepare_provider_transfer(
-            provider, value, task="opportunity_explain",
-        )
+    _safe, first = ai_copilot.prepare_provider_transfer(
+        provider, value, task="question",
+    )
+    _safe, changed_task = ai_copilot.prepare_provider_transfer(
+        provider, value, task="opportunity_explain",
+    )
     provider.model = "different-model"
-    with pytest.raises(ai_copilot.CloudConfirmationRequired) as changed_model:
-        ai_copilot.prepare_provider_transfer(
-            provider, value, task="answer_question",
-        )
+    _safe, changed_model = ai_copilot.prepare_provider_transfer(
+        provider, value, task="question",
+    )
 
     hashes = {
-        first.value.disclosure["disclosure_hash"],
-        changed_task.value.disclosure["disclosure_hash"],
-        changed_model.value.disclosure["disclosure_hash"],
+        first["disclosure_hash"],
+        changed_task["disclosure_hash"],
+        changed_model["disclosure_hash"],
     }
     assert len(hashes) == 3
+    assert all(not row["confirmation_required"] for row in (first, changed_task, changed_model))
 
 
 def test_sanitization_redacts_names_and_omits_raw_files_and_history():
@@ -391,7 +442,7 @@ def test_holdings_are_omitted_unless_enabled():
     assert included["holdings"][0]["ticker"] == "AAPL"
 
 
-def test_demo_and_blocked_payloads_force_caveats():
+def test_demo_and_blocked_payloads_force_data_quality_warnings():
     demo = ai_copilot.validate_ai_output(
         {"summary": "Review candidate.", "data_quality_statement": "Demo sample."},
         {"data_mode": "demo", "score": 42},
@@ -471,7 +522,7 @@ def test_report_narrative_has_no_forced_compliance_boilerplate():
     )
 
     assert result["needs_review"] is False
-    assert not any("Analysis only" in caveat for caveat in result["compliance_caveats"])
+    assert "compliance_caveats" not in result
 
 
 # ---------------------------------------------------------------- dialogue

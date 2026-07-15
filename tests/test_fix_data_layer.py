@@ -45,6 +45,21 @@ def _csv_bytes(dates, closes):
     return pd.DataFrame({"Date": dates, "Close": closes}).to_csv(index=False).encode("utf-8")
 
 
+def test_live_freshness_uses_retrieval_evidence_without_fabricating_refresh_log():
+    inst = data.Instrument(
+        "FRESH", "Fresh Live", _ohlcv(days=90), "live", [],
+        price_provider="licensed_feed", retrieved_at="2026-07-15T12:30:00+00:00",
+    )
+
+    result = data.instrument_freshness(inst)
+
+    assert result["status"] == "verified_provider_retrieval"
+    assert result["retrieval_basis"] == "instrument_retrieved_at"
+    assert result["retrieved_at"] == "2026-07-15T12:30:00+00:00"
+    assert result["refresh_observed"] is False
+    assert "last_refresh" not in result
+
+
 # --------------------------------------------------------------------------- #
 # Fix 1: register() invalidates stale _PRICE_CACHE entries
 # --------------------------------------------------------------------------- #
@@ -348,3 +363,21 @@ def test_old_schema_version_is_stamped_to_current(monkeypatch, tmp_path):
         versions = [row[0] for row in conn.execute("SELECT version FROM schema_version")]
     conn.close()
     assert versions == [persistence.SCHEMA_VERSION]
+
+
+def test_v14_database_adds_research_context_history_on_open(monkeypatch, tmp_path):
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION", "off")
+    store = _use_db(monkeypatch, tmp_path)
+    with sqlite3.connect(store.path) as conn:
+        conn.execute("DROP TABLE target_research_context_events")
+        conn.execute("UPDATE schema_version SET version = 14")
+
+    persistence.reset_store_for_tests()
+    reopened = persistence.get_store()
+
+    assert reopened.available is True
+    with sqlite3.connect(reopened.path) as conn:
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
+    assert "target_research_context_events" in tables
+    assert version == persistence.SCHEMA_VERSION == 15

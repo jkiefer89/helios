@@ -142,7 +142,8 @@ test("first run remains blocked until real evidence is imported", async ({ page,
   await page.getByRole("option", { name: /E2E Real Model/ }).click();
   await page.getByRole("button", { name: "Build preview" }).click();
   await expect(page.getByRole("heading", { name: /E2E Real Model/ }).first()).toBeVisible();
-  await expect(page.getByText(/Analysis-only use/i).first()).toBeVisible();
+  await expect(page.getByText("Helios Report Preview")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Data Quality / Persistence" })).toBeVisible();
   await page.getByRole("button", { name: "Save snapshot" }).click();
   await expect(page.getByRole("table", { name: /saved report snapshots/i })).toContainText("Research ready");
   await expect(page.getByRole("table", { name: /saved report snapshots/i })).toContainText("Advisor Review");

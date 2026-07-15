@@ -1,14 +1,14 @@
 """Regression tests for the reports-exports audit fixes.
 
 Covers: numeric zeros in HTML exports, honest exec-summary score labels on
-real model PDFs, evidence-page disclosure pagination above the footer, and
-the strict include-AI-narrative toggle resolver.
+real model PDFs, concise evidence pages without legal boilerplate, and the
+strict include-AI-narrative toggle resolver.
 """
 from io import BytesIO
 
 import app as helios
 from conftest import price_csv
-from engine import ai_copilot, pdf_layout, report_exports, report_snapshots
+from engine import ai_copilot, report_exports, report_snapshots
 
 
 def _client():
@@ -78,6 +78,18 @@ def test_zero_risk_cell_renders_in_html_table():
     assert report_exports._format_risk_cell(None) == ""
 
 
+def test_saved_ai_narrative_ignores_legacy_compliance_field():
+    narrative = report_exports.ai_result_to_narrative({
+        "summary": "Evidence summary.",
+        "data_quality_statement": "Current live history is eligible.",
+        "compliance_caveats": ["Legacy legal boilerplate."],
+    })
+
+    assert "Evidence summary." in narrative
+    assert "Current live history is eligible." in narrative
+    assert "Legacy legal boilerplate" not in narrative
+
+
 # --- FIX 2: real-model PDFs must not claim 'Research locked' for unscored fields ---
 
 
@@ -132,7 +144,7 @@ def test_missing_score_label_reads_report_provenance():
     assert report_exports._missing_score_label(demo_instrument) == "Research locked"
 
 
-# --- FIX 3: disclosure blocks must paginate instead of drawing over the footer ---
+# --- FIX 3: internal reports keep evidence warnings without legal boilerplate ---
 
 
 def _maximal_snapshot() -> dict:
@@ -159,43 +171,28 @@ def _maximal_snapshot() -> dict:
     )
 
 
-def test_pdf_disclosures_paginate_with_maximal_caveats_and_narrative():
+def test_pdf_evidence_page_keeps_warnings_and_omits_legal_blocks():
     snapshot = _maximal_snapshot()
     assert len(snapshot["warnings"]) == 5
     assert snapshot["ai_narrative"]
-    assert len(snapshot["disclosure_blocks"]) == 4
-
-    layout = report_exports._evidence_layout(snapshot)
-    assert layout["overflow_blocks"], "maximal content must push disclosure blocks to a continuation page"
-    assert len(layout["first_page_blocks"]) + len(layout["overflow_blocks"]) == 4
-    # Every block drawn on the evidence page stays above the footer margin.
-    for index in range(len(layout["first_page_blocks"])):
-        bottom = (
-            layout["disclosure_header_y"]
-            - report_exports._DISCLOSURE_HEADER_DROP
-            - report_exports._DISCLOSURE_STEP * index
-            - report_exports._DISCLOSURE_PANEL_OFFSET
-        )
-        assert bottom >= pdf_layout.CONTENT_BOTTOM
+    assert "disclosure_blocks" not in snapshot
 
     pdf = report_exports.render_pdf(snapshot)
     assert pdf.startswith(b"%PDF-")
-    assert _page_count(pdf) == 7, "overflow disclosures must add a continuation page"
-    assert b"CONTINUED" in pdf
-    assert b"DISCLOSURE BLOCKS" in pdf
+    assert _page_count(pdf) == 6
+    assert b"DATA AND MODEL WARNINGS" in pdf
+    assert b"AI NARRATIVE" in pdf
+    assert b"DISCLOSURE BLOCKS" not in pdf
 
 
-def test_pdf_without_overflow_keeps_six_pages():
+def test_pdf_without_warnings_keeps_six_pages():
     report = {"title": "Baseline", "kind": "instrument", "sections": {}, "warnings": []}
     snapshot = report_exports.build_snapshot(target_kind="instrument", target_id="BASE", report=report)
 
-    layout = report_exports._evidence_layout(snapshot)
-    assert not layout["overflow_blocks"]
-    assert len(layout["first_page_blocks"]) == 4
-
     pdf = report_exports.render_pdf(snapshot)
     assert _page_count(pdf) == 6
-    assert b"DISCLOSURE BLOCKS" in pdf
+    assert b"No additional data or model-quality warnings" in pdf
+    assert b"DISCLOSURE BLOCKS" not in pdf
 
 
 # --- FIX 4: include-AI-narrative toggle must be honored by the strict resolver ---
@@ -300,7 +297,6 @@ def test_resolve_narrative_generates_when_requested(monkeypatch):
                 "key_points": [],
                 "risks": [],
                 "advisor_language": "",
-                "compliance_caveats": [],
                 "data_quality_statement": "",
                 "provider": "fake",
                 "model": "unit-model",

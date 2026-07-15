@@ -61,6 +61,12 @@ def test_strategy_charges_terminal_exit_and_closes_last_episode(monkeypatch):
     assert result["trade_stats"]["evaluation_end_position"] == "cash"
     assert result["trade_stats"]["terminal_liquidation_applied"] is True
     assert result["strategy"]["total_return_pct"] == pytest.approx(-1.99)
+    assert result["current_signal"]["action_label"] == "MAINTAIN_LONG"
+    assert result["current_signal"]["signal_state"] == "long"
+    assert result["current_signal"]["position_on_last_observed_session"] == "long"
+    assert result["trade_stats"]["evaluation_end_position"] == "cash"
+    assert result["path_evidence"]["trade_summary"]["completed_count"] == 1
+    assert result["path_evidence"]["trade_summary"]["best_trade"]["terminal_liquidation"] is True
 
 
 def test_strategy_drawdown_curve_uses_negative_percentage_convention():
@@ -87,6 +93,50 @@ def test_rolling_sharpe_is_null_for_near_zero_variance_windows():
 
     assert _rolling_sharpe(flat).iloc[63:].isna().all()
     assert np.isfinite(_rolling_sharpe(real).iloc[63:]).all()
+
+
+def test_walk_forward_evidence_uses_frozen_primary_and_diagnostic_sensitivity():
+    from engine.strategy import analyze_oos_evidence
+
+    idx = pd.bdate_range("2023-01-02", periods=420)
+    pattern = np.resize(np.array([0.012, -0.006, 0.009, -0.003, 0.004, -0.002]), len(idx))
+    close = pd.Series(100.0 * np.cumprod(1.0 + pattern), index=idx, name="close")
+
+    result = analyze_oos_evidence(close, cost_bps=5, slippage_bps=2)
+
+    assert result["status"] == "ok"
+    assert result["policy"]["primary_entry_threshold"] == 0.15
+    assert result["policy"]["primary_exit_threshold"] == -0.05
+    assert result["policy"]["selected_on_test"] is False
+    assert result["primary"]["primary"] is True
+    assert result["sensitivity"]["winner_selected"] is False
+    assert result["sensitivity"]["variant_count"] == 9
+    assert len(result["folds"]) == result["fold_count"]
+
+
+def test_walk_forward_common_folds_do_not_change_when_future_rows_are_appended():
+    from engine.strategy import analyze_oos_evidence
+
+    rng = np.random.default_rng(42)
+    idx = pd.bdate_range("2022-01-03", periods=378)
+    close = pd.Series(100.0 * np.exp(np.cumsum(rng.normal(0.0004, 0.012, len(idx)))), index=idx)
+
+    shorter = analyze_oos_evidence(close.iloc[:336], cost_bps=7, slippage_bps=3)
+    longer = analyze_oos_evidence(close.iloc[:357], cost_bps=7, slippage_bps=3)
+
+    assert shorter["status"] == longer["status"] == "ok"
+    assert longer["folds"][:len(shorter["folds"])] == shorter["folds"]
+
+
+def test_walk_forward_evidence_is_explicit_when_history_is_too_short():
+    from engine.strategy import analyze_oos_evidence
+
+    result = analyze_oos_evidence(price_series(days=260))
+
+    assert result["status"] == "insufficient_data"
+    assert result["available_sessions"] == 260
+    assert result["required_sessions"] == 273
+    assert result["fold_count"] == 0
 
 
 def test_strategy_rolling_sharpe_has_no_degenerate_outliers_on_uploaded_data(monkeypatch):
@@ -148,6 +198,14 @@ def test_strategy_endpoints_work_with_uploaded_real_instrument_and_model(monkeyp
     ibody = instrument.get_json()
     assert ibody["eligible_for_real_research"] is True
     assert ibody["data_mode"] == "real"
+    assert ibody["freshness"]["status"] == "uploaded_source_date"
+    assert ibody["freshness"]["latest_bar_date"]
+    assert ibody["research_context"]["configured"] is False
+    assert ibody["current_signal"]["action_label"] in {
+        "ENTER_LONG", "EXIT_TO_CASH", "MAINTAIN_LONG", "STAY_IN_CASH",
+    }
+    assert ibody["path_evidence"]["date_range"]["session_count"] == 260
+    assert ibody["oos_evidence"]["status"] == "insufficient_data"
 
     payload = {
         "file": (BytesIO(b"Ticker,Weight\nMODA,60\nMODB,40\n"), "strategy-model.csv"),
@@ -166,3 +224,6 @@ def test_strategy_endpoints_work_with_uploaded_real_instrument_and_model(monkeyp
     assert mbody["eligible_for_real_research"] is True
     assert mbody["data_mode"] == "real"
     assert mbody["methodology"]["analysis_only"] is True
+    assert mbody["research_context"]["target_kind"] == "model"
+    assert mbody["freshness"]["component_count"] == 2
+    assert mbody["current_signal"]["action_label"]

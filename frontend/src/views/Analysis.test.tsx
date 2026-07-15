@@ -11,7 +11,7 @@ const apiMocks = vi.hoisted(() => ({
 
 vi.mock("../api/client", () => ({ api: apiMocks }));
 
-import { DecisionQuickLog, ThesisEditor } from "./Analysis";
+import { ConvictionGuidancePanel, DecisionQuickLog, ThesisEditor } from "./Analysis";
 
 function payload(kind: "instrument" | "model"): AnalysisResponse {
   return {
@@ -88,5 +88,55 @@ describe("governed model thesis editing", () => {
       change_note: "Document committee rationale.",
       thesis_params: {},
     }));
+  });
+});
+
+describe("conviction guidance", () => {
+  it("renders backend score constraints without recomputing or promising an outcome", () => {
+    const signal = {
+      action: "HOLD",
+      score: 0.18,
+      conviction_pct: 18,
+      conviction_guidance: {
+        title: "How conviction can improve",
+        summary: "Current HOLD conviction is 18.0% (low). 2 evidence constraints or gaps are active.",
+        direction: "bullish" as const,
+        limiter_count: 2,
+        score_bridge: {
+          base_component_conviction_pct: 24,
+          volatility_multiplier: 0.9,
+          mandate_multiplier: 0.85,
+          event_risk_multiplier: 1,
+          final_conviction_pct: 18,
+        },
+        aligned_components: ["Trend"],
+        conflicting_components: ["Momentum"],
+        paths: [{
+          key: "forecast_edge",
+          title: "Measured forecast edge",
+          status: "evidence_gap" as const,
+          current: "Directional accuracy is 48% across 80 rolling-origin observations; the forecast receives 0% of its mandate weight.",
+          what_changes_it: "Accuracy must reach 55% for full forecast weight.",
+          next_evidence: "Accumulate untouched outcomes; do not tune on held-out windows.",
+        }],
+        guardrail: "Conviction measures evidence strength, not expected return. Higher conviction can support BUY or SELL. No path guarantees a favorable outcome.",
+      },
+    };
+
+    render(<ConvictionGuidancePanel signal={signal} />);
+
+    expect(screen.getByRole("heading", { name: "How Conviction Can Improve" })).toBeTruthy();
+    expect(screen.getByText("18.0%", { exact: true })).toBeTruthy();
+    expect(screen.getByText("Measured forecast edge")).toBeTruthy();
+    expect(screen.getByText(/forecast receives 0%/)).toBeTruthy();
+    expect(screen.getByText(/Higher conviction can support BUY or SELL/)).toBeTruthy();
+  });
+
+  it("renders nothing for older responses without guidance", () => {
+    const { container } = render(
+      <ConvictionGuidancePanel signal={{ action: "HOLD", conviction_pct: 12 }} />,
+    );
+
+    expect(container.childElementCount).toBe(0);
   });
 });

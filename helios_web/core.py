@@ -455,7 +455,7 @@ def _required_permission() -> str:
         payload = request.get_json(silent=True) if request.is_json else {}
         status = str((payload or {}).get("approval_status") or "").lower()
         return "governance_approve" if status in {"approved", "rejected"} else "governance_submit"
-    if path.startswith(("/api/model/upload", "/api/model-library/import", "/api/model/thesis")):
+    if path.startswith(("/api/model/upload", "/api/model-library/import", "/api/model/thesis", "/api/research-context")):
         return "governance_submit"
     if path.startswith("/api/trials"):
         if path.endswith("/close"):

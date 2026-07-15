@@ -134,7 +134,7 @@ def generate(model, ps, metrics: dict, sig: dict,
     if vp < 0.85:
         add("vol_penalty_active", "signal", "info",
             f"Conviction was reduced {(1-vp)*100:.0f}% by the volatility penalty (realized vol {vol:.0%}; "
-            f"penalty floor 0.60 at vol≥70%). The raw signal is stronger than the displayed conviction.",
+            f"penalty floor 0.60 at vol>=115%). The raw signal is stronger than the displayed conviction.",
             "If the high vol is expected for this asset class the penalty is doing its job; otherwise size "
             "positions smaller and require trend+forecast agreement before acting.",
             "Penalty engages above 35% annualized vol with slope 0.5, floored at 0.60.")

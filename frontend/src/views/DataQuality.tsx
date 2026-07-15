@@ -294,7 +294,6 @@ export function DataQuality() {
               </div>
             )}
           </Panel>
-          <p className="report-disclaimer">{payload.disclaimer}</p>
         </>
       ) : (
         <EmptyState title="Data quality unavailable" body="The backend did not return a data quality payload." />

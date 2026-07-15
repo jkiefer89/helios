@@ -342,7 +342,7 @@ export function EvidenceLab({
               </div>
             </Panel>
 
-            <Panel title="Methodology" meta="analysis-only">
+            <Panel title="Methodology" meta="walk-forward evidence">
               <dl className="report-dl">
                 <div><dt>No Lookahead</dt><dd>{String(payload.methodology.no_lookahead ?? true)}</dd></div>
                 <div><dt>Signal Basis</dt><dd>{String(payload.methodology.signal_basis || "Existing causal Helios historical signal.")}</dd></div>
@@ -372,7 +372,6 @@ export function EvidenceLab({
               </table>
             </div>
           </Panel>
-          <p className="report-disclaimer">{payload.disclaimer}</p>
         </>
       )}
     </div>
@@ -421,7 +420,6 @@ function ProspectiveValidationPanel({ payload }: { payload: EvidenceLabResponse 
             ))}</tbody>
             </table>
           </div>
-          <p className="report-disclaimer">{prospective.caveat}</p>
         </>
       )}
     </Panel>
@@ -514,7 +512,7 @@ function ProspectiveTrialPanel({
           <button type="button" disabled={loading || closeNote.trim().length < 5} onClick={() => void onClose(closeStatus, closeNote.trim(), owner.trim())}>Close trial</button>
         </div>
       )}
-      <p className="report-disclaimer">Prospective paper research and implementation evidence only. Helios does not execute orders or guarantee outcomes.</p>
+      <p className="report-disclaimer">Prospective results resolve only after persisted market data covers the registered horizon.</p>
     </Panel>
   );
 }

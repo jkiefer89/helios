@@ -387,6 +387,24 @@ signals, decisions, forward results, benchmark alpha, governance facts, and repo
 HTML. A valid content hash by itself is not reported as a successful calculation
 replay.
 
+### Strategy Lab research context and robustness
+
+Strategy Lab separates the deterministic threshold action (`ENTER_LONG`,
+`EXIT_TO_CASH`, `MAINTAIN_LONG`, or `STAY_IN_CASH`) from the observed position
+and from Helios's composite research action. Instrument theses are
+operator-authored, versioned records with an explicit mandate, benchmark,
+horizon, invalidation criteria, change note, actor, and immutable evidence
+reference; Helios does not infer a thesis from a ticker. Model theses remain in
+the existing model-governance record.
+
+Eligible histories also receive chronological out-of-sample diagnostics after
+a 252-session warmup, using complete non-overlapping 21-session folds. The
+0.15/-0.05 primary threshold rule is fixed before evaluation; a nearby 3x3
+threshold family is reported only as sensitivity evidence and is never used to
+select a winner. Full price/equity/drawdown/rolling-statistic arrays remain
+local. Cloud AI may receive only derived trade, drawdown, rolling-Sharpe, and
+walk-forward summaries through the existing sanitizer.
+
 ### Evidence Lab (walk-forward validation)
 
 The **Evidence Lab** answers "would this signal have worked?" without touching
@@ -511,18 +529,16 @@ Before any provider call, Helios builds a sanitized payload: client/model names
 are redacted by default, raw uploaded files are omitted, full price histories are
 omitted, and holdings are omitted unless `HELIOS_AI_SEND_HOLDINGS=1`. Payloads
 prefer computed metrics, drivers, warnings, provenance, persistence metadata,
-source/date ranges, row counts, and analysis-only disclaimers. Blocked payloads
+source/date ranges, and row counts. Blocked payloads
 must remain labeled as unavailable for research.
 
-Cloud providers add a second, explicit transfer boundary. Helios locally applies
+Enabling a cloud provider in the server environment authorizes sanitized AI
+requests without a confirmation prompt on every action. Helios locally applies
 key-based, camelCase-aware, contextual-name, pattern-based, and payload-derived identifier DLP
-redaction. It calculates a disclosure hash over the final sanitized provider
+redaction and calculates an audit hash over the final sanitized provider
 request, including provider, model, task, system instructions, and prompt or
-dialogue, then asks the advisor to confirm that fingerprint before the request
-is sent. A confirmation for a different payload, task, model, or provider is
-rejected. Local
-AI remains local-provider controlled and does not use the cloud confirmation
-path. Provider/model metadata can be returned; secrets cannot.
+dialogue. Local AI remains local-provider controlled. Provider/model and
+non-secret transfer metadata can be returned; secrets cannot.
 
 Provider output is parsed into a fixed JSON schema and checked for unsupported
 numeric claims, prohibited assurance phrases, data-mode drift, and attempts to
@@ -683,6 +699,7 @@ engine/
 | `GET /api/opportunities` | Opportunity Radar rankings; returns no placeholder rows when real data is unavailable |
 | `GET /api/strategy/analyze` | Strategy Lab for a single instrument with no-lookahead evidence |
 | `GET /api/model/strategy/analyze` | Strategy Lab for a client model; blocks when model provenance is invalid |
+| `GET/POST /api/research-context` | retrieve or version an operator-authored instrument thesis, mandate, benchmark, horizon and invalidation rules |
 | `GET /api/model/clinic` | Portfolio Clinic diagnostics and hypothetical, analysis-only suggestions |
 | `GET /api/lookthrough?ticker=SYM` | Fund look-through: real SEC N-PORT holdings of one ETF/mutual fund, with former-name (predecessor) linkage and forward-data provenance — needs no price history |
 | `GET /api/model/lookthrough?id=ID` | Roll every holding's look-through up to a model-level real exposure (asset-class weights, underlying concentration) with composition-coverage provenance |

@@ -71,12 +71,42 @@ def test_signal_output_shape_and_mandate_weights_change_effective_weights():
     base = signals.evaluate(close, fc, sent)
     income = signals.evaluate(close, fc, sent, mandate_key="income")
 
-    for key in ("action", "score", "conviction_pct", "components", "headline_rationale"):
+    for key in (
+        "action", "score", "conviction_pct", "components",
+        "conviction_guidance", "headline_rationale",
+    ):
         assert key in base
     assert len(base["components"]) == 4
     base_weights = {c["name"]: c["effective_weight"] for c in base["components"]}
     income_weights = {c["name"]: c["effective_weight"] for c in income["components"]}
     assert income_weights["sentiment"] != base_weights["sentiment"]
+
+
+def test_conviction_guidance_explains_actual_math_and_forecast_gate():
+    close = price_series(260)
+    fc = {
+        "expected_return_pct": 4.0,
+        "horizon_days": 21,
+        "prob_up": 0.62,
+        "quality": {"directional_accuracy": 0.48, "n_test": 80},
+    }
+    sent = {"aggregate_score": 0.2, "aggregate_label": "positive", "count": 3}
+
+    sig = signals.evaluate(close, fc, sent, history_days=260)
+    guidance = sig["conviction_guidance"]
+    bridge = guidance["score_bridge"]
+    forecast_path = next(path for path in guidance["paths"] if path["key"] == "forecast_edge")
+
+    assert bridge["final_conviction_pct"] == sig["conviction_pct"]
+    assert bridge["volatility_multiplier"] == sig["vol_penalty"]
+    assert bridge["mandate_multiplier"] == sig["mandate_fit"]
+    assert forecast_path["status"] == "evidence_gap"
+    assert "48%" in forecast_path["current"]
+    assert "0%" in forecast_path["current"]
+    assert "55%" in forecast_path["what_changes_it"]
+    assert "Do not tune" in forecast_path["next_evidence"]
+    assert "manual score overrides" in guidance["guardrail"]
+    assert "Higher conviction can support BUY or SELL" in guidance["guardrail"]
 
 
 def test_signal_short_history_caveat_uses_analyzed_not_aligned_history():
@@ -107,6 +137,13 @@ def test_hold_signal_copy_does_not_confuse_action_with_mandate_label():
     assert sig["action"] == "HOLD"
     assert "Balanced —" not in headline
     assert "Neutral evidence —" in headline
+    threshold_path = next(
+        path for path in sig["conviction_guidance"]["paths"]
+        if path["key"] == "action_threshold"
+    )
+    assert threshold_path["status"] == "limited"
+    assert "HOLD band" in threshold_path["current"]
+    assert sig["conviction_guidance"]["limiter_count"] >= 1
     # Below-chance measured accuracy now GATES the forecast weight to zero
     # (it used to keep full weight behind a polite transparency clause).
     assert "Model projects" not in headline

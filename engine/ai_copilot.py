@@ -16,11 +16,9 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from hmac import compare_digest
 from typing import Any
 
 from . import dlp
-from ._common import dedupe as _dedupe
 from .persistence import redact_secrets
 
 SCHEMA_KEYS = (
@@ -30,7 +28,6 @@ SCHEMA_KEYS = (
     "what_would_invalidate",
     "stance",
     "advisor_language",
-    "compliance_caveats",
     "used_numbers",
     "missing_information",
     "data_quality_statement",
@@ -38,6 +35,16 @@ SCHEMA_KEYS = (
     "model",
     "generated_at",
 )
+
+PROVIDER_METHOD_TASKS = {
+    "explain_opportunity": "opportunity_explain",
+    "critique_opportunity": "opportunity_critique",
+    "summarize_strategy": "strategy_summary",
+    "summarize_portfolio_clinic": "clinic_summary",
+    "write_advisor_report": "report_narrative",
+    "answer_question": "question",
+    "macro_brief": "macro_brief",
+}
 VALID_PROVIDERS = {"none", "local", "anthropic", "openai", "dual", "hybrid"}
 VALID_LOCAL_BACKENDS = {"ollama", "openai_compatible"}
 FORBIDDEN_PHRASES = (
@@ -69,6 +76,10 @@ BLOCKED_KEYS = {
     "benchmark_curve",
     "drawdown_curve",
     "rolling_sharpe_curve",
+    # Component-level model freshness names the model's holdings. Aggregate
+    # freshness counts/dates are sent, but the component list follows the same
+    # opt-in privacy boundary as holdings composition.
+    "component_details",
     # Advisor free prose (mandate notes) cannot be reliably scrubbed by
     # pattern matching — verified leak of a client name through
     # /api/model/analyze -> dialogue context (review finding).
@@ -93,6 +104,11 @@ NAME_KEYS = {"name", "display_name", "client_name", "model_name", "title",
              "client", "household", "account", "prepared_for"}
 # Keys whose ticker->number dict values carry portfolio composition (holdings-equivalent).
 COMPOSITION_WEIGHT_KEYS = {"weights", "allocations", "composition", "target_weights", "holdings"}
+COMPLIANCE_ONLY_KEYS = {
+    "analysis_only_disclaimer",
+    "compliance_caveats",
+    "disclosure_blocks",
+}
 _TICKER_KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9.\-]{0,9}$")
 _ACTION_UPGRADE_RE = re.compile(
     r"\b(?:strong buy|buy|accumulate|overweight|load(?:ing)? up"
@@ -141,25 +157,13 @@ class AIProviderError(AIError):
     pass
 
 
-class CloudConfirmationRequired(AIError):
-    status_code = 409
-
-    def __init__(self, disclosure: dict[str, Any], status: dict[str, Any] | None = None):
-        super().__init__(
-            "Confirm the locally redacted payload before sending it to the cloud AI provider.",
-            status,
-        )
-        self.disclosure = disclosure
-
-
 def prepare_provider_transfer(
     provider: "AIProvider",
     value: Any,
     *,
     task: str,
-    confirmation: dict[str, Any] | None = None,
 ) -> tuple[Any, dict[str, Any]]:
-    """Redact locally and confirm the exact final cloud-transfer envelope."""
+    """Redact locally and fingerprint the exact provider-transfer envelope."""
     sanitized, disclosure = dlp.prepare(value)
     status = provider.status()
     provider_name = str(getattr(provider, "provider", status.get("provider") or "unknown"))
@@ -209,23 +213,11 @@ def prepare_provider_transfer(
         "task": task,
         "transfer_scope": "final_sanitized_provider_request",
         "cloud_transfer": cloud,
-        "confirmed": False,
-    }
-    if not cloud:
-        return sanitized, {**disclosure, "confirmed": True, "confirmation_required": False}
-    supplied_hash = str((confirmation or {}).get("disclosure_hash") or "")
-    confirmed = (confirmation or {}).get("confirmed") is True
-    if not confirmed or not supplied_hash or not compare_digest(
-        supplied_hash, str(disclosure["disclosure_hash"]),
-    ):
-        raise CloudConfirmationRequired(
-            {**disclosure, "confirmation_required": True}, status,
-        )
-    return sanitized, {
-        **disclosure,
         "confirmed": True,
         "confirmation_required": False,
+        "authorization_basis": "server_configured_provider" if cloud else "local_provider",
     }
+    return sanitized, disclosure
 
 
 @dataclass
@@ -286,28 +278,28 @@ class AIProvider:
         )
 
     def explain_opportunity(self, payload: dict[str, Any], regenerate: bool = False) -> dict[str, Any]:
-        return self._run("opportunity_explain", payload, regenerate=regenerate)
+        return self._run(PROVIDER_METHOD_TASKS["explain_opportunity"], payload, regenerate=regenerate)
 
     def critique_opportunity(self, payload: dict[str, Any], regenerate: bool = False) -> dict[str, Any]:
-        return self._run("opportunity_critique", payload, regenerate=regenerate)
+        return self._run(PROVIDER_METHOD_TASKS["critique_opportunity"], payload, regenerate=regenerate)
 
     def summarize_strategy(self, payload: dict[str, Any], regenerate: bool = False) -> dict[str, Any]:
-        return self._run("strategy_summary", payload, regenerate=regenerate)
+        return self._run(PROVIDER_METHOD_TASKS["summarize_strategy"], payload, regenerate=regenerate)
 
     def summarize_portfolio_clinic(self, payload: dict[str, Any], regenerate: bool = False) -> dict[str, Any]:
-        return self._run("clinic_summary", payload, regenerate=regenerate)
+        return self._run(PROVIDER_METHOD_TASKS["summarize_portfolio_clinic"], payload, regenerate=regenerate)
 
     def write_advisor_report(self, payload: dict[str, Any], regenerate: bool = False) -> dict[str, Any]:
-        return self._run("report_narrative", payload, regenerate=regenerate)
+        return self._run(PROVIDER_METHOD_TASKS["write_advisor_report"], payload, regenerate=regenerate)
 
     def answer_question(self, payload: dict[str, Any], question: str, regenerate: bool = False) -> dict[str, Any]:
-        return self._run("question", payload, question=question, regenerate=regenerate)
+        return self._run(PROVIDER_METHOD_TASKS["answer_question"], payload, question=question, regenerate=regenerate)
 
     def macro_brief(self, payload: dict[str, Any], regenerate: bool = False) -> dict[str, Any]:
         """Analyst read of the macro snapshot: Fed stance, policy themes,
         geopolitical risk, and what it means for positioning — pointed, sourced
         from the deterministic snapshot only (the numbers never come from AI)."""
-        return self._run("macro_brief", payload, regenerate=regenerate)
+        return self._run(PROVIDER_METHOD_TASKS["macro_brief"], payload, regenerate=regenerate)
 
     def chat(self, messages: list, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         """Multi-turn research dialogue over a sanitized Helios context.
@@ -338,6 +330,7 @@ class AIProvider:
             cached = _cache_get(cache_key, self.config.cache_ttl_s)
             if cached:
                 cached = dict(cached)
+                cached.pop("compliance_caveats", None)
                 cached["cached"] = True
                 return cached
         prompt = build_prompt(task, sanitized, question)
@@ -812,7 +805,6 @@ def sanitize_payload(payload: dict[str, Any], config: AIConfig | None = None) ->
         # (review finding).
         "full_price_history_sent": _contains_series(sanitized),
     }
-    sanitized.setdefault("analysis_only_disclaimer", "Analysis only; Helios does not provide investment advice, order execution, or return guarantees.")
     return sanitized
 
 
@@ -912,7 +904,6 @@ def build_prompt(task: str, sanitized_payload: dict[str, Any], question: str = "
         "key_points",
         "risks",
         "what_would_invalidate",
-        "compliance_caveats",
         "used_numbers",
         "missing_information",
     }
@@ -971,7 +962,6 @@ def parse_provider_json(text: str, provider: str, model: str) -> dict[str, Any]:
             "risks": ["Provider response was not valid JSON."],
             "what_would_invalidate": [],
             "advisor_language": "",
-            "compliance_caveats": ["Malformed provider JSON was not used as decision-grade narrative."],
             "used_numbers": [],
             "missing_information": ["Valid provider JSON response."],
             "data_quality_statement": "AI response requires review.",
@@ -994,16 +984,10 @@ def validate_ai_output(
     if unsupported:
         result["needs_review"] = True
         result["unsupported_numbers"] = unsupported[:12]
-        result["compliance_caveats"].append(
-            "AI mentioned numeric values not found in the Helios payload; review those statements before use."
-        )
     result, blocked = _remove_forbidden_phrases(result)
     if blocked:
         result["needs_review"] = True
         result["blocked_phrases"] = blocked
-        result["compliance_caveats"].append(
-            "AI language contained prohibited assurance phrasing; those phrases were removed or caveated."
-        )
     action = _deterministic_action(sanitized_payload)
     if action:
         result["deterministic_action"] = action
@@ -1039,21 +1023,37 @@ def validate_ai_output(
             result["data_quality_statement"] = (
                 f"{stmt} Ineligible or blocked data is not real market evidence.".strip()
             )
-            result["compliance_caveats"].append("Data is ineligible or blocked and must not be presented as real research evidence.")
         elif data_mode == "mixed" and "not verified real market data" not in stmt.lower():
             result["data_quality_statement"] = (
-                f"{stmt} Parts of this evidence are not verified real market data; advisor review is required.".strip()
-            )
-            result["compliance_caveats"].append(
-                "Data mode is mixed; parts of this evidence are not verified real market data and require advisor review."
+                f"{stmt} Parts of this evidence are not verified real market data.".strip()
             )
     result["provider"] = provider
     result["model"] = model
     result["task"] = task
     result["generated_at"] = result.get("generated_at") or datetime.now(timezone.utc).isoformat()
     result["cached"] = False
-    result["compliance_caveats"] = _dedupe(result["compliance_caveats"])
     return result
+
+
+def _is_legal_boilerplate(value: Any) -> bool:
+    if isinstance(value, str):
+        text = value.lower()
+    elif isinstance(value, (list, tuple)) and all(isinstance(item, str) for item in value):
+        text = " ".join(value).lower()
+    else:
+        return False
+
+    if "not investment advice" in text or "brokerage services" in text:
+        return True
+    analysis_only = "analysis only" in text or "analysis-only" in text
+    legal_operations = (
+        "does not execute",
+        "never executes",
+        "order execution",
+        "return guarantee",
+        "guarantee outcomes",
+    )
+    return analysis_only and any(phrase in text for phrase in legal_operations)
 
 
 def _sanitize_value(
@@ -1069,6 +1069,18 @@ def _sanitize_value(
     if key in BLOCKED_KEYS or (
             key not in BLOCKED_TOKEN_EXEMPT and BLOCKED_TOKENS & set(key.split("_"))):
         return _blocked_marker(key)
+    if key == "research_context" and isinstance(value, dict):
+        # Thesis-aware review needs the governed purpose and constraints, not
+        # operator identity, free-form change notes, or evidence-store internals.
+        allowed = {
+            "configured", "target_kind", "target_id", "version", "thesis",
+            "thesis_params", "mandate_key", "mandate_label", "benchmark",
+            "horizon_days", "invalidation_criteria", "governance_source",
+        }
+        return {
+            str(k)[:80]: _sanitize_value(v, cfg, path + (str(k),), name_patterns)
+            for k, v in value.items() if str(k) in allowed
+        }
     if key == "holdings" and not cfg.send_holdings:
         if isinstance(value, list):
             return {"omitted": True, "count": len(value), "reason": "HELIOS_AI_SEND_HOLDINGS=0"}
@@ -1091,6 +1103,11 @@ def _sanitize_value(
         out = {}
         for k, v in value.items():
             skey = str(k)[:80]
+            normalized_key = skey.lower()
+            if normalized_key in COMPLIANCE_ONLY_KEYS:
+                continue
+            if normalized_key == "disclaimer" and _is_legal_boilerplate(v):
+                continue
             # Redact dict KEYS too: client/model names used as map keys (e.g.
             # a {model_name: weight} dict) leaked verbatim while values were
             # scrubbed (review finding).
@@ -1220,7 +1237,7 @@ def _redact_names(value: str, name_patterns: tuple[re.Pattern, ...]) -> str:
 def _normalize_result(result: dict[str, Any], provider: str, model: str) -> dict[str, Any]:
     normalized = {}
     for key in SCHEMA_KEYS:
-        if key in {"key_points", "risks", "what_would_invalidate", "compliance_caveats", "used_numbers", "missing_information"}:
+        if key in {"key_points", "risks", "what_would_invalidate", "used_numbers", "missing_information"}:
             normalized[key] = _as_list(result.get(key))
         else:
             normalized[key] = str(result.get(key) or "")
@@ -1282,7 +1299,6 @@ def _number_claim_content(result: dict[str, Any]) -> dict[str, Any]:
             "what_would_invalidate",
             "stance",  # the argue-with-the-engine field must not cite invented numbers
             "advisor_language",
-            "compliance_caveats",
             "used_numbers",
             "missing_information",
             "data_quality_statement",

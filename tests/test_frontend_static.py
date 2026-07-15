@@ -217,10 +217,10 @@ def test_react_terminal_uses_live_aware_data_honesty_copy():
 
     assert "<strong>Demo / gated data</strong>" not in command_source
     assert "<strong>Real data required</strong>" not in command_source
-    assert "buildDisclosureCards(payload, sourceStatus)" in command_source
+    assert "buildDisclosureCards(payload, sourceStatus)" not in command_source
     assert "formatSourceStatus" in command_source
-    assert "Real data active" in command_source
-    assert "Research unlocked" in command_source
+    assert "Data status" in command_source
+    assert "Research Gate" in command_source
     assert "Loading real-data rankings" in opportunity_source
     assert "useViewFetch" in opportunity_source
     assert "isLoading" in opportunity_source
@@ -228,12 +228,23 @@ def test_react_terminal_uses_live_aware_data_honesty_copy():
 
 def test_ai_copilot_disabled_state_is_non_actionable_and_not_repetitive():
     source = (ROOT / "frontend" / "src" / "components" / "ai" / "AICopilotPanel.tsx").read_text()
+    chat_source = (ROOT / "frontend" / "src" / "components" / "ai" / "CopilotChat.tsx").read_text()
+    report_source = (ROOT / "frontend" / "src" / "views" / "Reports.tsx").read_text()
+    client_source = (ROOT / "frontend" / "src" / "api" / "client.ts").read_text()
 
     assert "const unavailableReason" in source
     assert "{unavailableReason && <span>{unavailableReason}</span>}" in source
     assert "disabled={Boolean(unavailableReason) || loading}" in source
     assert "AI Copilot unavailable" in source
     assert source.count("AI Copilot is off. Helios analytics still work normally.") == 1
+    assert "Compliance caveats" not in source
+    assert "Unsupported numbers" in source
+    assert "Blocked phrases" in source
+    for runtime_source in (source, chat_source, report_source):
+        assert "ai-cloud-confirmation" not in runtime_source
+        assert "cloud_ai_confirmation_required" not in runtime_source
+        assert "privacy_warning" not in runtime_source
+    assert "cloud_confirmation" not in client_source
 
 
 def test_real_data_onboarding_copy_switches_when_live_histories_exist():
@@ -278,6 +289,7 @@ def test_models_view_exposes_governed_model_library():
     assert "ModelGovernanceApprovalPacket" in type_source
     assert "committee_identity" in type_source
     assert "pdf_url" in type_source
+    assert "template.provenance.caveat" not in source
 
 
 def test_models_view_exposes_native_model_editor():
@@ -368,17 +380,17 @@ def test_reports_view_exposes_institutional_report_system():
     type_source = (ROOT / "frontend" / "src" / "api" / "types.ts").read_text()
 
     assert "Institutional Report System" in source
-    assert "Advisor/client-ready reports" in source
+    assert "source provenance" in source
     assert "Prepared for" in source
     assert "Prepared by" in source
     assert "Reviewer" in source
     assert "Report Version" in source
     assert "Audit Trail" in source
-    assert "Disclosure Blocks" in source
+    assert "Disclosure Blocks" not in source
     assert "Print / PDF layout" in source
     assert "version_label" in source
     assert "audit_trail" in type_source
-    assert "disclosure_blocks" in type_source
+    assert "disclosure_blocks" not in type_source
     assert "output_formats" in type_source
 
 
@@ -470,6 +482,7 @@ def test_evidence_lab_view_is_dedicated_and_routed():
     assert "Regime Sensitivity" in view_source
     assert "Signal Decay" in view_source
     assert "Confidence Bands" in view_source
+    assert "prospective.caveat" not in view_source
     assert "Prospective Validation" in view_source
     assert "Signal Journal" in view_source
     assert "response.threshold_policy" in view_source

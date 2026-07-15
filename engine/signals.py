@@ -163,6 +163,237 @@ def _conviction_band(conviction_pct: float) -> str:
     return "very high"
 
 
+def _conviction_guidance(
+    *,
+    action: str,
+    score: float,
+    conviction_pct: float,
+    band: str,
+    base_composite: float,
+    components: list[dict],
+    forecast_result: dict,
+    edge_multiplier: float,
+    annualized_vol: float,
+    vol_penalty: float,
+    mandate_fit: float,
+    mandate_key: str | None,
+    mandate_label: str | None,
+    mandate_target_vol: float | None,
+    event_damper: float,
+    tactical: dict,
+    strategic: dict,
+    history_days: int | None,
+) -> dict:
+    """Explain the existing conviction math without proposing score overrides.
+
+    This is a deterministic projection of values already used by ``evaluate``.
+    It does not simulate a higher score or change a component, weight, threshold,
+    action, or caveat.
+    """
+    epsilon = 0.005
+    direction_sign = 1 if base_composite > epsilon else -1 if base_composite < -epsilon else 0
+    direction = "bullish" if direction_sign > 0 else "bearish" if direction_sign < 0 else "mixed"
+    aligned: list[str] = []
+    conflicting: list[str] = []
+    neutral: list[str] = []
+    for component in components:
+        name = str(component.get("name") or "component").replace("_", " ").title()
+        contribution = float(component.get("contribution") or 0.0)
+        if direction_sign == 0 or abs(contribution) <= epsilon:
+            neutral.append(name)
+        elif contribution * direction_sign > 0:
+            aligned.append(name)
+        else:
+            conflicting.append(name)
+
+    if direction_sign == 0:
+        alignment_current = "The component composite is near zero, so no stable direction has emerged."
+        alignment_status = "limited"
+    else:
+        alignment_current = (
+            f"{len(aligned)} component(s) align with the {direction} evidence; "
+            f"{len(conflicting)} conflict and {len(neutral)} are neutral or gated."
+        )
+        alignment_status = "supportive" if not conflicting and len(aligned) >= 2 else "limited"
+
+    paths: list[dict] = [{
+        "key": "component_alignment",
+        "title": "Independent evidence alignment",
+        "status": alignment_status,
+        "current": alignment_current,
+        "what_changes_it": (
+            "Higher absolute conviction requires independently sourced components to point in one direction. "
+            "That can strengthen either a BUY or a SELL conclusion."
+        ),
+        "next_evidence": (
+            "Review new trend, momentum, forecast, sentiment, and fundamental evidence. "
+            "Keep contrary components visible and do not override their weights."
+        ),
+    }]
+
+    if action == "HOLD":
+        paths.append({
+            "key": "action_threshold",
+            "title": "Action-threshold distance",
+            "status": "limited",
+            "current": (
+                f"The final composite is {score:+.3f}, inside the HOLD band from -0.25 to +0.25."
+            ),
+            "what_changes_it": (
+                "A BUY requires a score above +0.25 and a SELL requires a score below -0.25. "
+                "The thresholds do not move to create a stronger rating."
+            ),
+            "next_evidence": (
+                "Require new independent evidence to move the absolute composite away from zero; "
+                "do not reinterpret a HOLD as a directional recommendation."
+            ),
+        })
+
+    quality = forecast_result.get("quality") or {}
+    n_test_raw = quality.get("n_test")
+    da_raw = quality.get("directional_accuracy")
+    n_test = int(n_test_raw) if isinstance(n_test_raw, (int, float)) and np.isfinite(n_test_raw) else 0
+    da = float(da_raw) if isinstance(da_raw, (int, float)) and np.isfinite(da_raw) else None
+    if edge_multiplier >= 0.999:
+        forecast_status = "supportive"
+    elif edge_multiplier > 0:
+        forecast_status = "partial"
+    else:
+        forecast_status = "evidence_gap"
+    if da is None:
+        forecast_current = (
+            f"No measured directional accuracy is available across {n_test} rolling-origin observations; "
+            f"the forecast receives {edge_multiplier:.0%} of its mandate weight."
+        )
+    else:
+        forecast_current = (
+            f"Directional accuracy is {da:.0%} across {n_test} rolling-origin observations; "
+            f"the forecast receives {edge_multiplier:.0%} of its mandate weight."
+        )
+    paths.append({
+        "key": "forecast_edge",
+        "title": "Measured forecast edge",
+        "status": forecast_status,
+        "current": forecast_current,
+        "what_changes_it": (
+            f"At least {_EDGE_MIN_TEST_N} untouched out-of-sample observations are required. "
+            "Accuracy must exceed 50% to earn weight and reach 55% for full forecast weight."
+        ),
+        "next_evidence": (
+            "Accumulate new rolling-origin outcomes and revalidate prospectively. "
+            "Do not tune thresholds or features on the held-out windows."
+        ),
+    })
+
+    if vol_penalty < 0.999:
+        portfolio_next = (
+            "Research concentration, correlation, and position-level volatility, then review any model change "
+            "under its mandate and governance controls."
+            if mandate_key else
+            "An individual instrument's realized volatility cannot be manually changed; reassess after new "
+            "observations or accept the current penalty."
+        )
+        paths.append({
+            "key": "volatility_penalty",
+            "title": "Realized-volatility penalty",
+            "status": "limited",
+            "current": f"Annualized volatility is {annualized_vol:.1%}; conviction is multiplied by {vol_penalty:.2f}.",
+            "what_changes_it": (
+                "The existing engine formula reduces conviction when realized annualized volatility exceeds 35%."
+            ),
+            "next_evidence": portfolio_next,
+        })
+
+    if mandate_key and mandate_fit < 0.999:
+        target_text = f"{mandate_target_vol:.1%}" if mandate_target_vol is not None else "the mandate budget"
+        paths.append({
+            "key": "mandate_fit",
+            "title": "Mandate risk fit",
+            "status": "limited",
+            "current": (
+                f"Realized volatility exceeds the {mandate_label or mandate_key} target of {target_text}; "
+                f"conviction is multiplied by {mandate_fit:.2f}."
+            ),
+            "what_changes_it": "Mandate fit returns to 1.00 only when observed risk is within the governed budget.",
+            "next_evidence": (
+                "Review model risk against the approved mandate. Any risk reduction or mandate change requires "
+                "governance; relabeling solely to lift conviction is not valid."
+            ),
+        })
+
+    if event_damper < 0.999:
+        paths.append({
+            "key": "event_risk",
+            "title": "Macro and event-risk context",
+            "status": "limited",
+            "current": f"Observed event-risk context multiplies conviction by {event_damper:.2f}.",
+            "what_changes_it": (
+                "This damper changes only when the observed FOMC, geopolitical, or earnings-breadth context changes."
+            ),
+            "next_evidence": "Refresh the underlying context after the event resolves; do not override the damper.",
+        })
+
+    if not strategic.get("usable"):
+        paths.append({
+            "key": "strategic_fundamentals",
+            "title": "Strategic fundamental evidence",
+            "status": "evidence_gap",
+            "current": "No usable sourced fundamental track is available; the rating is technical evidence only.",
+            "what_changes_it": (
+                "Verified forward fundamentals add an independent strategic track and may raise or lower conviction."
+            ),
+            "next_evidence": "Connect sourced fundamentals and rerun the review; never infer or backfill missing facts.",
+        })
+    elif tactical.get("action") != strategic.get("action"):
+        paths.append({
+            "key": "track_agreement",
+            "title": "Tactical and strategic agreement",
+            "status": "limited",
+            "current": (
+                f"Tactical evidence is {tactical.get('action')}; strategic evidence is {strategic.get('action')}."
+            ),
+            "what_changes_it": "Conviction strengthens only if future tactical and strategic evidence converges.",
+            "next_evidence": "Investigate the disagreement and retain both tracks; do not discard contrary evidence.",
+        })
+
+    if history_days is not None and history_days < 252:
+        paths.append({
+            "key": "history_depth",
+            "title": "History and evidence depth",
+            "status": "evidence_gap",
+            "current": f"Only {history_days} analyzed trading days are available, below one trading year.",
+            "what_changes_it": (
+                "A longer eligible history improves reliability and out-of-sample depth; it does not mechanically add points."
+            ),
+            "next_evidence": "Accumulate real observations and rerun validation; never fabricate or backfill history.",
+        })
+
+    limiter_count = sum(path["status"] != "supportive" for path in paths)
+    return {
+        "title": "How conviction can improve",
+        "summary": (
+            f"Current {action} conviction is {conviction_pct:.1f}% ({band}). "
+            f"{limiter_count} evidence constraint(s) or gap(s) are active."
+        ),
+        "direction": direction,
+        "limiter_count": limiter_count,
+        "score_bridge": {
+            "base_component_conviction_pct": round(min(abs(base_composite) * 100.0, 100.0), 1),
+            "volatility_multiplier": round(vol_penalty, 3),
+            "mandate_multiplier": round(mandate_fit, 3),
+            "event_risk_multiplier": round(event_damper, 3),
+            "final_conviction_pct": conviction_pct,
+        },
+        "aligned_components": aligned,
+        "conflicting_components": conflicting,
+        "paths": paths,
+        "guardrail": (
+            "Conviction measures evidence strength, not expected return. Higher conviction can support BUY or SELL. "
+            "Helios does not accept manual score overrides, and no path guarantees a favorable outcome."
+        ),
+    }
+
+
 def evaluate(close: pd.Series, forecast_result: dict, sentiment_result: dict,
              mandate_key: str | None = None, portfolio_meta: dict | None = None,
              history_days: int | None = None, data_honesty: dict | None = None,
@@ -220,8 +451,10 @@ def evaluate(close: pd.Series, forecast_result: dict, sentiment_result: dict,
 
     # Mandate-fit: dampen conviction when realized vol exceeds the mandate budget.
     mandate_fit = 1.0
+    target_vol = None
     if mandate_key:
         tgt_vol = mnd.get(mandate_key)["target_vol_pct"] / 100.0
+        target_vol = tgt_vol
         if vol > tgt_vol > 0:
             mandate_fit = float(np.clip(tgt_vol / vol, 0.5, 1.0))
 
@@ -297,6 +530,26 @@ def evaluate(close: pd.Series, forecast_result: dict, sentiment_result: dict,
             f"White House policy activity touching {sector_policy.get('sector')} "
             f"({sector_policy.get('n_actions')} recent action(s); themes: "
             f"{', '.join(sector_policy.get('themes') or [])}) — headline/policy risk.")
+    conviction_guidance = _conviction_guidance(
+        action=action,
+        score=score,
+        conviction_pct=conviction_pct,
+        band=band,
+        base_composite=base_composite,
+        components=components,
+        forecast_result=forecast_result,
+        edge_multiplier=edge_mult,
+        annualized_vol=vol,
+        vol_penalty=vol_penalty,
+        mandate_fit=mandate_fit,
+        mandate_key=mandate_key,
+        mandate_label=mlabel,
+        mandate_target_vol=target_vol,
+        event_damper=event_damper,
+        tactical=tactical,
+        strategic=strategic,
+        history_days=history_days,
+    )
     headline = _headline(action, conviction_pct, band, ordered, vol, vol_penalty,
                          mandate_fit, mandate_key, mlabel, portfolio_meta, caveats,
                          tactical=tactical, strategic=strategic)
@@ -312,6 +565,7 @@ def evaluate(close: pd.Series, forecast_result: dict, sentiment_result: dict,
         "components": components,
         "tactical": tactical,
         "strategic": strategic,
+        "conviction_guidance": conviction_guidance,
         "headline_rationale": headline,
         "caveats": caveats,
     }

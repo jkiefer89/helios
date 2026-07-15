@@ -42,7 +42,7 @@ export function SignalJournal() {
         <div>
           <div className="section-label">Signal Journal</div>
           <h1>Paper performance tracking</h1>
-          <p>Deliberately recorded Helios signals are tracked with input range, action, benchmark, pending or measured forward result, and analysis-only caveats.</p>
+          <p>Recorded Helios signals are tracked with input range, action, benchmark, and pending or measured forward results.</p>
         </div>
         <form className="toolbar" onSubmit={(event) => { event.preventDefault(); void refresh(); }}>
           <button type="submit">{loading ? "Refreshing..." : "Refresh journal"}</button>
@@ -103,14 +103,13 @@ export function SignalJournal() {
             <SignalHistory rows={payload.entries} />
           </section>
 
-          <Panel title="Methodology" meta="analysis-only">
+          <Panel title="Methodology" meta="paper measurement">
             <dl className="report-dl">
-              <div><dt>Tracking</dt><dd>Paper tracking only. No brokerage execution, orders, or return guarantees.</dd></div>
+              <div><dt>Tracking</dt><dd>Signals are measured against later persisted prices and their configured benchmarks.</dd></div>
               <div><dt>Hit Rate Basis</dt><dd>{String(payload.methodology.hit_rate_basis || "Measured paper signals are evaluated against action intent and benchmark evidence when available.")}</dd></div>
               <div><dt>Forward Results</dt><dd>{String(payload.methodology.forward_results || "Pending results resolve only when later persisted market data covers the signal horizon.")}</dd></div>
             </dl>
           </Panel>
-          <p className="report-disclaimer">{payload.disclaimer}</p>
         </>
       )}
     </div>

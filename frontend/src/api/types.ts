@@ -22,8 +22,56 @@ export interface ProvenancePayload {
   reason?: string;
   required_action?: string;
   data_provenance?: DataQuality;
+  freshness?: FreshnessEvidence;
+  research_context?: ResearchContext;
   warnings?: string[];
   disclaimer?: string;
+}
+
+export interface FreshnessEvidence {
+  status: string;
+  source?: string;
+  price_provider?: string;
+  row_count?: number;
+  first_bar_date?: string | null;
+  latest_bar_date?: string | null;
+  latest_bar_age_calendar_days?: number | null;
+  retrieved_at?: string | null;
+  retrieval_basis?: string;
+  retrieval_fallback_used?: boolean;
+  refresh_observed?: boolean;
+  provider_retrieval_verified?: boolean;
+  last_refresh?: RefreshLogEntry;
+  last_successful_refresh?: RefreshLogEntry;
+  component_count?: number;
+  missing_component_count?: number;
+  unverified_live_component_count?: number;
+  provider_retrieval_component_count?: number;
+  uploaded_source_date_component_count?: number;
+  oldest_retrieved_at?: string | null;
+  newest_retrieved_at?: string | null;
+  binding_latest_bar_date?: string | null;
+  newest_component_bar_date?: string | null;
+}
+
+export interface ResearchContext {
+  configured: boolean;
+  target_kind: "instrument" | "model" | string;
+  target_id: string;
+  target_name?: string;
+  version?: number;
+  created_at?: string;
+  actor?: string;
+  thesis?: string;
+  thesis_params?: Record<string, number>;
+  mandate_key?: string;
+  mandate_label?: string;
+  benchmark?: string;
+  horizon_days?: number | null;
+  invalidation_criteria?: string[];
+  change_note?: string;
+  governance_source?: string;
+  evidence?: Record<string, unknown>;
 }
 
 export interface TickerSummary {
@@ -36,6 +84,7 @@ export interface TickerSummary {
   first_date?: string | null;
   last_date?: string | null;
   last_refresh?: RefreshLogEntry | null;
+  freshness?: FreshnessEvidence;
   eligible_for_real_research?: boolean;
 }
 
@@ -707,6 +756,116 @@ export interface StrategyResponse extends ProvenancePayload {
   drawdown_curve?: Array<number | null>;
   rolling_sharpe_curve?: Array<number | null>;
   beat_benchmark?: boolean;
+  thesis?: string;
+  thesis_params?: Record<string, number>;
+  mandate?: { key: string; label: string; [key: string]: unknown };
+  freshness?: FreshnessEvidence;
+  research_context?: ResearchContext;
+  current_signal?: {
+    framework: string;
+    action_label: "ENTER_LONG" | "EXIT_TO_CASH" | "MAINTAIN_LONG" | "STAY_IN_CASH" | string;
+    signal_state: "long" | "cash" | string;
+    position_on_last_observed_session: "long" | "cash" | string;
+    score: number;
+    as_of_date: string;
+    effective_session: string;
+    entry_threshold: number;
+    exit_threshold: number;
+    basis: string;
+  };
+  path_evidence?: {
+    date_range?: { first_date?: string; last_date?: string; session_count?: number };
+    trade_summary?: {
+      completed_count?: number;
+      winning_count?: number;
+      losing_count?: number;
+      best_trade?: StrategyTradeEpisode | null;
+      worst_trade?: StrategyTradeEpisode | null;
+      recent_trade_episodes?: StrategyTradeEpisode[];
+    };
+    drawdown_summary?: {
+      maximum_drawdown_pct?: number;
+      deepest_episodes?: StrategyDrawdownEpisode[];
+    };
+    rolling_sharpe_summary?: {
+      window_sessions?: number;
+      measured_window_count?: number;
+      latest?: number | null;
+      minimum?: number | null;
+      median?: number | null;
+      maximum?: number | null;
+      negative_window_pct?: number | null;
+    };
+    privacy_basis?: string;
+  };
+  oos_evidence?: StrategyOosEvidence;
+}
+
+export interface StrategyTradeEpisode {
+  entry_date: string;
+  exit_date?: string | null;
+  exposure_sessions: number;
+  net_return_pct: number;
+  completed: boolean;
+  terminal_liquidation: boolean;
+}
+
+export interface StrategyDrawdownEpisode {
+  peak_date: string;
+  trough_date: string;
+  recovery_date?: string | null;
+  depth_pct: number;
+  underwater_sessions: number;
+  recovered: boolean;
+}
+
+export interface StrategyOosVariant {
+  entry_threshold: number;
+  exit_threshold: number;
+  primary: boolean;
+  fold_count: number;
+  oos_sessions: number;
+  strategy_return_pct: number;
+  benchmark_return_pct: number;
+  net_excess_return_pct: number;
+  sharpe: number;
+  max_drawdown_pct: number;
+  profitable_fold_pct: number | null;
+  benchmark_beating_fold_pct: number | null;
+  worst_fold_excess_pct: number;
+}
+
+export interface StrategyOosEvidence {
+  status: "ok" | "insufficient_data" | string;
+  policy: Record<string, number | string | boolean>;
+  available_sessions?: number;
+  required_sessions?: number;
+  reason?: string;
+  evaluation_start?: string;
+  evaluation_end?: string;
+  fold_count: number;
+  oos_sessions?: number;
+  primary?: StrategyOosVariant;
+  folds?: Array<{
+    test_start: string;
+    test_end: string;
+    strategy_return_pct: number;
+    benchmark_return_pct: number;
+    net_excess_return_pct: number;
+    start_position: string;
+    end_position: string;
+  }>;
+  sensitivity?: {
+    diagnostic_only: boolean;
+    winner_selected: boolean;
+    variant_count: number;
+    primary_rank_by_net_excess: number;
+    positive_excess_variant_count: number;
+    net_excess_range_pct: number[];
+    variants: StrategyOosVariant[];
+    basis: string;
+  };
+  methodology?: Record<string, number | string | boolean>;
 }
 
 export interface MetricSet {
@@ -1256,10 +1415,6 @@ export interface ReportSnapshot {
     actor: string;
     summary: string;
   }>;
-  disclosure_blocks: Array<{
-    title: string;
-    body: string;
-  }>;
   output_formats: string[];
   html_url: string;
   pdf_url: string;
@@ -1277,7 +1432,6 @@ export interface ReportSnapshotSaveRequest {
   report_purpose?: string;
   aum_usd?: number;
   aum_as_of?: string;
-  cloud_confirmation?: CloudAIConfirmation;
 }
 
 export interface ReportSnapshotSaveResponse {
@@ -1572,6 +1726,33 @@ export interface StrategicTrack {
   basis?: string;
 }
 
+export interface ConvictionGuidancePath {
+  key: string;
+  title: string;
+  status: "supportive" | "partial" | "limited" | "evidence_gap";
+  current: string;
+  what_changes_it: string;
+  next_evidence: string;
+}
+
+export interface ConvictionGuidance {
+  title: string;
+  summary: string;
+  direction: "bullish" | "bearish" | "mixed";
+  limiter_count: number;
+  score_bridge: {
+    base_component_conviction_pct: number;
+    volatility_multiplier: number;
+    mandate_multiplier: number;
+    event_risk_multiplier: number;
+    final_conviction_pct: number;
+  };
+  aligned_components: string[];
+  conflicting_components: string[];
+  paths: ConvictionGuidancePath[];
+  guardrail: string;
+}
+
 export interface AnalysisSignal {
   action: string;
   score?: number;
@@ -1583,6 +1764,7 @@ export interface AnalysisSignal {
   components?: SignalComponent[];
   tactical?: TacticalTrack;
   strategic?: StrategicTrack;
+  conviction_guidance?: ConvictionGuidance;
   headline_rationale?: string;
   rationale?: string;
   caveats?: string[];
@@ -1699,6 +1881,8 @@ export interface AnalysisResponse {
   // backward compatibility with older cached responses; when present it is
   // authoritative and the client must not re-derive provenance eligibility.
   data_provenance?: DataQuality;
+  freshness?: FreshnessEvidence;
+  research_context?: ResearchContext;
   mandate?: AnalysisMandate;
   horizon?: AnalysisHorizon;
   fundamentals?: Record<string, unknown>;
@@ -1822,7 +2006,6 @@ export interface AIResult {
   stance?: string;
   ai_disagrees_with_action?: boolean;
   advisor_language: string;
-  compliance_caveats: string[];
   used_numbers: string[];
   missing_information: string[];
   data_quality_statement: string;
@@ -1845,7 +2028,6 @@ export interface AIResponse {
   provider: string;
   model: string;
   data_quality: DataQuality;
-  disclaimer: string;
   cloud_transfer?: CloudTransferDisclosure;
 }
 
@@ -1857,13 +2039,7 @@ export interface AIChatResponse {
   generated_at?: string;
   status?: AIStatusResponse;
   data_quality?: DataQuality;
-  disclaimer?: string;
   cloud_transfer?: CloudTransferDisclosure;
-}
-
-export interface CloudAIConfirmation {
-  confirmed: true;
-  disclosure_hash: string;
 }
 
 export interface CloudTransferDisclosure {
@@ -1876,6 +2052,7 @@ export interface CloudTransferDisclosure {
   cloud_transfer: boolean;
   confirmation_required: boolean;
   confirmed: boolean;
+  authorization_basis?: "server_configured_provider" | "local_provider";
   redaction_count: number;
   redaction_categories: Record<string, number>;
   redacted_fields: string[];

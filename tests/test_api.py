@@ -46,6 +46,9 @@ def test_analyze_valid_uploaded_ticker(client):
     body = resp.get_json()
     assert body["symbol"] == "REALAN"
     assert body["forecast"]["horizon_days"] == 10
+    guidance = body["signal"]["conviction_guidance"]
+    assert guidance["score_bridge"]["final_conviction_pct"] == body["signal"]["conviction_pct"]
+    assert guidance["paths"]
 
 
 def test_analyze_invalid_ticker_returns_json_error(client):
@@ -351,6 +354,8 @@ def test_model_upload_and_analyze_smoke(client, monkeypatch):
     assert body["id"] == model_id
     assert body["holdings"]
     assert body["forecast"]["horizon_days"] == 21
+    guidance = body["signal"]["conviction_guidance"]
+    assert guidance["score_bridge"]["final_conviction_pct"] == body["signal"]["conviction_pct"]
 
 
 def test_model_analyze_invalid_horizon_returns_400_json_not_fallback(client, monkeypatch):

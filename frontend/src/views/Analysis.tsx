@@ -172,6 +172,7 @@ function AnalysisPayload({ payload }: { payload: AnalysisResponse }) {
           <div className="warning-list">{payload.warnings.map((w) => <span key={w}>{w}</span>)}</div>
         ) : null}
       </Panel>
+      {eligible && <ConvictionGuidancePanel signal={payload.signal} />}
       <section className="dashboard-grid">
         <Panel title={`Price, Trend and Signal Markers${panelSuffix}`} className="span-2">
           <PriceTrendChart
@@ -658,6 +659,47 @@ function longConePoints(forecast: LongForecast): ForecastConePoint[] {
     p95: forecast.bands.p95?.[index] ?? null,
   }));
   return [start, ...projection];
+}
+
+export function ConvictionGuidancePanel({ signal }: { signal: AnalysisSignal }) {
+  const guidance = signal.conviction_guidance;
+  if (!guidance) return null;
+  const bridge = guidance.score_bridge;
+  return (
+    <Panel
+      title="How Conviction Can Improve"
+      meta={`${guidance.limiter_count} active constraint${guidance.limiter_count === 1 ? "" : "s"}`}
+      className="conviction-guidance"
+    >
+      <div className="conviction-guidance__intro">
+        <p>{guidance.summary}</p>
+        <span>{titleCase(guidance.direction)} evidence</span>
+      </div>
+      <dl className="conviction-guidance__bridge" aria-label="Conviction score bridge">
+        <div><dt>Base component evidence</dt><dd>{fmtNumber(bridge.base_component_conviction_pct, 1)}%</dd></div>
+        <div><dt>Volatility multiplier</dt><dd>x{fmtNumber(bridge.volatility_multiplier, 2)}</dd></div>
+        <div><dt>Mandate multiplier</dt><dd>x{fmtNumber(bridge.mandate_multiplier, 2)}</dd></div>
+        <div><dt>Event-risk multiplier</dt><dd>x{fmtNumber(bridge.event_risk_multiplier, 2)}</dd></div>
+        <div><dt>Final conviction</dt><dd>{fmtNumber(bridge.final_conviction_pct, 1)}%</dd></div>
+      </dl>
+      <div className="conviction-guidance__paths">
+        {guidance.paths.map((path) => (
+          <article className={`conviction-path conviction-path--${path.status}`} key={path.key}>
+            <header>
+              <strong>{path.title}</strong>
+              <span>{titleCase(path.status)}</span>
+            </header>
+            <p>{path.current}</p>
+            <dl>
+              <div><dt>What changes it</dt><dd>{path.what_changes_it}</dd></div>
+              <div><dt>Next evidence</dt><dd>{path.next_evidence}</dd></div>
+            </dl>
+          </article>
+        ))}
+      </div>
+      <p className="conviction-guidance__guardrail">{guidance.guardrail}</p>
+    </Panel>
+  );
 }
 
 function SignalBreakdown({ signal, forecast }: { signal: AnalysisSignal; forecast?: TacticalForecast }) {

@@ -31,7 +31,7 @@ except Exception:  # pragma: no cover - exercised when dependency install is bro
     Fernet = None
     InvalidToken = Exception
 
-SCHEMA_VERSION = 14  # 14: immutable ledger retirement and workspace identity controls
+SCHEMA_VERSION = 15  # 15: versioned target research-context evidence
 REAL_SOURCES = {"live", "upload"}
 DISABLED_VALUES = {"", "0", "false", "off", "disabled", "none"}
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[1] / ".helios" / "helios.db"
@@ -1250,6 +1250,113 @@ class SQLiteStore:
                         (max(1, min(int(limit), 2000)),),
                     ).fetchall()
                 return [_model_governance_event_row(row, self) for row in rows]
+        except Exception:
+            return []
+
+    def next_research_context_version(self, target_kind: str, target_id: str) -> int:
+        if not self.available:
+            return 1
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT MAX(version) AS version FROM target_research_context_events "
+                    "WHERE target_kind = ? AND target_id = ?",
+                    (str(target_kind)[:16], str(target_id)[:64]),
+                ).fetchone()
+                return int(row["version"] or 0) + 1 if row else 1
+        except Exception:
+            return 1
+
+    def record_research_context_event(
+        self,
+        *,
+        target_kind: str,
+        target_id: str,
+        target_name: str,
+        version: int,
+        actor: str,
+        thesis: str,
+        mandate_key: str,
+        benchmark: str,
+        horizon_days: int,
+        invalidation_criteria: list[str],
+        change_note: str,
+        evidence_ref: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        if not self.available:
+            return None
+        try:
+            with self.transaction(durable=True) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO target_research_context_events
+                      (target_kind, target_id, target_name, created_at, version,
+                       actor, thesis, mandate_key, benchmark, horizon_days,
+                       invalidation_json, change_note, evidence_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(target_kind)[:16],
+                        str(target_id)[:64],
+                        self._store_text(str(target_name)[:120]),
+                        utc_now(),
+                        int(version),
+                        self._store_text(str(actor or "Advisor Console")[:120]),
+                        self._store_long_text(str(thesis), limit=2_000),
+                        str(mandate_key)[:32],
+                        str(benchmark)[:20],
+                        int(horizon_days),
+                        self._store_json({"items": list(invalidation_criteria)}),
+                        self._store_text(str(change_note)[:800]),
+                        self._store_json(evidence_ref or {}),
+                    ),
+                )
+                row = conn.execute(
+                    "SELECT * FROM target_research_context_events "
+                    "WHERE id = last_insert_rowid()"
+                ).fetchone()
+                self.audit_append(
+                    "research_context.record",
+                    {
+                        "target_kind": str(target_kind)[:16],
+                        "target_id": str(target_id)[:64],
+                        "version": int(version),
+                        "mandate_key": str(mandate_key)[:32],
+                        "benchmark": str(benchmark)[:20],
+                        "horizon_days": int(horizon_days),
+                    },
+                    actor=actor,
+                    required=True,
+                )
+            return _research_context_event_row(row, self) if row else None
+        except Exception as exc:
+            self.warning = f"Could not record research context: {exc}"
+            return None
+
+    def research_context_events(
+        self,
+        target_kind: str,
+        target_id: str,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        if not self.available:
+            return []
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM target_research_context_events
+                    WHERE target_kind = ? AND target_id = ?
+                    ORDER BY version DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (
+                        str(target_kind)[:16],
+                        str(target_id)[:64],
+                        max(1, min(int(limit), 1_000)),
+                    ),
+                ).fetchall()
+            return [_research_context_event_row(row, self) for row in rows]
         except Exception:
             return []
 
@@ -3535,6 +3642,27 @@ def _create_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS target_research_context_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          target_kind TEXT NOT NULL,
+          target_id TEXT NOT NULL,
+          target_name TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          version INTEGER NOT NULL,
+          actor TEXT NOT NULL,
+          thesis TEXT NOT NULL,
+          mandate_key TEXT NOT NULL,
+          benchmark TEXT NOT NULL,
+          horizon_days INTEGER NOT NULL,
+          invalidation_json TEXT NOT NULL DEFAULT '{"items":[]}',
+          change_note TEXT NOT NULL,
+          evidence_json TEXT NOT NULL DEFAULT '{}',
+          UNIQUE(target_kind, target_id, version)
+        )
+        """
+    )
     _ensure_column(conn, "signal_journal", "trial_id", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(conn, "signal_journal", "recording_source", "TEXT NOT NULL DEFAULT 'exploratory'")
     _ensure_column(conn, "decision_journal", "trial_id", "TEXT NOT NULL DEFAULT ''")
@@ -3572,6 +3700,7 @@ def _create_schema(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_incident_events_incident ON incident_events(incident_id, created_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_independent_reviews_model ON independent_validation_reviews(model_id, model_version, reviewed_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_validation_exceptions_model ON model_validation_exceptions(model_id, model_version, status, expires_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_research_context_target ON target_research_context_events(target_kind, target_id, version)")
 
 
 def _preflight_schema_version(conn: sqlite3.Connection) -> None:
@@ -3881,6 +4010,32 @@ def _model_governance_event_row(row: sqlite3.Row, store: SQLiteStore | None = No
         "approval_status": text("approval_status"),
         "snapshot": object_json("snapshot_json"),
         "metadata": object_json("metadata_json"),
+    }
+
+
+def _research_context_event_row(row: sqlite3.Row, store: SQLiteStore | None = None) -> dict[str, Any]:
+    def text(name: str) -> str:
+        return store._load_text(row[name]) if store else str(row[name] or "")
+
+    def object_json(name: str) -> dict[str, Any]:
+        return store._load_json(row[name]) if store else _json_loads(row[name])
+
+    invalidation = object_json("invalidation_json")
+    return {
+        "id": int(row["id"]),
+        "target_kind": row["target_kind"],
+        "target_id": row["target_id"],
+        "target_name": text("target_name"),
+        "created_at": row["created_at"],
+        "version": int(row["version"]),
+        "actor": text("actor"),
+        "thesis": store._load_text(row["thesis"]) if store else str(row["thesis"] or ""),
+        "mandate_key": row["mandate_key"],
+        "benchmark": row["benchmark"],
+        "horizon_days": int(row["horizon_days"]),
+        "invalidation_criteria": list(invalidation.get("items") or []),
+        "change_note": text("change_note"),
+        "evidence": object_json("evidence_json"),
     }
 
 

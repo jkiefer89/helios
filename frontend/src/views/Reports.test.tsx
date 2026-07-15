@@ -1,8 +1,8 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, api } from "../api/client";
+import { api } from "../api/client";
 import type {
-  CloudTransferDisclosure, ReportResponse, ReportSnapshot, ReportSnapshotStorage,
+  ReportResponse, ReportSnapshot, ReportSnapshotStorage,
 } from "../api/types";
 import { Reports } from "./Reports";
 
@@ -26,7 +26,16 @@ const report = {
   eligible_for_real_research: true,
   data_provenance: { data_mode: "real", eligible_for_real_research: true },
   warnings: [],
-  sections: { executive_summary: { headline: "Deterministic report facts." } },
+  sections: {
+    executive_summary: { headline: "Deterministic report facts." },
+    assumptions: {
+      analysis_only: true,
+      no_execution: true,
+      no_return_guarantee: true,
+      model_quality: "Forecast uncertainty remains visible.",
+    },
+  },
+  disclaimer: "Legacy legal boilerplate should not render.",
 } as ReportResponse;
 
 const snapshot = {
@@ -39,23 +48,13 @@ const snapshot = {
   first_date: "2025-05-01", last_date: "2026-07-14", source_counts: { upload: 1 },
   model_metadata: {}, warnings: [], ai_narrative_included: true,
   ai_narrative_status: "generated", ai_provider: { provider: "anthropic" },
-  audit_trail: [], disclosure_blocks: [], output_formats: ["html", "pdf"],
+  audit_trail: [], output_formats: ["html", "pdf"],
   html_url: "/report-1.html", pdf_url: "/report-1.pdf",
 } as ReportSnapshot;
 
-describe("Reports cloud narrative confirmation", () => {
-  it("shows the disclosure and resubmits the exact fingerprint", async () => {
+describe("Reports cloud narrative save", () => {
+  it("saves once without a sanitized-transfer confirmation prompt", async () => {
     localStorage.setItem("helios_report_ai", "on");
-    const disclosure: CloudTransferDisclosure = {
-      disclosure_hash: "exact-transfer-fingerprint",
-      dlp_payload_hash: "sanitized-payload-fingerprint",
-      provider: "anthropic", model: "claude-test", task: "report_narrative",
-      transfer_scope: "final_sanitized_provider_request", cloud_transfer: true,
-      confirmation_required: true, confirmed: false, redaction_count: 2,
-      redaction_categories: { client_name: 2 }, redacted_fields: ["prepared_for"],
-      raw_values_returned: false, review_required: true,
-      basis: "Local DLP ran before the optional provider transfer.",
-    };
     vi.spyOn(api, "reportSnapshots").mockResolvedValue({
       snapshots: [], count: 0, storage, disclaimer: "Analysis only.",
     });
@@ -66,10 +65,6 @@ describe("Reports cloud narrative confirmation", () => {
       available: false, reason: "AI disabled.", keys_exposed: false, secrets_stored: false,
     });
     const save = vi.spyOn(api, "saveReportSnapshot")
-      .mockRejectedValueOnce(new ApiError(
-        "Confirm the locally redacted payload.", 409,
-        { code: "cloud_ai_confirmation_required", cloud_transfer: disclosure },
-      ))
       .mockResolvedValueOnce({
         snapshot, html_url: snapshot.html_url, pdf_url: snapshot.pdf_url,
         storage, disclaimer: "Analysis only.",
@@ -87,16 +82,15 @@ describe("Reports cloud narrative confirmation", () => {
     );
 
     await screen.findByRole("heading", { level: 1, name: "SPY Evidence Report" });
+    expect(screen.queryByText("Legacy legal boilerplate should not render.")).toBeNull();
+    expect(screen.queryByText("Disclosure Blocks")).toBeNull();
+    expect(screen.queryByText("Analysis Only")).toBeNull();
+    expect(screen.queryByText("No Execution")).toBeNull();
+    expect(screen.queryByText("No Return Guarantee")).toBeNull();
+    expect(screen.getByText("Forecast uncertainty remains visible.")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Save snapshot" }));
-    await screen.findByText("Confirm report narrative cloud transfer");
-    expect(screen.getByText(/Local DLP redacted 2 sensitive value/)).toBeTruthy();
-
-    fireEvent.click(screen.getByRole("button", { name: "Confirm and save" }));
-
-    await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
-    expect(save.mock.calls[1][0].cloud_confirmation).toEqual({
-      confirmed: true,
-      disclosure_hash: "exact-transfer-fingerprint",
-    });
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText("Confirm report narrative cloud transfer")).toBeNull();
+    expect(save.mock.calls[0][0]).not.toHaveProperty("cloud_confirmation");
   });
 });

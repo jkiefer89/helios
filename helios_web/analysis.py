@@ -10,11 +10,14 @@ from flask import Blueprint, request
 from engine import (
     backtest, cma, costs, data, data_quality, evidence_lab, forecast,
     fundamentals, holdings, indicators, macro, macro_events, opportunity,
-    persistence, portfolio, provenance, provider_registry, regime, sec_events,
-    sentiment, signal_journal, signals, strategy, trials,
+    persistence, portfolio, provenance, provider_registry, regime, research_context,
+    sec_events, sentiment, signal_journal, signals, strategy, trials,
 )
 
-from .core import ANALYSIS_ONLY_DISCLAIMER, _LIVE_SEMAPHORE, _safe_float_arg, _safe_int_arg, app, err, ok
+from .core import (
+    ANALYSIS_ONLY_DISCLAIMER, _LIVE_SEMAPHORE, _safe_float_arg, _safe_int_arg,
+    app, current_actor, err, ok,
+)
 
 bp = Blueprint("analysis", __name__)
 
@@ -681,12 +684,21 @@ def analyze():
                            fundamental_result=fwd, macro_context=macro_ctx)
     bt = backtest.run(close)
     metrics = indicators.metrics_summary(close)
+    context = research_context.instrument_context(inst.symbol) or {
+        "configured": False,
+        "target_kind": "instrument",
+        "target_id": inst.symbol,
+        "target_name": inst.name,
+        "governance_source": "not_configured",
+    }
     return ok({
         "symbol": inst.symbol,
         "name": inst.name,
         "source": inst.source,
         # Same server-side provenance verdict shape /api/live returns.
         "data_provenance": p,
+        "freshness": data.instrument_freshness(inst),
+        "research_context": context,
         "metrics": metrics,
         "series": _series_payload(close, markers=True),
         "forecast": fc,
@@ -827,6 +839,14 @@ def strategy_analyze():
         len(inst.df["close"].dropna()),
         price_provider=getattr(inst, "price_provider", ""),
     )
+    freshness = data.instrument_freshness(inst)
+    context = research_context.instrument_context(inst.symbol) or {
+        "configured": False,
+        "target_kind": "instrument",
+        "target_id": inst.symbol,
+        "target_name": inst.name,
+        "governance_source": "not_configured",
+    }
     if not p["eligible_for_real_research"]:
         return ok({
             "series_kind": "instrument",
@@ -840,11 +860,15 @@ def strategy_analyze():
             "required_action": p["required_action"],
             "warnings": p["warnings"],
             "data_provenance": p,
+            "freshness": freshness,
+            "research_context": context,
             "methodology": {"analysis_only": True, "no_lookahead": True},
             "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
         })
     try:
         result = strategy.analyze_strategy(
+            inst.df["close"], cost_bps=cost_bps, slippage_bps=slippage_bps, **window)
+        oos = strategy.analyze_oos_evidence(
             inst.df["close"], cost_bps=cost_bps, slippage_bps=slippage_bps, **window)
     except ValueError as e:
         return err(str(e), 400)
@@ -859,10 +883,61 @@ def strategy_analyze():
         "reason": p["reason"],
         "required_action": p["required_action"],
         "data_provenance": p,
+        "freshness": freshness,
+        "research_context": context,
+        "oos_evidence": oos,
         "warnings": p["warnings"],
         **result,
         "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
     })
+
+
+@bp.route("/api/research-context", methods=["GET", "POST"])
+def governed_research_context():
+    if request.method == "GET":
+        symbol = data.clean_symbol(
+            request.args.get("target_id") or request.args.get("ticker") or "",
+            fallback="",
+        )
+        if not symbol:
+            return err("Provide an instrument target_id or ticker.", 400)
+        inst = data.get(symbol)
+        if inst is None:
+            return err(f"Unknown ticker '{symbol}'.", 404)
+        context = research_context.instrument_context(symbol) or {
+            "configured": False,
+            "target_kind": "instrument",
+            "target_id": inst.symbol,
+            "target_name": inst.name,
+            "governance_source": "not_configured",
+        }
+        return ok({"research_context": context})
+
+    body = request.get_json(silent=True) or {}
+    if str(body.get("target_kind") or "instrument").lower() != "instrument":
+        return err("Instrument research context is the only supported target on this endpoint.", 400)
+    symbol = data.clean_symbol(str(body.get("target_id") or body.get("ticker") or ""), fallback="")
+    if not symbol:
+        return err("Provide an instrument target_id or ticker.", 400)
+    inst = data.get(symbol)
+    if inst is None:
+        return err(f"Unknown ticker '{symbol}'.", 404)
+    try:
+        context = research_context.save_instrument_context(
+            inst,
+            thesis=str(body.get("thesis") or ""),
+            mandate_key=str(body.get("mandate_key") or ""),
+            benchmark=str(body.get("benchmark") or ""),
+            horizon_days=body.get("horizon_days"),
+            invalidation_criteria=body.get("invalidation_criteria") or [],
+            change_note=str(body.get("change_note") or ""),
+            actor=current_actor(),
+        )
+    except ValueError as exc:
+        return err(str(exc), 400)
+    except RuntimeError as exc:
+        return err(str(exc), 503)
+    return ok({"research_context": context})
 
 
 @bp.route("/api/opportunities")

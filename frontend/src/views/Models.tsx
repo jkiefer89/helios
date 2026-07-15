@@ -260,7 +260,6 @@ export function Models({
                     <span key={holding.ticker}>{holding.ticker} <b>{fmtPct(holding.weight * 100)}</b></span>
                   ))}
                 </div>
-                <small>{template.provenance.caveat}</small>
                 <button type="button" onClick={() => importTemplate(template.slug)} disabled={importing !== ""}>
                   {importing === template.slug ? "Importing..." : "Import template"}
                 </button>
@@ -434,7 +433,6 @@ export function Models({
                   </label>
                 </div>
               </div>
-              <p>{governance.disclaimer}</p>
             </div>
             <div className="terminal-table terminal-data-table-shell" tabIndex={0} aria-label="Scrollable model governance table" onKeyDown={scrollTableByKey}>
               <table className="terminal-data-table governance-data-table">
@@ -821,7 +819,6 @@ function ModelValidationDashboard({
               ))}
             </section>
           </div>
-          <p className="muted">{validation.disclaimer}</p>
         </div>
       )}
     </Panel>

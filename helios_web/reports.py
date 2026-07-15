@@ -7,7 +7,7 @@ from datetime import date
 from flask import Blueprint, Response, request
 
 from engine import (
-    ai_copilot, data, evidence, model_governance, persistence, portfolio, report_exports,
+    data, evidence, model_governance, persistence, portfolio, report_exports,
     report_snapshots, reporting, research_gate,
 )
 
@@ -81,9 +81,6 @@ def save_report_snapshot():
     # an explicit false excludes even a provided/generated one.
     raw_include = body.get("include_ai_narrative")
     include_ai_narrative = None if raw_include is None else bool(raw_include)
-    cloud_confirmation = body.get("cloud_confirmation")
-    if cloud_confirmation is not None and not isinstance(cloud_confirmation, dict):
-        return err("cloud_confirmation must be a JSON object.", 400)
     prepared_for = str(body.get("prepared_for") or "").strip()
     prepared_by = str(body.get("prepared_by") or "").strip()
     reviewer = str(body.get("reviewer") or "").strip()
@@ -101,21 +98,11 @@ def save_report_snapshot():
         gate = _client_export_gate(kind, target_id, report=report)
         if not gate["passed"]:
             return err(gate["blocked_reason"] or "Client-ready report export is blocked.", 409)
-    try:
-        ai_narrative, ai_meta = report_snapshots.resolve_narrative(
-            report,
-            provided_narrative=ai_narrative,
-            include_ai_narrative=include_ai_narrative,
-            cloud_confirmation=cloud_confirmation,
-        )
-    except ai_copilot.CloudConfirmationRequired as exc:
-        return err(
-            str(exc), exc.status_code,
-            code="cloud_ai_confirmation_required",
-            cloud_transfer=exc.disclosure,
-            status=exc.status,
-            retryable=True,
-        )
+    ai_narrative, ai_meta = report_snapshots.resolve_narrative(
+        report,
+        provided_narrative=ai_narrative,
+        include_ai_narrative=include_ai_narrative,
+    )
     snapshot = report_exports.build_snapshot(
         target_kind=kind,
         target_id=target_id,

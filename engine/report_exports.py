@@ -23,7 +23,6 @@ from .pdf_layout import (
     panel as _rl_panel,
 )
 from . import costs, pdf_layout
-from .reporting import DISCLAIMER
 
 
 def build_snapshot(
@@ -65,7 +64,6 @@ def build_snapshot(
     )
     report_package = "institutional_advisor_report" if external_ready else "internal_research_evidence"
     output_formats = ["html", "pdf", "print"]
-    disclosure_blocks = _disclosure_blocks(report)
     signal_journal_payload = _dict(signal_journal_evidence)
     client_risk_pack = _dict((sections.get("client_risk_pack") if isinstance(sections, dict) else {}) or {})
     capital_context = _dict((sections.get("capital_context") if isinstance(sections, dict) else {}) or {})
@@ -108,7 +106,6 @@ def build_snapshot(
         "ai_narrative_status": ai_narrative_status or ("provided" if _text(ai_narrative) else "not_requested"),
         "ai_provider": ai_provider or {},
         "audit_trail": audit_trail,
-        "disclosure_blocks": disclosure_blocks,
         "output_formats": output_formats,
         "metadata": {
             "snapshot_version": 2,
@@ -123,7 +120,6 @@ def build_snapshot(
             "reviewer": reviewer,
             "report_purpose": report_purpose,
             "audit_trail": audit_trail,
-            "disclosure_blocks": disclosure_blocks,
             "output_formats": output_formats,
             "analysis_only": True,
             "no_execution": True,
@@ -141,7 +137,11 @@ def build_snapshot(
 
 
 def public_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
-    out = {key: value for key, value in snapshot.items() if key not in {"report", "html", "ai_narrative"}}
+    out = {
+        key: value
+        for key, value in snapshot.items()
+        if key not in {"report", "html", "ai_narrative", "disclosure_blocks"}
+    }
     snapshot_id = str(snapshot.get("id") or "")
     out["html_url"] = f"/api/report/snapshots/{snapshot_id}.html"
     out["pdf_url"] = f"/api/report/snapshots/{snapshot_id}.pdf"
@@ -158,7 +158,6 @@ def ai_result_to_narrative(result: dict[str, Any]) -> str:
         _text(result.get("data_quality_statement")),
         _bullet_block("Key points", result.get("key_points")),
         _bullet_block("Risks", result.get("risks")),
-        _bullet_block("Compliance caveats", result.get("compliance_caveats")),
     ]
     return "\n\n".join(part for part in parts if part)
 
@@ -166,9 +165,9 @@ def ai_result_to_narrative(result: dict[str, Any]) -> str:
 def render_html(snapshot: dict[str, Any]) -> str:
     rows = {
         "Report Version": snapshot.get("version_label") or "v1",
-        "Prepared For": snapshot.get("prepared_for") or "Advisor review",
+        "Prepared For": snapshot.get("prepared_for") or "Internal research",
         "Prepared By": snapshot.get("prepared_by") or "Helios local workspace",
-        "Reviewer": snapshot.get("reviewer") or "Advisor review required",
+        "Reviewer": snapshot.get("reviewer") or "Not assigned",
         "Report Purpose": snapshot.get("report_purpose") or "advisor_review",
         "Source": snapshot.get("source") or "Unknown",
         "Row Count": snapshot.get("row_count") or 0,
@@ -201,10 +200,9 @@ def render_html(snapshot: dict[str, Any]) -> str:
         ".eyebrow{margin:0 0 8px;color:#55a7ff;font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.1em}",
         "h1,h2,h3{margin:0 0 12px} h1{font-size:32px;letter-spacing:-.01em} h2{font-size:16px;text-transform:uppercase;letter-spacing:.08em;color:#9fb2c8} h3{font-size:14px}",
         ".body{padding:26px 34px} section{border-top:1px solid #263548;margin-top:22px;padding-top:18px} dl{display:grid;grid-template-columns:230px 1fr;gap:8px 18px}",
-        "dt{color:#9fb2c8;font-weight:700} dd{margin:0} .warn{color:#ffd24a}.muted{color:#9fb2c8}.caveat{border:1px solid #775f18;background:#17180f;padding:14px;border-radius:6px}",
-        ".disclosures{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.disclosure{border:1px solid #263548;background:#0a111c;border-radius:6px;padding:14px}.audit{display:grid;gap:10px}.audit article{border:1px solid #263548;border-radius:6px;background:#09111b;padding:12px}",
+        "dt{color:#9fb2c8;font-weight:700} dd{margin:0} .warn{color:#ffd24a}.muted{color:#9fb2c8}.audit{display:grid;gap:10px}.audit article{border:1px solid #263548;border-radius:6px;background:#09111b;padding:12px}",
         "table{width:100%;border-collapse:collapse;margin:12px 0 0}th,td{border-bottom:1px solid #263548;padding:8px 10px;text-align:left;vertical-align:top}th{color:#9fb2c8;text-transform:uppercase;font-size:12px}",
-        "pre{white-space:pre-wrap;font-family:inherit}.footer{font-size:13px;color:#9fb2c8}@media print{body{background:#fff;color:#111827;padding:0}main{border:0}section{break-inside:avoid}.cover{background:#f8fafc;color:#0f172a}.disclosures{grid-template-columns:1fr}}",
+        "pre{white-space:pre-wrap;font-family:inherit}@media print{body{background:#fff;color:#111827;padding:0}main{border:0}section{break-inside:avoid}.cover{background:#f8fafc;color:#0f172a}}",
         "</style>",
         "</head>",
         "<body>",
@@ -215,20 +213,11 @@ def render_html(snapshot: dict[str, Any]) -> str:
         f"<p class=\"muted\">{_esc(snapshot.get('version_label') or 'v1')} / Saved {_esc(snapshot.get('created_at'))} / {_esc(snapshot.get('target_kind'))}:{_esc(snapshot.get('target_id'))}</p>",
         "</header>",
         '<div class="body">',
-        '<section class="caveat">',
-        "<h2>Analysis-Only Caveat</h2>",
-        f"<p>{_esc(report.get('disclaimer') or DISCLAIMER)}</p>",
-        "</section>",
-        '<section class="caveat">',
-        "<h2>Advisor Review Required</h2>",
-        "<p>Reports and any AI narrative are evidence summaries for advisor review. Helios does not execute orders, provide investment advice, or guarantee returns.</p>",
-        "</section>",
         "<section>",
         "<h2>Source And Provenance</h2>",
         _render_dict(rows),
         "</section>",
         _audit_html(snapshot),
-        _disclosures_html(snapshot),
         _model_metadata_html(snapshot),
         _warnings_html(snapshot),
         _client_risk_pack_html(snapshot),
@@ -238,7 +227,6 @@ def render_html(snapshot: dict[str, Any]) -> str:
         "<h2>Report Sections</h2>",
         _render_value(_report_sections_for_render(sections)),
         "</section>",
-        f"<p class=\"footer\">{_esc(DISCLAIMER)}</p>",
         "</div>",
         "</main>",
         "</body>",
@@ -266,8 +254,6 @@ def render_pdf(snapshot: dict[str, Any]) -> bytes:
         ("SIGNAL JOURNAL EVIDENCE", _rl_signal_journal_page),
         ("EVIDENCE DETAIL", _rl_evidence_page),
     ]
-    if _evidence_layout(snapshot)["overflow_blocks"]:
-        pages.append(("EVIDENCE DETAIL", _rl_evidence_overflow_page))
     total = len(pages)
     for page_no, (section, renderer) in enumerate(pages, start=1):
         _rl_background(pdf, width, height, colors)
@@ -283,7 +269,7 @@ def _rl_cover_page(pdf, snapshot: dict[str, Any], width: float, height: float, p
     _rl_text(pdf, _package_label(snapshot).upper(), 42, 650, 10, colors.HexColor("#55a7ff"), bold=True)
     _rl_text(
         pdf,
-        "APPROVED EXTERNAL REVIEW PACK" if _is_external_package(snapshot) else "INTERNAL ANALYSIS-ONLY EVIDENCE",
+        "APPROVED EXTERNAL REVIEW PACK" if _is_external_package(snapshot) else "INTERNAL RESEARCH EVIDENCE",
         42,
         632,
         10,
@@ -295,27 +281,14 @@ def _rl_cover_page(pdf, snapshot: dict[str, Any], width: float, height: float, p
     _rl_text(pdf, "Helios Report Snapshot", 42, 508, 10, colors.HexColor("#9fb2c8"))
 
     cards = [
-        ("Prepared For", snapshot.get("prepared_for") or "Advisor review"),
+        ("Prepared For", snapshot.get("prepared_for") or "Internal research"),
         ("Prepared By", snapshot.get("prepared_by") or "Helios local workspace"),
-        ("Reviewer", snapshot.get("reviewer") or "Advisor review required"),
+        ("Reviewer", snapshot.get("reviewer") or "Not assigned"),
         ("Source", snapshot.get("source") or "Unknown"),
         ("Input Range", f"{snapshot.get('first_date') or 'Unknown'} to {snapshot.get('last_date') or 'Unknown'}"),
         ("Rows", snapshot.get("row_count") or 0),
     ]
     _rl_card_grid(pdf, cards, 42, 438, 252, 62, colors)
-    _rl_panel(
-        pdf,
-        42,
-        120,
-        width - 84,
-        92,
-        "ADVISOR REVIEW REQUIRED",
-        "Analysis only. Helios provides evidence summaries and does not provide investment advice, order execution, brokerage services, or return guarantees.",
-        colors,
-        accent="#ffd24a",
-    )
-
-
 def _rl_summary_page(pdf, snapshot: dict[str, Any], width: float, height: float, page_no: int, total: int, section: str, colors) -> None:
     _rl_header(pdf, width, height, section, colors)
     report = snapshot.get("report") if isinstance(snapshot.get("report"), dict) else {}
@@ -351,23 +324,6 @@ def _rl_summary_page(pdf, snapshot: dict[str, Any], width: float, height: float,
         ("Expected Vol", _fmt_pdf_value(forecast.get("expected_vol_pct"), suffix="%")),
     ]
     _rl_card_grid(pdf, cards, 42, min(y - 34, 500), 252, 58, colors)
-    _rl_panel(
-        pdf,
-        42,
-        118,
-        width - 84,
-        100,
-        "REPORT GOVERNANCE",
-        (
-            "This page is an approved external-review summary. Calculations remain deterministic Helios outputs; any AI narrative is explanatory only and requires advisor review."
-            if _is_external_package(snapshot)
-            else "This page is an internal analysis-only evidence draft and is not approved for client or investment-committee distribution."
-        ),
-        colors,
-        accent="#55a7ff",
-    )
-
-
 def _is_external_package(snapshot: dict[str, Any]) -> bool:
     return snapshot.get("report_package") == "institutional_advisor_report"
 
@@ -508,11 +464,7 @@ def _rl_risk_pack_page(pdf, snapshot: dict[str, Any], width: float, height: floa
     _rl_text(pdf, heading, 42, 674, 18, colors.HexColor("#f8fafc"), bold=True)
     _rl_wrapped(
         pdf,
-        (
-            "Stress scenarios, benchmark-relative drawdown, concentration warnings, liquidity flags, correlation clusters, and breakpoints are analysis-only evidence for advisor review."
-            if external
-            else "Internal analysis-only risk evidence. This draft is not approved for client or investment-committee distribution."
-        ),
+        "Stress scenarios, benchmark-relative drawdown, concentration, liquidity, correlation clusters, and model breakpoints from current Helios evidence.",
         42,
         648,
         520,
@@ -569,60 +521,7 @@ def _rl_risk_pack_page(pdf, snapshot: dict[str, Any], width: float, height: floa
         y -= 7
 
 
-# Evidence-page disclosure layout: header drop, then per-panel cursor offsets.
 _EVIDENCE_TOP_Y = 640.0
-_DISCLOSURE_HEADER_DROP = 26.0
-_DISCLOSURE_PANEL_HEIGHT = 72.0
-_DISCLOSURE_PANEL_OFFSET = 78.0  # panel bottom edge sits this far below the cursor
-_DISCLOSURE_STEP = 86.0
-
-
-def _evidence_layout(snapshot: dict[str, Any]) -> dict[str, Any]:
-    """Deterministic evidence-page layout plan.
-
-    Mirrors the drawing arithmetic in _rl_evidence_page so render_pdf can
-    decide upfront how many disclosure blocks fit above the footer margin
-    (pdf_layout.CONTENT_BOTTOM) and paginate the rest instead of drawing
-    over the footer or off the page.
-    """
-    y = _EVIDENCE_TOP_Y
-    warnings = snapshot.get("warnings") if isinstance(snapshot.get("warnings"), list) else []
-    if warnings:
-        y -= 20
-        for warning in warnings[:5]:
-            y -= pdf_layout.wrapped_drop(f"- {warning}", 490, 8.8, max_lines=2) + 7
-    else:
-        y -= pdf_layout.wrapped_drop("No additional caveats beyond the required disclosure blocks.", 500, 9, max_lines=2) + 12
-    if snapshot.get("ai_narrative"):
-        y -= 20 + pdf_layout.wrapped_drop(str(snapshot.get("ai_narrative")), 490, 8.5, max_lines=8) + 12
-    blocks = [block for block in (snapshot.get("disclosure_blocks") or [])[:4] if isinstance(block, dict)]
-    fit = 0
-    for index in range(len(blocks)):
-        bottom = y - _DISCLOSURE_HEADER_DROP - _DISCLOSURE_STEP * index - _DISCLOSURE_PANEL_OFFSET
-        if bottom < pdf_layout.CONTENT_BOTTOM:
-            break
-        fit = index + 1
-    return {
-        "disclosure_header_y": y,
-        "first_page_blocks": blocks[:fit],
-        "overflow_blocks": blocks[fit:],
-    }
-
-
-def _rl_disclosure_panels(pdf, blocks: list[dict[str, Any]], y: float, width: float, colors) -> None:
-    for block in blocks:
-        _rl_panel(
-            pdf,
-            42,
-            y - _DISCLOSURE_PANEL_OFFSET,
-            width - 84,
-            _DISCLOSURE_PANEL_HEIGHT,
-            str(block.get("title") or "Disclosure"),
-            str(block.get("body") or ""),
-            colors,
-            accent="#ffd24a",
-        )
-        y -= _DISCLOSURE_STEP
 
 
 def _rl_evidence_page(pdf, snapshot: dict[str, Any], width: float, height: float, page_no: int, total: int, section: str, colors) -> None:
@@ -631,33 +530,28 @@ def _rl_evidence_page(pdf, snapshot: dict[str, Any], width: float, height: float
     warnings = snapshot.get("warnings") if isinstance(snapshot.get("warnings"), list) else []
     y = _EVIDENCE_TOP_Y
     if warnings:
-        _rl_text(pdf, "CAVEATS", 42, y, 12, colors.HexColor("#ffd24a"), bold=True)
+        _rl_text(pdf, "DATA AND MODEL WARNINGS", 42, y, 12, colors.HexColor("#ffd24a"), bold=True)
         y -= 20
         for warning in warnings[:5]:
             y = _rl_wrapped(pdf, f"- {warning}", 58, y, 490, 8.8, colors.HexColor("#c8d3df"), max_lines=2)
             y -= 7
     else:
-        y = _rl_wrapped(pdf, "No additional caveats beyond the required disclosure blocks.", 42, y, 500, 9, colors.HexColor("#c8d3df"), max_lines=2) - 12
+        y = _rl_wrapped(pdf, "No additional data or model-quality warnings.", 42, y, 500, 9, colors.HexColor("#c8d3df"), max_lines=2) - 12
     if snapshot.get("ai_narrative"):
         _rl_text(pdf, "AI NARRATIVE", 42, y, 12, colors.HexColor("#ffd24a"), bold=True)
-        y = _rl_wrapped(pdf, str(snapshot.get("ai_narrative")), 58, y - 20, 490, 8.5, colors.HexColor("#c8d3df"), max_lines=8) - 12
-    layout = _evidence_layout(snapshot)
-    blocks = layout["first_page_blocks"]
-    if blocks or not layout["overflow_blocks"]:
-        _rl_text(pdf, "DISCLOSURE BLOCKS", 42, y, 14, colors.HexColor("#f8fafc"), bold=True)
-        _rl_disclosure_panels(pdf, blocks, y - _DISCLOSURE_HEADER_DROP, width, colors)
-
-
-def _rl_evidence_overflow_page(pdf, snapshot: dict[str, Any], width: float, height: float, page_no: int, total: int, section: str, colors) -> None:
-    _rl_header(pdf, width, height, section, colors)
-    layout = _evidence_layout(snapshot)
-    title = "DISCLOSURE BLOCKS (CONTINUED)" if layout["first_page_blocks"] else "DISCLOSURE BLOCKS"
-    _rl_text(pdf, title, 42, 674, 14, colors.HexColor("#f8fafc"), bold=True)
-    _rl_disclosure_panels(pdf, layout["overflow_blocks"], 674 - _DISCLOSURE_HEADER_DROP, width, colors)
+        _rl_wrapped(pdf, str(snapshot.get("ai_narrative")), 58, y - 20, 490, 8.5, colors.HexColor("#c8d3df"), max_lines=8)
 
 
 def _rl_footer(pdf, snapshot: dict[str, Any], width: float, page_no: int, total: int, section: str, colors) -> None:
-    pdf_layout.footer(pdf, width, page_no, total, colors, version_label=str(snapshot.get("version_label") or "v1"))
+    pdf_layout.footer(
+        pdf,
+        width,
+        page_no,
+        total,
+        colors,
+        note="Helios research evidence | Sources and methodology included",
+        version_label=str(snapshot.get("version_label") or "v1"),
+    )
 
 
 def _missing_score_label(report: dict[str, Any]) -> str:
@@ -708,29 +602,6 @@ def _audit_trail(*, report: dict[str, Any], created_at: str, version_label: str,
     ]
 
 
-def _disclosure_blocks(report: dict[str, Any]) -> list[dict[str, str]]:
-    data_provenance = report.get("data_provenance") if isinstance(report.get("data_provenance"), dict) else {}
-    data_mode = _text(report.get("data_mode") or data_provenance.get("data_mode"))
-    return [
-        {
-            "title": "Analysis-Only Use",
-            "body": DISCLAIMER,
-        },
-        {
-            "title": "No Trade Execution",
-            "body": "This report is an evidence summary. Helios does not route orders, rebalance accounts, or execute brokerage instructions.",
-        },
-        {
-            "title": "No Return Guarantee",
-            "body": "Forecasts, scores, strategy evidence, and AI narratives are estimates or explanations, not promises of return or risk reduction.",
-        },
-        {
-            "title": "Data Provenance Required",
-            "body": f"Real research depends on eligible live or uploaded histories. Current data mode: {data_mode or 'unknown'}.",
-        },
-    ]
-
-
 def _audit_html(snapshot: dict[str, Any]) -> str:
     rows = snapshot.get("audit_trail") or []
     if not rows:
@@ -745,21 +616,6 @@ def _audit_html(snapshot: dict[str, Any]) -> str:
             "</article>"
         )
     return "<section><h2>Audit Trail</h2><div class=\"audit\">" + "".join(articles) + "</div></section>"
-
-
-def _disclosures_html(snapshot: dict[str, Any]) -> str:
-    rows = snapshot.get("disclosure_blocks") or []
-    if not rows:
-        return ""
-    cards = []
-    for row in rows:
-        cards.append(
-            "<article class=\"disclosure\">"
-            f"<h3>{_esc(row.get('title'))}</h3>"
-            f"<p>{_esc(row.get('body'))}</p>"
-            "</article>"
-        )
-    return "<section><h2>Disclosure Blocks</h2><div class=\"disclosures\">" + "".join(cards) + "</div></section>"
 
 
 def _model_metadata_html(snapshot: dict[str, Any]) -> str:
@@ -796,9 +652,9 @@ def _client_risk_pack_html(snapshot: dict[str, Any]) -> str:
         "<section>",
         f"<h2>{heading}</h2>",
         (
-            "<p class=\"muted\">Stress scenarios, benchmark-relative drawdown, concentration warnings, liquidity flags, correlation clusters, and breakpoints are analysis-only evidence for advisor review.</p>"
-            if external
-            else "<p class=\"muted\">Internal analysis-only risk evidence. This draft is not approved for client or investment-committee distribution.</p>"
+        "<p class=\"muted\">Stress scenarios, benchmark-relative drawdown, concentration, liquidity, correlation clusters, and model breakpoints from current Helios evidence.</p>"
+        if external
+        else "<p class=\"muted\">Internal risk evidence from the current model history and configured benchmark.</p>"
         ),
         _render_dict({
             "Risk Posture": summary.get("risk_posture"),
@@ -868,11 +724,24 @@ def _risk_pack(snapshot: dict[str, Any]) -> dict[str, Any]:
 
 
 def _report_sections_for_render(sections: dict[str, Any]) -> dict[str, Any]:
-    """Avoid duplicating sections that have governed, purpose-aware renderers."""
-    return {
+    """Avoid duplicated risk sections and presentation-only legal boilerplate."""
+    visible = {
         key: value for key, value in sections.items()
         if key not in {"client_risk_pack"}
     }
+    return _strip_presentation_boilerplate(visible)
+
+
+def _strip_presentation_boilerplate(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _strip_presentation_boilerplate(item)
+            for key, item in value.items()
+            if key not in {"analysis_only", "no_execution", "no_return_guarantee"}
+        }
+    if isinstance(value, list):
+        return [_strip_presentation_boilerplate(item) for item in value]
+    return value
 
 
 def _signal_journal_html(snapshot: dict[str, Any]) -> str:
@@ -988,7 +857,7 @@ def _ai_html(snapshot: dict[str, Any]) -> str:
         return ""
     return (
         "<section><h2>AI Narrative</h2>"
-        "<p class=\"muted\">AI-generated narrative saved with this snapshot; calculations are from the Helios engine. Advisor Review Required.</p>"
+        "<p class=\"muted\">AI-generated narrative saved with this snapshot; calculations are from the Helios engine.</p>"
         f"<pre>{_esc(narrative)}</pre></section>"
     )
 

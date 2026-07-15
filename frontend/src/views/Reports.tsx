@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ApiError, api } from "../api/client";
-import type { AIResult, CloudAIConfirmation, CloudTransferDisclosure, DataStatusResponse, ModelSummary, ReportResponse, ReportSnapshot, ReportSnapshotStorage, SignalJournalEntry, TickerSummary } from "../api/types";
+import { api } from "../api/client";
+import type { AIResult, DataStatusResponse, ModelSummary, ReportResponse, ReportSnapshot, ReportSnapshotStorage, SignalJournalEntry, TickerSummary } from "../api/types";
 import { AICopilotPanel, reportCopilotActions } from "../components/ai/AICopilotPanel";
 import { DataQualityBanner } from "../components/badges/DataModeBadge";
 import { Panel } from "../components/cards/Panel";
@@ -62,7 +62,6 @@ export function Reports({
   const [aumUsd, setAumUsd] = useState("");
   const [aumAsOf, setAumAsOf] = useState(() => new Date().toISOString().slice(0, 10));
   const [snapshotStorage, setSnapshotStorage] = useState<ReportSnapshotStorage | null>(null);
-  const [pendingCloudSave, setPendingCloudSave] = useState<CloudTransferDisclosure | null>(null);
   const options = useMemo(() => [
     ...tickers.map((ticker) => ({ value: `instrument:${ticker.symbol}`, label: `${ticker.symbol} · ${ticker.name}` })),
     ...models.map((model) => ({ value: `model:${model.id}`, label: `${model.name} · model` })),
@@ -123,7 +122,7 @@ export function Reports({
 
   useEffect(() => loadJournal(), [loadJournal, payload]);
 
-  const saveSnapshot = async (cloudConfirmation?: CloudAIConfirmation) => {
+  const saveSnapshot = async () => {
     const [kind, id] = target.split(":");
     if (!payload || !kind || !id) return;
     setSavingSnapshot(true);
@@ -140,23 +139,11 @@ export function Reports({
         report_purpose: reportPurpose,
         aum_usd: kind === "model" && Number(aumUsd.replace(/,/g, "")) > 0 ? Number(aumUsd.replace(/,/g, "")) : undefined,
         aum_as_of: kind === "model" && Number(aumUsd.replace(/,/g, "")) > 0 ? aumAsOf : undefined,
-        cloud_confirmation: cloudConfirmation,
       });
       setSnapshots((current) => [saved.snapshot, ...current.filter((row) => row.id !== saved.snapshot.id)]);
       setSnapshotStorage(saved.storage);
-      setPendingCloudSave(null);
     } catch (err) {
-      if (err instanceof ApiError && err.code === "cloud_ai_confirmation_required") {
-        const disclosure = err.details.cloud_transfer as CloudTransferDisclosure | undefined;
-        if (disclosure?.disclosure_hash) {
-          setPendingCloudSave(disclosure);
-          setSnapshotError("");
-        } else {
-          setSnapshotError("Cloud transfer confirmation metadata was incomplete.");
-        }
-      } else {
-        setSnapshotError(err instanceof Error ? err.message : "Report snapshot could not be saved.");
-      }
+      setSnapshotError(err instanceof Error ? err.message : "Report snapshot could not be saved.");
     } finally {
       setSavingSnapshot(false);
     }
@@ -165,7 +152,7 @@ export function Reports({
   return (
     <div className="view-stack report-view">
       <header className="view-head no-print">
-        <div><div className="section-label">Analysis-Only Report</div><h1>Institutional Report System</h1><p>Advisor/client-ready reports with saved history, versioning, audit trails, disclosure blocks, and print/PDF layouts.</p></div>
+        <div><div className="section-label">Research Reports</div><h1>Institutional Report System</h1><p>Reports with saved history, versioning, audit trails, source provenance, and print/PDF layouts.</p></div>
         <form className="toolbar" onSubmit={(event) => { event.preventDefault(); build(target || defaultTarget); }}>
           <label>Target<TerminalSelect ariaLabel="Report target" value={target} onChange={setTarget} options={options} /></label>
           <label className="check"><input type="checkbox" checked={includeAiNarrative} onChange={(event) => toggleAiNarrative(event.target.checked)} /> Generate AI narrative on save (calls the cloud provider)</label>
@@ -196,29 +183,12 @@ export function Reports({
       <RequestStatus failure={failure} stale={staleResult} onRetry={retry} />
       <RequestStatus failure={snapshotFailure} stale={Boolean(snapshots.length && snapshotFailure)} onRetry={() => void loadSnapshots()} />
       {snapshotError && <div className="notice warning no-print" role="alert">{snapshotError} <button type="button" onClick={() => void loadSnapshots()}>Retry history</button></div>}
-      {pendingCloudSave && (
-        <div className="ai-cloud-confirmation no-print" role="alert">
-          <strong>Confirm report narrative cloud transfer</strong>
-          <span>
-            Local DLP redacted {pendingCloudSave.redaction_count} sensitive value(s).
-            The sanitized report payload will be sent to the configured cloud provider before this snapshot is saved.
-          </span>
-          <div>
-            <button
-              type="button"
-              disabled={savingSnapshot}
-              onClick={() => void saveSnapshot({ confirmed: true, disclosure_hash: pendingCloudSave.disclosure_hash })}
-            >Confirm and save</button>
-            <button type="button" disabled={savingSnapshot} onClick={() => setPendingCloudSave(null)}>Cancel</button>
-          </div>
-        </div>
-      )}
       <SignalJournalPanel entries={journalEntries} failure={journalFailure} onRetry={() => { loadJournal(); }} />
       <ReportHistoryPanel snapshots={snapshots} storage={snapshotStorage} />
       {isLoading ? (
-        <div className="loading" role="status">Building the analysis-only report preview...</div>
+        <div className="loading" role="status">Building the report preview...</div>
       ) : !payload ? (
-        <EmptyState title="Select a report target" body="Choose an instrument or model to build an analysis-only report." />
+        <EmptyState title="Select a report target" body="Choose an instrument or model to build a report." />
       ) : (
         <ReportSheet payload={payload} dataStatus={dataStatus} onAiNarrative={setAiNarrative} />
       )}
@@ -290,7 +260,8 @@ function SignalJournalPanel({ entries, failure, onRetry }: { entries: SignalJour
 
 function ReportSheet({ payload, dataStatus, onAiNarrative }: { payload: ReportResponse; dataStatus: DataStatusResponse | null; onAiNarrative: (value: string) => void }) {
   const previewLocked = !payload.eligible_for_real_research;
-  const sections = previewLocked ? maskPreviewSections(payload.sections) : payload.sections;
+  const visibleSections = stripPresentationBoilerplate(payload.sections) as Record<string, unknown>;
+  const sections = previewLocked ? maskPreviewSections(visibleSections) : visibleSections;
   const title = reportTitle(payload);
   const copilotPayload = useMemo<Record<string, unknown>>(() => ({
     report: payload,
@@ -303,14 +274,13 @@ function ReportSheet({ payload, dataStatus, onAiNarrative }: { payload: ReportRe
       <div className="report-masthead" aria-hidden="true">
         <span className="report-masthead__mark" />
         <b>Helios <i>Pro</i></b>
-        <em>Analysis-Only Research Report</em>
+        <em>Research Evidence Report</em>
       </div>
       <header>
-        <div><div className="section-label">Helios Analysis-Only Report Preview</div><h1>{title}</h1><p>{fmtTimestamp(payload.timestamp)}</p></div>
+        <div><div className="section-label">Helios Report Preview</div><h1>{title}</h1><p>{fmtTimestamp(payload.timestamp)}</p></div>
         <span className="badge">{payload.kind}</span>
       </header>
       <DataQualityBanner payload={payload} compact />
-      <InstitutionalDisclosurePanel />
       <PersistenceSnapshot dataStatus={dataStatus} />
       <AICopilotPanel
         contextLabel={title}
@@ -330,21 +300,7 @@ function ReportSheet({ payload, dataStatus, onAiNarrative }: { payload: ReportRe
           </Panel>
         ))}
       </div>
-      <p className="report-disclaimer">{payload.disclaimer}</p>
     </article>
-  );
-}
-
-function InstitutionalDisclosurePanel() {
-  return (
-    <Panel title="Disclosure Blocks" meta="Analysis-only report controls" className="report-disclosure-panel">
-      <div className="report-disclosure-grid">
-        <article><strong>Analysis-only use</strong><span>Helios reports evidence and caveats; it does not provide investment advice.</span></article>
-        <article><strong>No trade execution</strong><span>No report, score, or AI narrative routes orders or rebalances accounts.</span></article>
-        <article><strong>No return guarantee</strong><span>Forecasts and historical evidence are estimates, not promises.</span></article>
-        <article><strong>Print / PDF layout</strong><span>Saved snapshots freeze source, date range, row count, version, audit trail, and disclosures.</span></article>
-      </div>
-    </Panel>
   );
 }
 
@@ -355,7 +311,6 @@ function aiResultToNarrative(result: AIResult) {
     result.data_quality_statement,
     result.key_points.length ? `Key points:\n${result.key_points.map((row) => `- ${row}`).join("\n")}` : "",
     result.risks.length ? `Risks:\n${result.risks.map((row) => `- ${row}`).join("\n")}` : "",
-    result.compliance_caveats.length ? `Compliance caveats:\n${result.compliance_caveats.map((row) => `- ${row}`).join("\n")}` : "",
   ];
   return parts.filter(Boolean).join("\n\n");
 }
@@ -475,6 +430,25 @@ function formatReportPrimitive(key: string, value: unknown) {
   if (normalized.endsWith("_bps") || normalized.includes("bps")) return `${fmtNumber(value, 0)} bps`;
   if (normalized.includes("score") || normalized.includes("quality") || normalized.includes("r2") || normalized.includes("rmse")) return fmtNumber(value, 1);
   return Number.isInteger(value) ? fmtNumber(value, 0) : fmtNumber(value, 2);
+}
+
+const PRESENTATION_BOILERPLATE_KEYS = new Set([
+  "analysis_only",
+  "analysis_only_disclaimer",
+  "compliance_caveats",
+  "disclosure_blocks",
+  "no_execution",
+  "no_return_guarantee",
+]);
+
+function stripPresentationBoilerplate(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripPresentationBoilerplate);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => !PRESENTATION_BOILERPLATE_KEYS.has(key.toLowerCase()))
+      .map(([key, nested]) => [key, stripPresentationBoilerplate(nested)]),
+  );
 }
 
 function maskPreviewSections(sections: Record<string, unknown>) {

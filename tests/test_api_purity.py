@@ -54,6 +54,7 @@ def test_research_gets_do_not_fetch_sync_or_record(monkeypatch):
         "/api/trials/missing-trial",
         "/api/models/PURE-MODEL/independent-validation",
         "/api/model-governance/PURE-MODEL/approval-packet",
+        "/api/research-context?target_id=PURE",
     ]
     for route in routes:
         response = client.get(route)

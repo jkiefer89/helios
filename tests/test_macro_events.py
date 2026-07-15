@@ -143,6 +143,13 @@ def test_event_risk_damper_shrinks_conviction_never_flips():
     assert np.sign(risky["score"]) == np.sign(base["score"])
     assert any("FOMC" in c for c in risky["caveats"])
     assert any("Geopolitical" in c for c in risky["caveats"])
+    event_path = next(
+        path for path in risky["conviction_guidance"]["paths"]
+        if path["key"] == "event_risk"
+    )
+    assert event_path["status"] == "limited"
+    assert "0.70" in event_path["current"]
+    assert "do not override" in event_path["next_evidence"]
 
 
 def test_no_macro_context_means_no_damper_and_no_macro_keys():

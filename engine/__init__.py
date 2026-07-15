@@ -27,6 +27,7 @@ Modules:
     model_validation - champion/challenger model validation dashboard
     risk_exposure - portfolio-level risk, exposure, stress, and benchmark analytics
     signal_journal - local signal audit log and paper-performance tracking
+    research_context - versioned operator thesis and mandate evidence
     evidence_lab - rolling walk-forward out-of-sample signal evidence
     evidence     - immutable calculation envelopes and deterministic replay
     provider_registry - licensed provider, reconciliation, and cutover controls
@@ -67,6 +68,7 @@ __all__ = [
     "model_validation",
     "risk_exposure",
     "signal_journal",
+    "research_context",
     "evidence_lab",
     "evidence",
     "trials",

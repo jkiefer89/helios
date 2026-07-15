@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
-import type { ModelSummary, StrategyResponse, TickerSummary } from "../api/types";
+import type { MandateSummary, ModelSummary, StrategyResponse, TickerSummary } from "../api/types";
 import { AICopilotPanel, strategyCopilotActions } from "../components/ai/AICopilotPanel";
 import { DataQualityBanner } from "../components/badges/DataModeBadge";
 import { Panel, StatTile } from "../components/cards/Panel";
@@ -14,6 +14,7 @@ import { fmtAuto, fmtNumber, fmtPct, fmtTimestamp, titleCase } from "../utils/fo
 export function StrategyLab({
   tickers,
   models,
+  mandates,
   selectedInstrument,
   selectedModel,
   onSelectInstrument,
@@ -21,6 +22,7 @@ export function StrategyLab({
 }: {
   tickers: TickerSummary[];
   models: ModelSummary[];
+  mandates: MandateSummary[];
   selectedInstrument?: string;
   selectedModel?: string;
   onSelectInstrument: (symbol: string) => void;
@@ -52,6 +54,7 @@ export function StrategyLab({
       disclaimer: payload.disclaimer,
     };
   }, [costBps, payload, selectedInstrumentMeta, slippageBps, target]);
+  const freshness = payload?.freshness || selectedInstrumentMeta?.freshness;
 
   const run = useCallback((requestedTarget: string) => {
     const [kind, id] = requestedTarget.split(":");
@@ -84,9 +87,9 @@ export function StrategyLab({
       {selectedInstrumentMeta && (
         <div className="source-context-strip">
           <span><b>Source</b>{selectedInstrumentMeta.source}</span>
-          <span><b>Rows</b>{selectedInstrumentMeta.row_count ?? "—"}</span>
-          <span><b>Date range</b>{selectedInstrumentMeta.first_date || "?"} to {selectedInstrumentMeta.last_date || "?"}</span>
-          <span><b>Last refresh</b>{fmtTimestamp(selectedInstrumentMeta.last_refresh?.attempted_at)}</span>
+          <span><b>Rows</b>{freshness?.row_count ?? selectedInstrumentMeta.row_count ?? "—"}</span>
+          <span><b>Date range</b>{freshness?.first_bar_date || selectedInstrumentMeta.first_date || "?"} to {freshness?.latest_bar_date || selectedInstrumentMeta.last_date || "?"}</span>
+          <span><b>Retrieval evidence</b>{freshness?.retrieved_at ? fmtTimestamp(freshness.retrieved_at) : titleCase(freshness?.status || "not verified")}</span>
         </div>
       )}
       {payload && <DataQualityBanner payload={payload} />}
@@ -96,12 +99,24 @@ export function StrategyLab({
           <span>{payload.required_action || payload.reason || "Provide live or uploaded data before using strategy evidence."}</span>
         </div>
       )}
+      {payload && (
+        <ResearchContextPanel
+          payload={payload}
+          target={target || defaultTarget}
+          mandates={mandates}
+          onSaved={() => run(target || defaultTarget)}
+        />
+      )}
       {payload && !payload.strategy ? (
         <EmptyState title={payload.display_label || "Strategy evidence blocked"} body={payload.reason || payload.required_action || "Upload real history before using strategy evidence."} />
       ) : payload ? (
         <>
           <section className="dashboard-grid three">
-            <Panel title="Evidence Verdict" meta={payload.beat_benchmark ? "Beat benchmark" : "Did not beat"}>
+            <Panel title="Evidence Verdict" meta={formatActionLabel(payload.current_signal?.action_label || "action unavailable")}>
+              <div className="strategy-action-line">
+                <span className="strategy-action-label">{formatActionLabel(payload.current_signal?.action_label || "Unavailable")}</span>
+                <small>effective {titleCase(payload.current_signal?.effective_session || "unavailable")}</small>
+              </div>
               <div className={`verdict-chip ${payload.beat_benchmark ? "verdict-positive" : "verdict-warning"}`}>
                 <b>Beat benchmark?</b>
                 <span>{payload.beat_benchmark ? "Yes" : "No"}</span>
@@ -112,7 +127,10 @@ export function StrategyLab({
                 <StatTile label="Benchmark" value={fmtPct(payload.benchmark?.total_return_pct)} />
                 <StatTile label="Sharpe" value={fmtNumber(payload.strategy?.sharpe, 2)} />
                 <StatTile label="Max drawdown" value={fmtPct(payload.strategy?.max_drawdown_pct)} tone="negative" />
+                <StatTile label="Threshold score" value={fmtNumber(payload.current_signal?.score, 2)} />
+                <StatTile label="Observed position" value={titleCase(payload.current_signal?.signal_state || "Unavailable")} />
               </div>
+              {payload.current_signal?.basis && <p className="forecast-note">{payload.current_signal.basis}</p>}
             </Panel>
             <Panel title="Trade Statistics">
               <KeyValues data={payload.trade_stats || {}} />
@@ -139,6 +157,10 @@ export function StrategyLab({
             <Panel title="Rolling Sharpe"><RollingSharpeChart labels={payload.dates || []} values={payload.rolling_sharpe_curve || []} height={160} /></Panel>
           </section>
           <section className="dashboard-grid">
+            <PathEvidencePanel payload={payload} />
+            <OosEvidencePanel payload={payload} />
+          </section>
+          <section className="dashboard-grid">
             <Panel title="Assumptions, Costs, and Slippage">
               <KeyValues data={{
                 ...(payload.assumptions || {}),
@@ -161,6 +183,218 @@ export function StrategyLab({
         <div className="loading" role="status">Running no-lookahead strategy evidence...</div>
       ) : <EmptyState title="Select a target" body="Choose an instrument or model to run Strategy Lab." />}
     </div>
+  );
+}
+
+function ResearchContextPanel({
+  payload,
+  target,
+  mandates,
+  onSaved,
+}: {
+  payload: StrategyResponse;
+  target: string;
+  mandates: MandateSummary[];
+  onSaved: () => void;
+}) {
+  const context = payload.research_context;
+  const isInstrument = target.startsWith("instrument:");
+  const [editing, setEditing] = useState(isInstrument && !context?.configured);
+  const [thesis, setThesis] = useState(context?.thesis || "");
+  const [mandateKey, setMandateKey] = useState(context?.mandate_key || "");
+  const [benchmark, setBenchmark] = useState(context?.benchmark || "");
+  const [horizon, setHorizon] = useState(context?.horizon_days ? String(context.horizon_days) : "");
+  const [criteria, setCriteria] = useState((context?.invalidation_criteria || []).join("\n"));
+  const [changeNote, setChangeNote] = useState("");
+  const [state, setState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [message, setMessage] = useState("");
+
+  useEffect(() => {
+    setThesis(context?.thesis || "");
+    setMandateKey(context?.mandate_key || "");
+    setBenchmark(context?.benchmark || "");
+    setHorizon(context?.horizon_days ? String(context.horizon_days) : "");
+    setCriteria((context?.invalidation_criteria || []).join("\n"));
+    setChangeNote("");
+    setState("idle");
+    setMessage("");
+    setEditing(isInstrument && !context?.configured);
+  }, [context, isInstrument, target]);
+
+  if (!isInstrument) {
+    return (
+      <Panel title="Governed Research Context" meta={context?.configured ? "Model thesis active" : "Thesis required"}>
+        {context?.configured ? (
+          <>
+            <p className="lead">{context.thesis}</p>
+            <KeyValues data={{
+              Mandate: context.mandate_label || context.mandate_key,
+              Benchmark: context.benchmark,
+              "Governance source": context.governance_source,
+            }} />
+          </>
+        ) : (
+          <div className="notice warning">This model has no governed thesis. Add its thesis through the model analysis workspace before relying on narrative review.</div>
+        )}
+      </Panel>
+    );
+  }
+
+  if (!editing && context?.configured) {
+    return (
+      <Panel title="Governed Research Context" meta={`Version ${context.version ?? "—"}`}>
+        <p className="lead">{context.thesis}</p>
+        <KeyValues data={{
+          Mandate: context.mandate_label || context.mandate_key,
+          Benchmark: context.benchmark,
+          "Research horizon": context.horizon_days ? `${context.horizon_days} sessions` : null,
+          "Last changed": context.created_at ? fmtTimestamp(context.created_at) : null,
+        }} />
+        {!!context.invalidation_criteria?.length && (
+          <div className="strategy-context-criteria">
+            <b>Invalidation criteria</b>
+            <ul>{context.invalidation_criteria.map((item) => <li key={item}>{item}</li>)}</ul>
+          </div>
+        )}
+        <button type="button" onClick={() => setEditing(true)}>Edit governed context</button>
+        {state === "saved" && <p className="forecast-note">{message}</p>}
+      </Panel>
+    );
+  }
+
+  const save = async () => {
+    const parsedHorizon = Number(horizon);
+    setState("saving");
+    setMessage("");
+    try {
+      await api.saveResearchContext({
+        target_kind: "instrument",
+        target_id: target.split(":")[1] || "",
+        thesis: thesis.trim(),
+        mandate_key: mandateKey,
+        benchmark: benchmark.trim(),
+        horizon_days: parsedHorizon,
+        invalidation_criteria: criteria.split("\n").map((item) => item.trim()).filter(Boolean),
+        change_note: changeNote.trim(),
+      });
+      setState("saved");
+      setMessage("Governed research context saved with a new evidence version.");
+      setEditing(false);
+      onSaved();
+    } catch (error) {
+      setState("error");
+      setMessage(error instanceof Error ? error.message : "Could not save research context.");
+    }
+  };
+
+  return (
+    <Panel title="Governed Research Context" meta={context?.configured ? `Version ${context.version ?? "—"}` : "Required for thesis-aware review"}>
+      <div className="decision-form strategy-context-form">
+        <label className="decision-form__field">Investment thesis
+          <textarea
+            value={thesis}
+            rows={3}
+            maxLength={2000}
+            onChange={(event) => setThesis(event.currentTarget.value)}
+            placeholder="State the intended use, expected return driver, and risk the position is meant to accept."
+          />
+        </label>
+        <div className="strategy-context-grid">
+          <label className="decision-form__field">Mandate
+            <TerminalSelect
+              ariaLabel="Research mandate"
+              value={mandateKey}
+              onChange={setMandateKey}
+              options={mandates.map((item) => ({ value: item.key, label: item.label }))}
+              placeholder="Select mandate"
+            />
+          </label>
+          <label className="decision-form__field">Benchmark
+            <input value={benchmark} maxLength={20} onChange={(event) => setBenchmark(event.currentTarget.value)} />
+          </label>
+          <label className="decision-form__field">Horizon, sessions
+            <input type="number" min={5} max={252} value={horizon} onChange={(event) => setHorizon(event.currentTarget.value)} />
+          </label>
+        </div>
+        <label className="decision-form__field">Invalidation criteria, one per line
+          <textarea value={criteria} rows={3} onChange={(event) => setCriteria(event.currentTarget.value)} />
+        </label>
+        <label className="decision-form__field">Required change note
+          <input value={changeNote} maxLength={800} onChange={(event) => setChangeNote(event.currentTarget.value)} />
+        </label>
+        <p className="forecast-note">This context may be included in sanitized AI review. Do not enter client identities or confidential account details.</p>
+        <div className="decision-form__row">
+          <button
+            type="button"
+            disabled={state === "saving" || changeNote.trim().length < 5}
+            onClick={() => void save()}
+          >{state === "saving" ? "Saving…" : "Save governed context"}</button>
+          {context?.configured && <button type="button" onClick={() => setEditing(false)}>Cancel</button>}
+        </div>
+        {state === "error" && <div className="notice danger" role="alert">{message}</div>}
+      </div>
+    </Panel>
+  );
+}
+
+function PathEvidencePanel({ payload }: { payload: StrategyResponse }) {
+  const path = payload.path_evidence;
+  const best = path?.trade_summary?.best_trade;
+  const worst = path?.trade_summary?.worst_trade;
+  const deepest = path?.drawdown_summary?.deepest_episodes?.[0];
+  return (
+    <Panel title="Path Evidence" meta="derived summaries; full curves stay local">
+      <KeyValues data={{
+        "Completed trades": path?.trade_summary?.completed_count,
+        "Winning trades": path?.trade_summary?.winning_count,
+        "Best trade": best ? `${best.entry_date} to ${best.exit_date || "open"} · ${fmtPct(best.net_return_pct)}` : null,
+        "Worst trade": worst ? `${worst.entry_date} to ${worst.exit_date || "open"} · ${fmtPct(worst.net_return_pct)}` : null,
+        "Deepest drawdown": deepest ? `${deepest.peak_date} to ${deepest.trough_date} · ${fmtPct(deepest.depth_pct)}` : fmtPct(path?.drawdown_summary?.maximum_drawdown_pct),
+        "Rolling Sharpe latest": fmtNumber(path?.rolling_sharpe_summary?.latest, 2),
+        "Negative Sharpe windows": fmtPct(path?.rolling_sharpe_summary?.negative_window_pct),
+      }} />
+      {path?.privacy_basis && <p className="forecast-note">{path.privacy_basis}</p>}
+    </Panel>
+  );
+}
+
+function OosEvidencePanel({ payload }: { payload: StrategyResponse }) {
+  const oos = payload.oos_evidence;
+  if (!oos || oos.status !== "ok" || !oos.primary) {
+    return (
+      <Panel title="Walk-Forward Evidence" meta="out-of-sample">
+        <div className="notice warning">{oos?.reason || "Out-of-sample evidence is unavailable for this history."}</div>
+      </Panel>
+    );
+  }
+  return (
+    <Panel title="Walk-Forward Evidence" meta={`${oos.fold_count} non-overlapping folds`}>
+      <KeyValues data={{
+        "OOS strategy return": fmtPct(oos.primary.strategy_return_pct),
+        "OOS benchmark": fmtPct(oos.primary.benchmark_return_pct),
+        "OOS net excess": fmtPct(oos.primary.net_excess_return_pct),
+        "Benchmark-beating folds": fmtPct(oos.primary.benchmark_beating_fold_pct),
+        "Primary sensitivity rank": oos.sensitivity ? `${oos.sensitivity.primary_rank_by_net_excess} of ${oos.sensitivity.variant_count}` : null,
+        "Positive nearby variants": oos.sensitivity ? `${oos.sensitivity.positive_excess_variant_count} of ${oos.sensitivity.variant_count}` : null,
+      }} />
+      {oos.sensitivity && (
+        <div className="terminal-table terminal-data-table-shell strategy-oos-table" tabIndex={0} aria-label="Threshold sensitivity evidence">
+          <table className="terminal-data-table">
+            <thead><tr><th>Entry</th><th>Exit</th><th>OOS return</th><th>Net excess</th><th>Beat folds</th></tr></thead>
+            <tbody>{oos.sensitivity.variants.map((variant) => (
+              <tr key={`${variant.entry_threshold}:${variant.exit_threshold}`} className={variant.primary ? "selected" : ""}>
+                <td>{fmtNumber(variant.entry_threshold, 2)}{variant.primary ? " · primary" : ""}</td>
+                <td>{fmtNumber(variant.exit_threshold, 2)}</td>
+                <td>{fmtPct(variant.strategy_return_pct)}</td>
+                <td>{fmtPct(variant.net_excess_return_pct)}</td>
+                <td>{fmtPct(variant.benchmark_beating_fold_pct)}</td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </div>
+      )}
+      <p className="forecast-note">The 0.15/-0.05 primary rule is fixed before evaluation. Nearby variants diagnose fragility; Helios does not select a winner from test results.</p>
+    </Panel>
   );
 }
 
@@ -191,6 +425,10 @@ function formatStrategyLabel(key: string): string {
     slippage_bps: "Slippage",
   };
   return labels[key] || titleCase(key);
+}
+
+function formatActionLabel(value: string): string {
+  return titleCase(value.toLowerCase());
 }
 
 function formatStrategyValue(key: string, value: unknown): string {

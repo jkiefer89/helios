@@ -10,8 +10,6 @@ import { RequestStatus, type RequestFailureState } from "../components/states/Re
 import { isViewId, type ViewId } from "../components/layout/AppShell";
 import { fmtNumber, fmtPct, fmtTimestamp } from "../utils/format";
 
-type DisclosureTone = "neutral" | "info" | "positive" | "warning";
-
 export function CommandCenter({
   payload,
   failure,
@@ -48,7 +46,6 @@ export function CommandCenter({
   const sourceStatus = formatSourceStatus(sourceCounts);
   const generatedLabel = formatTimestamp(payload.generated_at);
   const statusItems = buildStatusItems(payload, sourceStatus, generatedLabel);
-  const disclosureCards = buildDisclosureCards(payload, sourceStatus);
   return (
     <div className="view-stack command-terminal">
       <RequestStatus failure={failure} stale={Boolean(failure)} onRetry={() => void onRetry()} />
@@ -210,15 +207,6 @@ export function CommandCenter({
         </Panel>
       </section>
 
-      <section className="command-disclosure">
-        {disclosureCards.map((card) => (
-          <div key={card.title}>
-            <DisclosureIcon tone={card.tone} />
-            <strong>{card.title}</strong>
-            <p>{card.body}</p>
-          </div>
-        ))}
-      </section>
       <footer className="command-status">
         <div className="command-status__left">
           <span>Data status <InfoMark /></span>
@@ -229,11 +217,6 @@ export function CommandCenter({
             </button>
           ))}
         </div>
-        <div className="command-status__right">
-          <span>© 2026 Helios Analytics, Inc. All rights reserved.</span>
-          <button type="button" onClick={() => onOpenView("reports")}>Report disclosures</button>
-          <button type="button" onClick={() => onOpenView("reports")}>Analysis caveats</button>
-        </div>
       </footer>
     </div>
   );
@@ -241,44 +224,6 @@ export function CommandCenter({
 
 function PanelAction({ label, onClick }: { label: string; onClick: () => void }) {
   return <button className="panel-link" type="button" onClick={onClick}>{label}</button>;
-}
-
-function buildDisclosureCards(payload: CommandCenterResponse, sourceStatus: string): Array<{ title: string; body: string; tone: DisclosureTone }> {
-  const realDataReady = payload.eligible_for_real_research === true;
-  return [
-    {
-      title: "Analysis-only: not investment advice",
-      body: payload.disclaimer || "Helios provides analysis only and does not provide investment advice, brokerage services, order execution, or return guarantees.",
-      tone: "neutral",
-    },
-    realDataReady
-      ? {
-          title: "Real data active",
-          body: `${sourceStatus}. Research panels are using eligible live or uploaded histories; verify source quality before use.`,
-          tone: "positive",
-        }
-      : {
-          title: "Research data blocked",
-          body: `${sourceStatus}. ${payload.reason || payload.required_action || "Verify source quality before use."}`,
-          tone: "info",
-        },
-    realDataReady
-      ? {
-          title: "Research unlocked",
-          body: "Research rankings, alerts, and score distributions are available from eligible live or uploaded histories that passed provenance checks.",
-          tone: "positive",
-        }
-      : {
-          title: "Real data required",
-          body: "Research rankings, alerts, and score distributions unlock only when eligible live or uploaded histories pass provenance checks.",
-          tone: "warning",
-        },
-    {
-      title: "No guarantees",
-      body: "Helios reports evidence and caveats only. Portfolio outcomes and market prices remain uncertain.",
-      tone: "warning",
-    },
-  ];
 }
 
 function formatSourceStatus(sourceCounts: Record<string, number>) {
@@ -624,17 +569,6 @@ function LockedDistribution() {
         </ul>
       </div>
     </div>
-  );
-}
-
-function DisclosureIcon({ tone }: { tone: "neutral" | "info" | "positive" | "warning" }) {
-  return (
-    <span className={`disclosure-icon tone-${tone}`} aria-hidden="true">
-      <svg viewBox="0 0 24 24">
-        <path d="M12 3 20 7v5c0 5-3.4 8-8 9-4.6-1-8-4-8-9V7l8-4Z" />
-        <path d="M12 8v5M12 16h.01" />
-      </svg>
-    </span>
   );
 }
 

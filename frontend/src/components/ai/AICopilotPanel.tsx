@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ApiError, api } from "../../api/client";
-import type { AIResponse, AIResult, AIStatusResponse, CloudAIConfirmation, CloudTransferDisclosure } from "../../api/types";
+import { api } from "../../api/client";
+import type { AIResponse, AIResult, AIStatusResponse } from "../../api/types";
 import { fmtTimestamp } from "../../utils/format";
 
 export interface CopilotAction {
   id: string;
   label: string;
-  run: (payload: Record<string, unknown>, regenerate?: boolean, confirmation?: CloudAIConfirmation) => Promise<AIResponse>;
+  run: (payload: Record<string, unknown>, regenerate?: boolean) => Promise<AIResponse>;
 }
 
 interface AICopilotPanelProps {
@@ -32,11 +32,6 @@ export function AICopilotPanel({
   const [question, setQuestion] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const [pendingTransfer, setPendingTransfer] = useState<{
-    action: CopilotAction;
-    regenerate: boolean;
-    disclosure: CloudTransferDisclosure;
-  } | null>(null);
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -57,7 +52,6 @@ export function AICopilotPanel({
   useEffect(() => {
     setResult(null);
     setError("");
-    setPendingTransfer(null);
   }, [contextLabel, payload]);
 
   const computedDataMode = useMemo(() => {
@@ -85,7 +79,6 @@ export function AICopilotPanel({
   const runAction = async (
     action: CopilotAction,
     regenerate = false,
-    confirmation?: CloudAIConfirmation,
   ) => {
     if (!payload) {
       setError("No Helios payload is available for AI review.");
@@ -99,25 +92,14 @@ export function AICopilotPanel({
     setActiveAction(action.id);
     setError("");
     try {
-      const response = await action.run(payload, regenerate, confirmation);
+      const response = await action.run(payload, regenerate);
       setResult(response.result);
       onResult?.(response.result);
       setStatus(response.status);
-      setPendingTransfer(null);
     } catch (err) {
       setResult(null);
-      if (err instanceof ApiError && err.code === "cloud_ai_confirmation_required") {
-        const disclosure = err.details.cloud_transfer as CloudTransferDisclosure | undefined;
-        if (disclosure?.disclosure_hash) {
-          setPendingTransfer({ action, regenerate, disclosure });
-          setError("");
-        } else {
-          setError("Cloud transfer confirmation metadata was incomplete.");
-        }
-      } else {
-        setError(err instanceof Error ? err.message : "AI provider request failed.");
-        await refreshStatus();
-      }
+      setError(err instanceof Error ? err.message : "AI provider request failed.");
+      await refreshStatus();
     } finally {
       setLoading(false);
       setActiveAction("");
@@ -129,7 +111,7 @@ export function AICopilotPanel({
     await runAction({
       id: "question",
       label: "Ask question",
-      run: (body, regenerate, confirmation) => api.aiQuestion(body, question.trim(), regenerate, confirmation),
+      run: (body, regenerate) => api.aiQuestion(body, question.trim(), regenerate),
     }, true);
   };
 
@@ -155,7 +137,6 @@ export function AICopilotPanel({
       <div className="ai-state-message">
         <strong>{statusMessage(status)}</strong>
         {unavailableReason && <span>{unavailableReason}</span>}
-        {status?.privacy_warning && <span>{status.privacy_warning}</span>}
         {(status?.security_warnings || []).map((warning) => <span key={warning}>{warning}</span>)}
         {modeWarning && <span>{modeWarning}</span>}
       </div>
@@ -173,38 +154,6 @@ export function AICopilotPanel({
           </button>
         ))}
       </div>
-
-      {pendingTransfer && (
-        <div className="ai-cloud-confirmation" role="alert">
-          <strong>Confirm sanitized cloud transfer</strong>
-          <span>
-            Helios locally redacted {pendingTransfer.disclosure.redaction_count} sensitive value(s).
-            Sanitized metrics and your prompt will be sent to {providerLabel(status)} only after confirmation.
-          </span>
-          <small>{formatRedactionCategories(pendingTransfer.disclosure.redaction_categories)}</small>
-          <small>
-            {pendingTransfer.disclosure.provider} / {pendingTransfer.disclosure.model} / {pendingTransfer.disclosure.task}
-          </small>
-          {pendingTransfer.disclosure.redacted_fields.length > 0 && (
-            <small>Redacted fields: {pendingTransfer.disclosure.redacted_fields.join(", ")}</small>
-          )}
-          <small>Transfer fingerprint: {pendingTransfer.disclosure.disclosure_hash.slice(0, 12)}</small>
-          <div>
-            <button
-              type="button"
-              disabled={loading}
-              onClick={() => void runAction(
-                pendingTransfer.action,
-                pendingTransfer.regenerate,
-                { confirmed: true, disclosure_hash: pendingTransfer.disclosure.disclosure_hash },
-              )}
-            >
-              Confirm and send
-            </button>
-            <button type="button" disabled={loading} onClick={() => setPendingTransfer(null)}>Cancel</button>
-          </div>
-        </div>
-      )}
 
       <form className="ai-question" onSubmit={(event) => { event.preventDefault(); void askQuestion(); }}>
         <input
@@ -262,7 +211,6 @@ function AIResultView({ result }: { result: AIResult }) {
         <blockquote className="ai-advisor-language">{result.advisor_language}</blockquote>
       )}
       {result.data_quality_statement && <p className="muted">{result.data_quality_statement}</p>}
-      <ResultList title="Compliance caveats" rows={result.compliance_caveats} />
       {(result.unsupported_numbers?.length || result.blocked_phrases?.length) ? (
         <div className="ai-review-flags">
           {result.unsupported_numbers?.length ? <span>Unsupported numbers: {result.unsupported_numbers.join(", ")}</span> : null}
@@ -312,11 +260,4 @@ function readDataMode(payload: Record<string, unknown> | null): string {
     return typeof value === "string" ? value : "";
   }
   return "";
-}
-
-function formatRedactionCategories(categories: Record<string, number>) {
-  const rows = Object.entries(categories || {});
-  return rows.length
-    ? `Redactions: ${rows.map(([name, count]) => `${name.replace(/_/g, " ")} ${count}`).join(" · ")}`
-    : "No sensitive patterns were detected; confirmation is still required for cloud transfer.";
 }

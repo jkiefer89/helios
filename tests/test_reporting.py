@@ -159,6 +159,7 @@ def test_instrument_report_contains_required_sections_and_disclaimer():
         "provenance",
         "data_quality",
         "assumptions",
+        "research_context",
     }
     assert body["eligible_for_real_research"] is False
     assert body["data_mode"] == "invalid_for_research"
@@ -168,6 +169,11 @@ def test_instrument_report_contains_required_sections_and_disclaimer():
     assert body["sections"]["provenance"]["first_date"]
     assert body["sections"]["provenance"]["last_date"]
     assert body["sections"]["provenance"]["eligible_for_real_research"] is False
+    assert body["sections"]["provenance"]["freshness"]["latest_bar_date"]
+    assert body["sections"]["research_context"]["configured"] is False
+    assert body["sections"]["strategy"]["current_signal"]["action_label"]
+    assert body["sections"]["strategy"]["path_evidence"]["date_range"]["session_count"] > 0
+    assert body["sections"]["strategy"]["oos_evidence"]["status"] == "ok"
     assert "analysis only" in body["disclaimer"].lower()
     assert body["timestamp"]
 
@@ -240,7 +246,51 @@ def test_real_model_report_includes_analysis_window_and_source_metadata():
     assert body["sections"]["data_quality"]["row_count"] == body["data_provenance"]["row_count"]
     assert body["sections"]["provenance"]["row_count"] == body["data_provenance"]["row_count"]
     assert body["sections"]["provenance"]["source_counts"] == {"upload": 2}
+    assert "last_refresh" not in body["sections"]["provenance"]
+    assert body["sections"]["provenance"]["freshness"]["component_count"] == 2
+    assert body["sections"]["provenance"]["freshness"]["binding_latest_bar_date"]
+    assert body["sections"]["research_context"]["target_kind"] == "model"
+    assert body["sections"]["strategy"]["current_signal"]["action_label"]
+    assert body["sections"]["strategy"]["oos_evidence"]["status"] == "insufficient_data"
     assert "analysis only" in body["disclaimer"].lower()
+
+
+def test_instrument_report_includes_saved_governed_context(monkeypatch, tmp_path):
+    monkeypatch.setenv("HELIOS_DB_PATH", str(tmp_path / "helios.db"))
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION", "off")
+    from engine import persistence
+
+    persistence.reset_store_for_tests()
+    client = _client()
+    uploaded = client.post(
+        "/api/upload",
+        data={
+            "file": (BytesIO(price_csv(days=320)), "context-report.csv"),
+            "symbol": "CTXREP",
+            "name": "Context Report",
+        },
+        content_type="multipart/form-data",
+    )
+    assert uploaded.status_code == 200
+    saved = client.post("/api/research-context", json={
+        "target_id": "CTXREP",
+        "thesis": "Hold while durable earnings growth and relative strength support the stated mandate.",
+        "mandate_key": "balanced",
+        "benchmark": "SPY",
+        "horizon_days": 42,
+        "invalidation_criteria": ["Relative strength remains below SPY for two reviews."],
+        "change_note": "Create context for report evidence.",
+    })
+    assert saved.status_code == 200
+
+    report = client.get("/api/report/instrument?ticker=CTXREP")
+
+    assert report.status_code == 200
+    context = report.get_json()["sections"]["research_context"]
+    assert context["configured"] is True
+    assert context["benchmark"] == "SPY"
+    assert context["horizon_days"] == 42
+    assert context["invalidation_criteria"] == ["Relative strength remains below SPY for two reviews."]
 
 
 def test_report_error_paths_return_json():
@@ -311,14 +361,13 @@ def test_report_snapshot_history_exports_html_and_pdf_with_provenance(monkeypatc
     assert html.content_type.startswith("text/html")
     html_text = html.get_data(as_text=True)
     assert "Helios Report Snapshot" in html_text
-    assert "Analysis only" in html_text
     assert "Snapshot Upload" in html_text
     assert "Source" in html_text and "upload" in html_text
     assert "Row Count" in html_text and "260" in html_text
     assert "First Date" in html_text
     assert "Last Date" in html_text
     assert "Advisor reviewed AI narrative" in html_text
-    assert "investment advice" in html_text.lower()
+    assert "investment advice" not in html_text.lower()
 
     pdf = client.get(snapshot["pdf_url"])
     assert pdf.status_code == 200
@@ -328,11 +377,11 @@ def test_report_snapshot_history_exports_html_and_pdf_with_provenance(monkeypatc
     assert b"Advisor-Grade Research Terminal" in pdf.data
     assert b"Helios Report Snapshot" in pdf.data
     assert b"SOURCE AND PROVENANCE" in pdf.data
-    assert b"ADVISOR REVIEW REQUIRED" in pdf.data
+    assert b"ADVISOR REVIEW REQUIRED" not in pdf.data
     assert pdf.data.count(b"/Type /Page") >= 2
 
 
-def test_institutional_report_snapshots_include_versions_audit_and_disclosures(monkeypatch, tmp_path):
+def test_institutional_report_snapshots_include_versions_audit_and_provenance(monkeypatch, tmp_path):
     monkeypatch.setenv("HELIOS_DB_PATH", str(tmp_path / "helios.db"))
     from engine import persistence
 
@@ -374,8 +423,7 @@ def test_institutional_report_snapshots_include_versions_audit_and_disclosures(m
     assert first_snapshot["metadata"]["institutional_report"] is True
     assert first_snapshot["audit_trail"][0]["event"] == "report_built"
     assert first_snapshot["audit_trail"][-1]["event"] == "snapshot_saved"
-    assert any(block["title"] == "Analysis-Only Use" for block in first_snapshot["disclosure_blocks"])
-    assert any("does not provide investment advice" in block["body"].lower() for block in first_snapshot["disclosure_blocks"])
+    assert "disclosure_blocks" not in first_snapshot
 
     second = client.post("/api/report/snapshots", json={"kind": "instrument", "id": "INST"})
     assert second.status_code == 200
@@ -392,11 +440,10 @@ def test_institutional_report_snapshots_include_versions_audit_and_disclosures(m
     assert "Institutional Advisor Report" in html_text
     assert "Report Version" in html_text and "v1" in html_text
     assert "Audit Trail" in html_text
-    assert "Disclosure Blocks" in html_text
+    assert "Source And Provenance" in html_text
     assert "Investment Committee" in html_text
     assert "Helios Advisor Desk" in html_text
-    assert "No Trade Execution" in html_text
-    assert "No Return Guarantee" in html_text
+    assert "Disclosure Blocks" not in html_text
 
     pdf = client.get(first_snapshot["pdf_url"])
     assert pdf.status_code == 200
@@ -404,7 +451,7 @@ def test_institutional_report_snapshots_include_versions_audit_and_disclosures(m
     assert b"INSTITUTIONAL ADVISOR REPORT" in pdf.data
     assert b"REPORT VERSION" in pdf.data
     assert b"AUDIT TRAIL" in pdf.data
-    assert b"DISCLOSURE BLOCKS" in pdf.data
+    assert b"DISCLOSURE BLOCKS" not in pdf.data
 
 
 def test_institutional_pdf_export_is_full_designer_grade_package(monkeypatch, tmp_path):
@@ -449,7 +496,7 @@ def test_institutional_pdf_export_is_full_designer_grade_package(monkeypatch, tm
     assert b"EXECUTIVE SUMMARY" in pdf.data
     assert b"PROVENANCE DASHBOARD" in pdf.data
     assert b"EVIDENCE DETAIL" in pdf.data
-    assert b"DISCLOSURE BLOCKS" in pdf.data
+    assert b"DISCLOSURE BLOCKS" not in pdf.data
     assert b"Page 1 of" in pdf.data
     assert b"Page 4 of" in pdf.data
 
@@ -484,8 +531,7 @@ def test_report_snapshot_can_generate_ai_narrative_when_provider_enabled(monkeyp
                 "key_points": ["Source and range were reviewed."],
                 "risks": ["Forecasts remain estimates."],
                 "what_would_invalidate": [],
-                "advisor_language": "Advisor language remains analysis-only and requires review.",
-                "compliance_caveats": ["Advisor review required before client use."],
+                "advisor_language": "The current evidence supports continued monitoring.",
                 "used_numbers": [],
                 "missing_information": [],
                 "data_quality_statement": "Real uploaded history is present.",
@@ -509,10 +555,10 @@ def test_report_snapshot_can_generate_ai_narrative_when_provider_enabled(monkeyp
     assert snapshot["ai_provider"]["provider"] == "fake"
     html_text = client.get(snapshot["html_url"]).get_data(as_text=True)
     assert "AI narrative summary based only on Helios report facts" in html_text
-    assert "Advisor Review Required" in html_text
+    assert "Advisor Review Required" not in html_text
 
 
-def test_cloud_report_narrative_requires_exact_transfer_confirmation(monkeypatch, tmp_path):
+def test_cloud_report_narrative_runs_from_sanitized_payload_without_confirmation(monkeypatch, tmp_path):
     monkeypatch.setenv("HELIOS_DB_PATH", str(tmp_path / "helios.db"))
     from engine import persistence
 
@@ -548,10 +594,10 @@ def test_cloud_report_narrative_requires_exact_transfer_confirmation(monkeypatch
             assert regenerate is True
             assert payload["report"]["kind"] == "instrument"
             return {
-                "summary": "Confirmed cloud narrative from sanitized Helios facts.",
-                "key_points": [], "risks": ["Advisor review required."],
-                "what_would_invalidate": [], "advisor_language": "Analysis only.",
-                "compliance_caveats": ["No return guarantee."], "used_numbers": [],
+                "summary": "Cloud narrative from sanitized Helios facts.",
+                "key_points": [], "risks": ["Source quality can change."],
+                "what_would_invalidate": [], "advisor_language": "Monitor the supplied risk evidence.",
+                "used_numbers": [],
                 "missing_information": [], "data_quality_statement": "Uploaded history.",
                 "provider": self.provider, "model": self.model, "needs_review": True,
             }
@@ -562,28 +608,19 @@ def test_cloud_report_narrative_requires_exact_transfer_confirmation(monkeypatch
         "kind": "instrument", "id": "CLOUDREP", "include_ai_narrative": True,
     }
 
-    first = client.post("/api/report/snapshots", json=request_body)
+    response = client.post("/api/report/snapshots", json=request_body)
 
-    assert first.status_code == 409
-    disclosure = first.get_json()["cloud_transfer"]
-    assert disclosure["task"] == "report_narrative"
-    assert disclosure["provider"] == "anthropic"
-    assert disclosure["model"] == "test-cloud-model"
-    assert provider.calls == 0
-
-    confirmed = client.post("/api/report/snapshots", json={
-        **request_body,
-        "cloud_confirmation": {
-            "confirmed": True,
-            "disclosure_hash": disclosure["disclosure_hash"],
-        },
-    })
-
-    assert confirmed.status_code == 200, confirmed.get_json()
+    assert response.status_code == 200, response.get_json()
     assert provider.calls == 1
-    snapshot = confirmed.get_json()["snapshot"]
+    snapshot = response.get_json()["snapshot"]
     assert snapshot["ai_narrative_status"] == "generated"
-    assert snapshot["ai_provider"]["cloud_transfer"]["confirmed"] is True
+    transfer = snapshot["ai_provider"]["cloud_transfer"]
+    assert transfer["task"] == "report_narrative"
+    assert transfer["provider"] == "anthropic"
+    assert transfer["model"] == "test-cloud-model"
+    assert transfer["confirmed"] is True
+    assert transfer["confirmation_required"] is False
+    assert transfer["raw_values_returned"] is False
 
 
 def test_model_report_snapshot_includes_model_metadata_and_source_counts(monkeypatch, tmp_path):
@@ -631,7 +668,7 @@ def test_model_report_snapshot_includes_model_metadata_and_source_counts(monkeyp
     assert "pure_growth" in html_text
     assert "Source Counts" in html_text
     assert "upload" in html_text
-    assert "No Return Guarantee" in html_text
+    assert "No Return Guarantee" not in html_text
 
 
 def test_model_report_snapshot_includes_client_grade_risk_pack(monkeypatch, tmp_path):
@@ -695,7 +732,7 @@ def test_model_report_snapshot_includes_client_grade_risk_pack(monkeypatch, tmp_
     html_text = client.get(snapshot["html_url"]).get_data(as_text=True)
     assert "Risk Evidence" in html_text
     assert "Client Risk Pack" not in html_text
-    assert "not approved for client or investment-committee distribution" in html_text
+    assert "Internal risk evidence from the current model history" in html_text
     assert "Historical Stress Replay" in html_text
     assert "What Would Break This Model" in html_text
     assert "Benchmark Relative Drawdown" in html_text

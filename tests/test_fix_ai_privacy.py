@@ -148,7 +148,7 @@ def test_composed_strings_untouched_when_redaction_disabled():
 # ---------------------------------------------------------------- FIX 3
 
 
-def test_mixed_data_mode_forces_proportionate_caveat():
+def test_mixed_data_mode_forces_proportionate_data_warning():
     result = ai_copilot.validate_ai_output(
         {"summary": "Review candidate.", "data_quality_statement": "Coverage summary."},
         {"data_mode": "mixed", "score": 42},
@@ -159,7 +159,7 @@ def test_mixed_data_mode_forces_proportionate_caveat():
 
     assert result["data_mode"] == "mixed"
     assert "not verified real market data" in result["data_quality_statement"].lower()
-    assert any("advisor review" in caveat.lower() for caveat in result["compliance_caveats"])
+    assert "compliance_caveats" not in result
 
 
 def test_real_data_mode_gets_no_mixed_caveat():
@@ -342,6 +342,61 @@ def test_series_shaped_maps_and_variant_keys_are_blocked():
     assert sanitized["close_series"]["omitted"] is True
     assert sanitized["ci90_high"] == 112.4                       # scalar context survives
     assert sanitized["history_days"] == 252                      # exempted row count
+    assert sanitized["_sanitization"]["full_price_history_sent"] is False
+
+
+def test_strategy_evidence_keeps_derived_summaries_but_blocks_raw_curves_and_holdings():
+    payload = {
+        "dates": ["2026-01-02", "2026-01-05"],
+        "strategy_curve": [1.0, 1.01],
+        "drawdown_curve": [0.0, -1.0],
+        "rolling_sharpe_curve": [None, 0.4],
+        "current_signal": {
+            "action_label": "MAINTAIN_LONG",
+            "score": 0.22,
+            "as_of_date": "2026-01-05",
+        },
+        "path_evidence": {
+            "trade_summary": {"completed_count": 4, "best_trade": {"net_return_pct": 8.2}},
+            "rolling_sharpe_summary": {"latest": 0.4, "negative_window_pct": 25.0},
+        },
+        "oos_evidence": {
+            "status": "ok",
+            "fold_count": 6,
+            "primary": {"net_excess_return_pct": 1.3},
+            "sensitivity": {"winner_selected": False, "variant_count": 9},
+        },
+        "research_context": {
+            "configured": True,
+            "thesis": "AI infrastructure demand remains durable relative to the governed benchmark.",
+            "benchmark": "QQQ",
+            "actor": "advisor@example.test",
+            "change_note": "Prepared for a confidential client review.",
+            "evidence": {"evidence_id": "internal-only"},
+        },
+        "freshness": {
+            "status": "component_evidence_available",
+            "component_count": 3,
+            "binding_latest_bar_date": "2026-01-05",
+            "component_details": [{"symbol": "NVDA"}, {"symbol": "AVGO"}],
+        },
+    }
+
+    sanitized = ai_copilot.sanitize_payload(payload, _config())
+
+    assert sanitized["dates"]["omitted"] is True
+    assert sanitized["strategy_curve"]["omitted"] is True
+    assert sanitized["drawdown_curve"]["omitted"] is True
+    assert sanitized["rolling_sharpe_curve"]["omitted"] is True
+    assert sanitized["current_signal"]["action_label"] == "MAINTAIN_LONG"
+    assert sanitized["path_evidence"]["trade_summary"]["completed_count"] == 4
+    assert sanitized["oos_evidence"]["primary"]["net_excess_return_pct"] == 1.3
+    assert sanitized["research_context"]["benchmark"] == "QQQ"
+    assert "actor" not in sanitized["research_context"]
+    assert "change_note" not in sanitized["research_context"]
+    assert "evidence" not in sanitized["research_context"]
+    assert sanitized["freshness"]["component_count"] == 3
+    assert sanitized["freshness"]["component_details"]["omitted"] is True
     assert sanitized["_sanitization"]["full_price_history_sent"] is False
 
 

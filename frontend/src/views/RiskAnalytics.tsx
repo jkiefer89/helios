@@ -349,7 +349,6 @@ function ClientGradeRiskPack({ pack }: { pack?: ClientRiskPack }) {
           ))}
         </div>
       )}
-      <p className="muted">{pack.disclaimer}</p>
     </Panel>
   );
 }

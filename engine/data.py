@@ -19,7 +19,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import numpy as np
@@ -136,6 +136,132 @@ def get(symbol: str) -> Instrument | None:
 def all_instruments() -> list[Instrument]:
     with _STORE_LOCK:
         return list(_STORE.values())
+
+
+def latest_refresh(symbol: str, *, status: str | None = None, limit: int = 250) -> dict | None:
+    """Return factual persisted refresh evidence without manufacturing a row."""
+    try:
+        from . import persistence
+
+        wanted = str(status or "").strip().lower()
+        for row in persistence.get_store().refresh_log(limit=limit):
+            if str(row.get("symbol") or "").upper() != str(symbol or "").upper():
+                continue
+            if wanted and str(row.get("status") or "").lower() != wanted:
+                continue
+            return row
+    except Exception:
+        return None
+    return None
+
+
+def instrument_freshness(inst: Instrument, *, refresh_attempt: dict | None = None) -> dict:
+    """Describe price-date and retrieval freshness using only observed facts.
+
+    ``last_refresh`` stays a provider-operation fact. Older persisted live rows
+    may lack that log, so ``retrieved_at`` is exposed separately instead of
+    relabeling it as a refresh attempt.
+    """
+    close = inst.df["close"].dropna() if "close" in inst.df else pd.Series(dtype=float)
+    dates = pd.to_datetime(close.index, errors="coerce")
+    dates = dates[~pd.isna(dates)]
+    first_date = str(dates.min().date()) if len(dates) else None
+    last_date = str(dates.max().date()) if len(dates) else None
+    age_days = (
+        (datetime.now(timezone.utc).date() - dates.max().date()).days
+        if len(dates) else None
+    )
+    attempted = refresh_attempt if refresh_attempt is not None else latest_refresh(inst.symbol)
+    successful = latest_refresh(inst.symbol, status="ok")
+    retrieved_at = str(getattr(inst, "retrieved_at", "") or "").strip() or None
+    fallback_used = False
+    if not retrieved_at and successful:
+        retrieved_at = str(successful.get("attempted_at") or "").strip() or None
+        fallback_used = bool(retrieved_at)
+    if inst.source == "live":
+        if retrieved_at:
+            status = "verified_provider_retrieval"
+            basis = "instrument_retrieved_at" if not fallback_used else "successful_refresh_log"
+        else:
+            status = "unverified_retrieval_time"
+            basis = "latest_observed_bar_date_only" if last_date else "missing_history"
+    elif inst.source == "upload":
+        status = "uploaded_source_date"
+        basis = "uploaded_last_bar_date" if last_date else "missing_history"
+    else:
+        status = "ineligible_source"
+        basis = "ineligible_source"
+    payload = {
+        "status": status,
+        "source": inst.source,
+        "price_provider": str(getattr(inst, "price_provider", "") or ""),
+        "row_count": int(len(close)),
+        "first_bar_date": first_date,
+        "latest_bar_date": last_date,
+        "latest_bar_age_calendar_days": age_days,
+        "retrieved_at": retrieved_at,
+        "retrieval_basis": basis,
+        "retrieval_fallback_used": fallback_used,
+        "refresh_observed": bool(attempted),
+        "provider_retrieval_verified": bool(inst.source == "live" and retrieved_at),
+    }
+    if attempted:
+        payload["last_refresh"] = attempted
+    if successful:
+        payload["last_successful_refresh"] = successful
+    return payload
+
+
+def model_freshness(model) -> dict:
+    """Aggregate component freshness without pretending a model was refreshed."""
+    details = []
+    missing = 0
+    for holding in getattr(model, "holdings", ()):
+        inst = get(getattr(holding, "ticker", ""))
+        if inst is None:
+            missing += 1
+            details.append({
+                "symbol": str(getattr(holding, "ticker", "")),
+                "status": "missing",
+            })
+            continue
+        details.append({"symbol": inst.symbol, **instrument_freshness(inst)})
+    retrieved = sorted(
+        str(row["retrieved_at"]) for row in details if row.get("retrieved_at")
+    )
+    bar_dates = sorted(
+        str(row["latest_bar_date"]) for row in details if row.get("latest_bar_date")
+    )
+    unverified_live = sum(
+        1 for row in details
+        if row.get("source") == "live" and not row.get("provider_retrieval_verified")
+    )
+    if not details:
+        status = "no_components"
+    elif missing:
+        status = "missing_components"
+    elif unverified_live:
+        status = "partial_refresh_evidence"
+    else:
+        status = "component_evidence_available"
+    return {
+        "status": status,
+        "basis": "component_instrument_histories",
+        "component_count": len(details),
+        "missing_component_count": missing,
+        "unverified_live_component_count": unverified_live,
+        "provider_retrieval_component_count": sum(
+            1 for row in details if row.get("provider_retrieval_verified")
+        ),
+        "uploaded_source_date_component_count": sum(
+            1 for row in details if row.get("status") == "uploaded_source_date"
+        ),
+        "oldest_retrieved_at": retrieved[0] if retrieved else None,
+        "newest_retrieved_at": retrieved[-1] if retrieved else None,
+        "binding_latest_bar_date": bar_dates[0] if bar_dates else None,
+        "newest_component_bar_date": bar_dates[-1] if bar_dates else None,
+        "component_details": details,
+    }
 
 
 def snapshot_instruments() -> dict[str, Instrument]:

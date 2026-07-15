@@ -10,7 +10,7 @@ from engine import (
     analytics_cache, backtest, cma, data, data_quality, figi, forecast, fundamentals,
     holdings, indicators, insights, macro_events, mandate, model_governance,
     model_library, model_validation, persistence, portfolio, portfolio_clinic, provenance,
-    provider_registry, risk_exposure, sentiment, signals, strategy,
+    provider_registry, research_context, risk_exposure, sentiment, signals, strategy,
 )
 
 from .analysis import _record_model_signal, _series_payload, _strategy_request_args
@@ -519,6 +519,8 @@ def model_strategy_analyze():
     cost_bps, slippage_bps, window, arg_error = _strategy_request_args()
     if arg_error:
         return err(arg_error, 400)
+    context = research_context.model_context(mdl)
+    freshness = data.model_freshness(mdl)
     try:
         ps = portfolio.build_series(mdl, allow_sample=False, allow_simulated=False)
     except ValueError as e:
@@ -527,6 +529,10 @@ def model_strategy_analyze():
             "series_kind": "model",
             "id": mdl.id,
             "name": mdl.name,
+            "thesis": mdl.thesis,
+            "thesis_params": dict(mdl.thesis_params or {}),
+            "research_context": context,
+            "freshness": freshness,
             "data_mode": "invalid_for_research",
             "display_label": "Data Quality Blocked",
             "eligible_for_real_research": False,
@@ -544,6 +550,10 @@ def model_strategy_analyze():
             "series_kind": "model",
             "id": mdl.id,
             "name": mdl.name,
+            "thesis": mdl.thesis,
+            "thesis_params": dict(mdl.thesis_params or {}),
+            "research_context": context,
+            "freshness": freshness,
             "data_mode": p["data_mode"],
             "display_label": p["display_label"],
             "eligible_for_real_research": False,
@@ -558,6 +568,8 @@ def model_strategy_analyze():
     try:
         result = strategy.analyze_strategy(
             ps.close, cost_bps=cost_bps, slippage_bps=slippage_bps, **window)
+        oos = strategy.analyze_oos_evidence(
+            ps.close, cost_bps=cost_bps, slippage_bps=slippage_bps, **window)
     except ValueError as e:
         # Window/short-history errors are not data-quality blocks: report the
         # actual message (mirrors the instrument twin in analysis.py).
@@ -566,7 +578,11 @@ def model_strategy_analyze():
         "series_kind": "model",
         "id": mdl.id,
         "name": mdl.name,
+        "thesis": mdl.thesis,
+        "thesis_params": dict(mdl.thesis_params or {}),
         "mandate": {"key": mdl.mandate_key, **mandate.get(mdl.mandate_key)},
+        "research_context": context,
+        "freshness": freshness,
         "provenance": ps.provenance,
         "data_mode": p["data_mode"],
         "display_label": p["display_label"],
@@ -575,6 +591,7 @@ def model_strategy_analyze():
         "required_action": p["required_action"],
         "data_provenance": p,
         "warnings": ps.warnings,
+        "oos_evidence": oos,
         **result,
         "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
     })
