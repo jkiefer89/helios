@@ -266,10 +266,15 @@ def evaluate(close: pd.Series, forecast_result: dict, sentiment_result: dict,
                      "independent of the selected horizon",
         }
     else:
+        _fr = fundamental_result or {}
         strategic = {
             "usable": False,
-            "reason": (fundamental_result or {}).get("basis", "no usable fundamentals"),
+            # Prefer the specific refusal reason (e.g. leveraged/daily-reset)
+            # over the generic basis label so the UI shows WHY, not just "generic".
+            "reason": _fr.get("reason") or _fr.get("basis") or "no usable fundamentals",
         }
+        if _fr.get("product_structure"):
+            strategic["product_structure"] = _fr["product_structure"]
 
     clauses = _component_clauses(f, i, raw, eff_w, contributions, forecast_result, sentiment_result)
     names = ("trend", "momentum", "forecast", "sentiment") + (("fundamentals",) if has_fundamentals else ())
@@ -287,8 +292,15 @@ def evaluate(close: pd.Series, forecast_result: dict, sentiment_result: dict,
 
     caveats = _caveats(forecast_result, history_days, data_honesty)
     if not has_fundamentals:
-        caveats.append("No usable fundamentals for this instrument — rating is the "
-                       "technical blend only (no strategic track).")
+        if (fundamental_result or {}).get("product_structure") == "leveraged_daily_reset":
+            caveats.append(
+                "Leveraged/daily-reset product: fundamentals, sector anchors, and "
+                "long-horizon projections do not model daily-reset compounding or "
+                "financing cost — rating is technical (tactical) signals only, and the "
+                "forecast cone assumes no leverage decay.")
+        else:
+            caveats.append("No usable fundamentals for this instrument — rating is the "
+                           "technical blend only (no strategic track).")
     caveats.extend(event_reasons)
     # Sector-level policy pressure is context (never scored): flag it honestly.
     sector_policy = (macro_context or {}).get("sector_policy")

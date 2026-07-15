@@ -349,3 +349,56 @@ def test_instrument_forward_flags_imminent_earnings():
     fwd = cma.instrument_forward("X", fnd)
     assert fwd["earnings"]["next_date"] == "2099-01-01"
     assert fwd["earnings"]["imminent"] is False           # far future, not imminent
+
+
+# --------------------------------------------------------------------------- #
+# Leveraged / daily-reset product refusal (SOXL et al.) — fundamentals,
+# sector anchors, and valuation reversion do not model daily-reset compounding,
+# so the strategic track must REFUSE rather than fabricate a confident rating.
+# --------------------------------------------------------------------------- #
+from engine import assumptions as _assumptions
+
+
+def test_is_leveraged_product_name_detects_issuer_conventions():
+    for name in ("Direxion Daily Semiconductor Bull 3X Shares",
+                 "Direxion Daily Semiconductor Bull 3X ETF",
+                 "ProShares UltraPro QQQ", "ProShares Ultra S&P500",
+                 "ProShares Short S&P500",
+                 "Daily Junior Gold Miners Index Bear 2X Shares",
+                 "MicroSectors FANG+ Index 3X Leveraged ETN"):
+        assert _assumptions.is_leveraged_product_name(name) is True, name
+    for name in ("JPMorgan Chase & Co.", "NVIDIA Corporation",
+                 "iShares MSCI USA Quality Factor ETF", "Invesco QQQ Trust",
+                 "SPDR S&P 500 ETF Trust", "Ultragenyx Pharmaceutical Inc.",
+                 "Fidelity Contrafund", ""):
+        assert _assumptions.is_leveraged_product_name(name) is False, name
+
+
+def test_leveraged_wrapper_refuses_equity_block_despite_fake_pe():
+    # FMP tags SOXL a "Financial Services" company with a (meaningless) P/E, so
+    # usable fundamentals alone must NOT admit the equity block — the name is
+    # the tell. Refuse it despite a positive P/E and dividend.
+    f = _f(ticker="SOXL", name="Direxion Daily Semiconductor Bull 3X ETF",
+           trailing_pe=30.0, dividend_yield=0.0013, sector="Financial Services")
+    hr = cma.holding_expected_return("SOXL", 100.0, "Equity (common)", f)
+    assert hr.usable is False and hr.expected_return is None
+    assert hr.blocks.get("product_structure") == "leveraged_daily_reset"
+    assert "leveraged" in hr.blocks.get("reason", "").lower()
+
+
+def test_instrument_forward_flags_leveraged_and_surfaces_reason():
+    f = _f(ticker="SOXL", name="Direxion Daily Semiconductor Bull 3X ETF",
+           trailing_pe=30.0, dividend_yield=0.0013, sector="Financial Services")
+    fwd = cma.instrument_forward("SOXL", f)
+    assert fwd["usable"] is False
+    assert fwd.get("product_structure") == "leveraged_daily_reset"
+    assert "leveraged" in (fwd.get("reason") or "").lower()
+    assert "expected_return_pct" not in fwd          # never a fabricated number
+
+
+def test_real_operating_company_unaffected_by_leverage_guard():
+    f = _f(ticker="JPM", name="JPMorgan Chase & Co.", trailing_pe=13.0,
+           dividend_yield=0.021, earnings_growth=0.06, sector="Financial Services")
+    fwd = cma.instrument_forward("JPM", f)
+    assert fwd["usable"] is True and fwd.get("product_structure") is None
+    assert fwd.get("expected_return_pct") is not None
