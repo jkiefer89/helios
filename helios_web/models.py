@@ -66,10 +66,48 @@ def model_library_import():
     template = model_library.get(slug)
     if not template:
         return err("Unknown model library template.", 404)
-    mdl = model_library.import_template(slug)
-    if not mdl:
-        return err("Unknown model library template.", 404)
-    analytics_cache.invalidate()
+    previous_model = portfolio.get(str(template.get("model_id") or ""))
+    store = persistence.get_store()
+    try:
+        if store.available:
+            with store.transaction(durable=True):
+                mdl = model_library.build_template(slug)
+                if not mdl:
+                    return err("Unknown model library template.", 404)
+                persisted = portfolio._persist_model(
+                    mdl, source_filename=f"model-library-{slug.strip().lower()}.csv",
+                )
+                if not persisted.get("persisted"):
+                    raise RuntimeError(persisted.get("warning") or "Could not persist the model template.")
+                action = "model_replaced" if previous_model is not None else "model_imported"
+                note = (
+                    "Curated library template replaced the prior model version; committee approval must be renewed."
+                    if previous_model is not None else
+                    "Curated library template imported for governed review before research approval."
+                )
+                governance = model_governance.record_event(
+                    mdl,
+                    actor=current_actor(),
+                    action=action,
+                    note=note,
+                    approval_status="pending_review",
+                    previous_model=previous_model,
+                    initial_version=previous_model is None,
+                )
+                if not governance.get("recorded"):
+                    raise RuntimeError(
+                        governance.get("warning") or "Could not record model import governance evidence."
+                    )
+            defer_privileged_state(
+                commit=lambda model=mdl: (portfolio.register(model), analytics_cache.invalidate())
+            )
+        else:
+            mdl = model_library.import_template(slug)
+            if not mdl:
+                return err("Unknown model library template.", 404)
+            analytics_cache.invalidate()
+    except RuntimeError as exc:
+        return err(str(exc), 503)
     coverage = data_quality.model_coverage(mdl)
     return ok({
         "id": mdl.id,
@@ -252,19 +290,25 @@ def model_upload():
                 persisted = portfolio._persist_model(mdl, source_filename=f.filename or "")
                 if not persisted.get("persisted"):
                     raise RuntimeError(persisted.get("warning") or "Could not persist the model.")
-                if previous_model is not None:
-                    governance = model_governance.record_event(
-                        mdl,
-                        actor=current_actor(),
-                        action="model_replaced",
-                        note="Uploaded holdings replaced the prior model version; committee approval must be renewed.",
-                        approval_status="pending_review",
-                        previous_model=previous_model,
+                action = "model_replaced" if previous_model is not None else "model_uploaded"
+                note = (
+                    "Uploaded holdings replaced the prior model version; committee approval must be renewed."
+                    if previous_model is not None else
+                    "Uploaded model created for governed review before research approval."
+                )
+                governance = model_governance.record_event(
+                    mdl,
+                    actor=current_actor(),
+                    action=action,
+                    note=note,
+                    approval_status="pending_review",
+                    previous_model=previous_model,
+                    initial_version=previous_model is None,
+                )
+                if not governance.get("recorded"):
+                    raise RuntimeError(
+                        governance.get("warning") or "Could not record upload governance evidence."
                     )
-                    if not governance.get("recorded"):
-                        raise RuntimeError(
-                            governance.get("warning") or "Could not record replacement governance evidence."
-                        )
             defer_privileged_state(
                 commit=lambda model=mdl: (portfolio.register(model), analytics_cache.invalidate())
             )
@@ -706,19 +750,37 @@ def model_thesis():
     if not isinstance(body, dict):
         return err("Request body must be a JSON object.", 400)
     model_id = str(body.get("id") or "").strip()
-    if portfolio.get(model_id) is None:
+    mdl = portfolio.get(model_id)
+    if mdl is None:
         return err("Unknown model.", 404)
     params = body.get("thesis_params")
+    in_memory_before = portfolio.snapshot_models()
+    defer_privileged_state(
+        rollback=lambda snapshot=in_memory_before: portfolio.restore_models(snapshot)
+    )
     try:
-        mdl = portfolio.set_thesis(
-            model_id,
-            str(body.get("thesis") or ""),
+        result = model_governance.save_thesis(
+            mdl,
+            thesis=str(body.get("thesis") or ""),
             thesis_params=params if isinstance(params, dict) else None,
+            change_note=str(body.get("change_note") or ""),
+            actor=current_actor(),
         )
     except ValueError as exc:
         return err(str(exc), 400)
-    return ok({"id": mdl.id, "thesis": mdl.thesis,
-               "thesis_params": dict(mdl.thesis_params or {})})
+    except RuntimeError as exc:
+        return err(str(exc), 503)
+    if not result.get("saved"):
+        return err(result.get("warning") or "Could not save the model thesis.", 400)
+    saved = result["model"]
+    analytics_cache.invalidate()
+    return ok({
+        "id": saved.id,
+        "thesis": saved.thesis,
+        "thesis_params": dict(saved.thesis_params or {}),
+        "governance_event": result.get("event"),
+        "warning": result.get("warning") or "",
+    })
 
 
 @bp.route("/api/model/risk")

@@ -1,4 +1,7 @@
 import base64
+import json
+import os
+import time
 from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 
@@ -8,7 +11,7 @@ import pytest
 import app as helios
 import serve
 from engine import (
-    data, data_quality, fundamentals, holdings, independent_validation, operations,
+    data, data_quality, fundamentals, holdings, identity, independent_validation, operations,
     persistence, portfolio, provider_registry, research_gate,
 )
 from helios_web import core as web_core
@@ -629,13 +632,14 @@ def test_incident_sync_tracks_acknowledgment_and_resolution(monkeypatch, tmp_pat
         )
 
 
-def test_latest_encrypted_backup_is_verified_without_restore(monkeypatch, tmp_path):
+def test_latest_offhost_encrypted_backup_is_verified_without_live_restore(monkeypatch, tmp_path):
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION", "required")
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION_KEY", "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=")
+    monkeypatch.setenv("HELIOS_OFFHOST_BACKUP_EXPORT_DIR", str(tmp_path / "offhost"))
+    monkeypatch.setenv("HELIOS_OFFHOST_BACKUP_ATTESTED", "1")
     store = _store(monkeypatch, tmp_path)
     store.audit_append("test", {"status": "ok"})
-    store.flush(force=True)
-    persistence.reset_store_for_tests()
-    reopened = persistence.get_store()
-    assert reopened.backup_status()["count"] >= 1
+    exported = operations.export_encrypted_backup(actor="backup operator")
 
     result = operations.verify_latest_backup(actor="backup operator")
 
@@ -645,8 +649,133 @@ def test_latest_encrypted_backup_is_verified_without_restore(monkeypatch, tmp_pa
     assert result["isolated_restore_tested"] is True
     assert result["live_data_mutated"] is False
     assert result["audit_chain"]["status"] == "intact"
+    assert result["rpo_met"] is True
+    assert result["rto_met"] is True
+    assert result["restore_drill_passed"] is True
+    assert result["manifest"] == exported["manifest"]
+    assert result["manifest_heads_match"] is True
+    assert result["method"].startswith("offhost_")
     operational = operations.operational_status()
     assert operational["latest_backup_verification"]["details"]["isolated_restore_tested"] is True
+
+
+@pytest.mark.parametrize("tamper", ["snapshot", "scope"])
+def test_offhost_restore_rejects_tampered_snapshot_or_scope(monkeypatch, tmp_path, tamper):
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION", "required")
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION_KEY", "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=")
+    offhost = tmp_path / "offhost"
+    monkeypatch.setenv("HELIOS_OFFHOST_BACKUP_EXPORT_DIR", str(offhost))
+    monkeypatch.setenv("HELIOS_OFFHOST_BACKUP_ATTESTED", "1")
+    _store(monkeypatch, tmp_path / "database")
+    exported = operations.export_encrypted_backup(actor="backup operator")
+    snapshot = offhost / exported["snapshot"]
+    manifest = offhost / exported["manifest"]
+    if tamper == "snapshot":
+        raw = snapshot.read_bytes()
+        snapshot.write_bytes(raw[:-1] + bytes([raw[-1] ^ 1]))
+        expected = "checksum"
+    else:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        payload["workspace_scope_sha256"] = "0" * 64
+        manifest.write_text(json.dumps(payload), encoding="utf-8")
+        expected = "different workspace scope"
+
+    with pytest.raises(RuntimeError, match=expected):
+        operations.verify_latest_backup(actor="backup operator")
+
+
+def test_offhost_restore_fails_closed_on_manifest_head_or_stale_rpo(monkeypatch, tmp_path):
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION", "required")
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION_KEY", "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=")
+    offhost = tmp_path / "offhost"
+    monkeypatch.setenv("HELIOS_OFFHOST_BACKUP_EXPORT_DIR", str(offhost))
+    monkeypatch.setenv("HELIOS_OFFHOST_BACKUP_ATTESTED", "1")
+    monkeypatch.setenv("HELIOS_RESTORE_RPO_HOURS", "1")
+    _store(monkeypatch, tmp_path / "database")
+    exported = operations.export_encrypted_backup(actor="backup operator")
+    snapshot = offhost / exported["snapshot"]
+    manifest = offhost / exported["manifest"]
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["application_audit_head"] = "0" * 64
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    head_mismatch = operations.verify_latest_backup(actor="backup operator")
+
+    assert head_mismatch["passed"] is False
+    assert head_mismatch["manifest_heads_match"] is False
+    assert head_mismatch["integrity_passed"] is False
+
+    payload["application_audit_head"] = exported["application_audit_head"]
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    stale_time = time.time() - 7200
+    os.utime(snapshot, (stale_time, stale_time))
+
+    stale = operations.verify_latest_backup(actor="backup operator")
+
+    assert stale["passed"] is False
+    assert stale["integrity_passed"] is True
+    assert stale["rpo_met"] is False
+
+
+def test_encrypted_backup_and_privileged_audit_exports_are_manifested_and_redacted(monkeypatch, tmp_path):
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION", "required")
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION_KEY", "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=")
+    store = _store(monkeypatch, tmp_path / "database")
+    audit_path = tmp_path / "siem" / "privileged.jsonl"
+    offhost = tmp_path / "offhost"
+    monkeypatch.setenv("HELIOS_AUDIT_EXPORT_PATH", str(audit_path))
+    monkeypatch.setenv("HELIOS_AUDIT_EXPORT_REQUIRED", "1")
+    monkeypatch.setenv("HELIOS_WORM_SIEM_ATTESTED", "1")
+    monkeypatch.setenv("HELIOS_OFFHOST_BACKUP_EXPORT_DIR", str(offhost))
+    monkeypatch.setenv("HELIOS_OFFHOST_BACKUP_ATTESTED", "1")
+
+    operations.record_privileged_event(
+        actor="custody operator", actor_roles=["admin"], action="custody_test",
+        resource="workspace", outcome="passed",
+        details={"api_key": "NEVER_EXPORT_THIS", "note": "safe checkpoint"},
+    )
+    exported = operations.export_encrypted_backup(actor="custody operator")
+    checkpoint = operations.audit_export_checkpoint(actor="custody operator")
+
+    snapshot = offhost / exported["snapshot"]
+    manifest = offhost / exported["manifest"]
+    assert snapshot.read_bytes().startswith(persistence.ENCRYPTED_DB_MAGIC)
+    manifest_payload = __import__("json").loads(manifest.read_text(encoding="utf-8"))
+    assert manifest_payload["snapshot_sha256"] == exported["snapshot_sha256"]
+    assert manifest_payload["plaintext_exported"] is False
+    assert manifest_payload["application_audit_head"]
+    assert manifest_payload["privileged_audit_head"]
+    audit_text = audit_path.read_text(encoding="utf-8")
+    assert "NEVER_EXPORT_THIS" not in audit_text
+    assert "[redacted]" in audit_text
+    assert checkpoint["written"] is True
+    audit_status = operations.audit_export_status()
+    assert audit_status["worm_siem_attested"] is True
+    assert audit_status["required"] is True
+    assert audit_status["current_checkpoint"] is True
+    assert operations.backup_export_status()["latest_export"]["outcome"] == "passed"
+    assert store.available is True
+
+    operations.record_privileged_event(
+        actor="custody operator", actor_roles=["admin"], action="post_checkpoint_change",
+        resource="workspace", outcome="passed",
+    )
+    assert operations.audit_export_status()["current_checkpoint"] is False
+
+
+def test_required_audit_export_failure_rolls_back_privileged_event(monkeypatch, tmp_path):
+    store = _store(monkeypatch, tmp_path)
+    monkeypatch.setenv("HELIOS_AUDIT_EXPORT_REQUIRED", "1")
+    monkeypatch.delenv("HELIOS_AUDIT_EXPORT_PATH", raising=False)
+
+    with pytest.raises(RuntimeError, match="required"):
+        operations.record_privileged_event(
+            actor="operator", actor_roles=["admin"], action="must_rollback",
+            resource="workspace", outcome="passed",
+        )
+
+    assert operations.privileged_events() == []
+    assert store.available is True
 
 
 def test_rbac_and_mfa_block_privileged_provider_operations(monkeypatch):
@@ -751,6 +880,46 @@ def test_security_status_and_session_routes_expose_no_secrets(monkeypatch, tmp_p
     assert "must-never-appear" not in combined
 
 
+def test_institutional_request_tokens_require_an_active_secured_session(monkeypatch, tmp_path):
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION", "required")
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION_KEY", "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=")
+    _store(monkeypatch, tmp_path)
+    monkeypatch.setattr(web_core, "AUTH_ENABLED", True)
+    monkeypatch.setattr(web_core, "AUTH_USER", "advisor")
+    monkeypatch.setattr(web_core, "AUTH_PASSWORD", "strong-local-password")
+    monkeypatch.setenv("HELIOS_INSTITUTIONAL_CONTROLS", "1")
+    monkeypatch.setenv("HELIOS_BASIC_ROLES", "admin")
+    monkeypatch.setenv("HELIOS_BASIC_MFA_VERIFIED", "1")
+    monkeypatch.setenv("HELIOS_TEST_ENFORCE_REQUEST_TOKEN", "1")
+    monkeypatch.setattr(data, "HAS_YF", False)
+    helios.app.config.update(TESTING=True)
+    client = helios.app.test_client()
+    headers = _basic("advisor", "strong-local-password")
+
+    before = client.get("/api/security/status", headers=headers).get_json()["request_protection"]
+    assert before["available"] is True
+    assert before["token"]
+    assert before["binding"] == "session_bootstrap"
+
+    created = client.post(
+        "/api/auth/session",
+        headers={**headers, before["header"]: before["token"]},
+    )
+    assert created.status_code == 200
+    after = client.get("/api/security/status", headers=headers).get_json()["request_protection"]
+    assert after["available"] is True
+    assert after["binding"] == "session"
+    assert after["token"]
+
+    reached_handler = client.post(
+        "/api/live",
+        json={"symbol": "AAPL"},
+        headers={**headers, after["header"]: after["token"]},
+    )
+    assert reached_handler.status_code == 503
+    assert reached_handler.get_json().get("code") != "request_token_invalid"
+
+
 def test_proxy_tls_cookie_flag_requires_the_request_to_come_from_trusted_proxy(monkeypatch):
     monkeypatch.setattr(web_core, "AUTH_ENABLED", False)
     monkeypatch.setenv("HELIOS_INSTITUTIONAL_CONTROLS", "0")
@@ -783,12 +952,28 @@ def test_institutional_operational_readiness_requires_every_control(monkeypatch,
             "details": {
                 "passed": True,
                 "isolated_restore_tested": True,
+                "rpo_met": True,
+                "rto_met": True,
+                "manifest_heads_match": True,
+                "offhost_attested": True,
+                "method": "offhost_manifest_checksum_scope_decrypt_integrity_schema_audit",
                 "audit_chain": {"head_hash": "current-head"},
             },
         },
         "audit_chain": {"status": "intact", "head_hash": "current-head"},
         "privileged_chain": {"status": "intact"},
-        "persistence_encryption": {"enabled": True},
+        "persistence_encryption": {
+            "enabled": True, "external_custody": True, "custody_attested": True,
+            "key_id": "test-key", "key_version": "2", "rotation_configured": True,
+        },
+        "backup_export": {
+            "configured": True, "offhost_attested": True,
+            "latest_export": {"outcome": "passed"},
+        },
+        "audit_export": {
+            "configured": True, "required": True, "worm_siem_attested": True,
+            "written": True, "current_checkpoint": True,
+        },
     })
 
     ready = operations.institutional_readiness()
@@ -809,6 +994,69 @@ def test_institutional_operational_readiness_requires_every_control(monkeypatch,
         "encryption", "backup_restore", "audit_chain", "privileged_audit_chain",
         "critical_incidents", "incident_owner",
     }
+
+
+def test_institutional_readiness_accepts_only_deployable_signed_sso(monkeypatch, tmp_path):
+    _store(monkeypatch, tmp_path)
+    monkeypatch.setenv("HELIOS_INSTITUTIONAL_CONTROLS", "1")
+    monkeypatch.setenv("HELIOS_AUTH", "1")
+    monkeypatch.setenv("HELIOS_REQUIRE_MFA", "0")
+    monkeypatch.setenv("HELIOS_TRUSTED_TLS", "1")
+    monkeypatch.setenv("HELIOS_SSO_ENABLED", "1")
+    monkeypatch.setenv("HELIOS_SSO_ASSERTION_SECRET", "s" * 40)
+    monkeypatch.setenv("HELIOS_SSO_ISSUER", "https://idp.example.test")
+    monkeypatch.setenv("HELIOS_SSO_AUDIENCE", "helios-test")
+    monkeypatch.setenv("HELIOS_SSO_ALLOW_BASIC_FALLBACK", "0")
+    observed_at = datetime.now(timezone.utc).isoformat()
+    monkeypatch.setattr(operations, "operational_status", lambda: {
+        "summary": {"critical": 0},
+        "incident_owner": "Operations Owner",
+        "latest_backup_verification": {
+            "created_at": observed_at,
+            "details": {
+                "passed": True,
+                "isolated_restore_tested": True,
+                "rpo_met": True,
+                "rto_met": True,
+                "manifest_heads_match": True,
+                "offhost_attested": True,
+                "method": "offhost_manifest_checksum_scope_decrypt_integrity_schema_audit",
+                "audit_chain": {"head_hash": "current-head"},
+            },
+        },
+        "audit_chain": {"status": "intact", "head_hash": "current-head"},
+        "privileged_chain": {"status": "intact"},
+        "persistence_encryption": {
+            "enabled": True, "external_custody": True, "custody_attested": True,
+            "key_id": "test-key", "key_version": "2", "rotation_configured": True,
+        },
+        "backup_export": {
+            "configured": True, "offhost_attested": True,
+            "latest_export": {"outcome": "passed"},
+        },
+        "audit_export": {
+            "configured": True, "required": True, "worm_siem_attested": True,
+            "written": True, "current_checkpoint": True,
+        },
+    })
+
+    monkeypatch.delenv("HELIOS_TRUSTED_PROXY_IPS", raising=False)
+    no_proxy = operations.institutional_readiness()
+    assert next(row for row in no_proxy["checks"] if row["key"] == "mfa_or_sso")["passed"] is False
+
+    monkeypatch.setenv("HELIOS_TRUSTED_PROXY_IPS", "10.0.0.10")
+    deployable = operations.institutional_readiness()
+    assert identity.verifier_status()["institutional_ready"] is True
+    assert next(row for row in deployable["checks"] if row["key"] == "mfa_or_sso")["passed"] is True
+
+    monkeypatch.setenv("HELIOS_SSO_ALLOW_BASIC_FALLBACK", "1")
+    fallback = operations.institutional_readiness()
+    assert next(row for row in fallback["checks"] if row["key"] == "mfa_or_sso")["passed"] is False
+
+    monkeypatch.setenv("HELIOS_REQUIRE_MFA", "1")
+    masked = operations.institutional_readiness()
+    assert next(row for row in masked["checks"] if row["key"] == "mfa_or_sso")["passed"] is True
+    assert next(row for row in masked["checks"] if row["key"] == "enterprise_identity")["passed"] is False
 
 
 def test_model_readiness_requires_completed_replay_verified_prospective_trial(monkeypatch, tmp_path):
@@ -970,6 +1218,71 @@ def test_model_editor_requires_model_sponsor_permission(monkeypatch):
     assert allowed_through_rbac.status_code == 404
 
 
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        ("/api/model-library/import", {"slug": "unknown"}),
+        ("/api/model/thesis", {"id": "unknown", "change_note": "Governed change."}),
+        ("/api/trials", {"target_kind": "instrument", "target_id": "UNKNOWN", "protocol": {}}),
+    ],
+)
+def test_all_model_and_trial_mutation_routes_require_governance_submit(monkeypatch, path, body):
+    monkeypatch.setattr(web_core, "AUTH_ENABLED", True)
+    monkeypatch.setenv("HELIOS_INSTITUTIONAL_CONTROLS", "0")
+    monkeypatch.setenv("HELIOS_BASIC_ROLES", "analyst")
+    helios.app.config.update(TESTING=True)
+    client = helios.app.test_client()
+    headers = _basic(web_core.AUTH_USER, web_core.AUTH_PASSWORD)
+
+    assert client.post(path, headers=headers, json=body).status_code == 403
+
+    monkeypatch.setenv("HELIOS_BASIC_ROLES", "model_sponsor")
+    assert client.post(path, headers=headers, json=body).status_code in {400, 404}
+
+
+def test_initial_model_upload_requires_governance_submit(monkeypatch):
+    monkeypatch.setattr(web_core, "AUTH_ENABLED", True)
+    monkeypatch.setenv("HELIOS_INSTITUTIONAL_CONTROLS", "0")
+    monkeypatch.setenv("HELIOS_BASIC_ROLES", "analyst")
+    helios.app.config.update(TESTING=True)
+    client = helios.app.test_client()
+    headers = _basic(web_core.AUTH_USER, web_core.AUTH_PASSWORD)
+
+    denied = client.post(
+        "/api/model/upload",
+        headers=headers,
+        data={"file": (BytesIO(b"Ticker,Weight\nAAPL,100\n"), "model.csv"), "name": "Denied"},
+        content_type="multipart/form-data",
+    )
+    assert denied.status_code == 403
+
+    monkeypatch.setenv("HELIOS_BASIC_ROLES", "model_sponsor")
+    allowed = client.post("/api/model/upload", headers=headers)
+    assert allowed.status_code == 400
+
+
+def test_completing_trial_requires_governance_approver(monkeypatch):
+    monkeypatch.setattr(web_core, "AUTH_ENABLED", True)
+    monkeypatch.setenv("HELIOS_INSTITUTIONAL_CONTROLS", "0")
+    monkeypatch.setenv("HELIOS_BASIC_ROLES", "model_sponsor")
+    helios.app.config.update(TESTING=True)
+    client = helios.app.test_client()
+    headers = _basic(web_core.AUTH_USER, web_core.AUTH_PASSWORD)
+
+    denied = client.post(
+        "/api/trials/unknown/close", headers=headers,
+        json={"status": "completed", "note": "Committee completion review."},
+    )
+    assert denied.status_code == 403
+
+    monkeypatch.setenv("HELIOS_BASIC_ROLES", "approver")
+    allowed = client.post(
+        "/api/trials/unknown/close", headers=headers,
+        json={"status": "completed", "note": "Committee completion review."},
+    )
+    assert allowed.status_code == 400
+
+
 def test_backup_verify_route_uses_authenticated_actor(monkeypatch, tmp_path):
     _store(monkeypatch, tmp_path)
     monkeypatch.setattr(web_core, "AUTH_ENABLED", False)
@@ -986,6 +1299,45 @@ def test_backup_verify_route_uses_authenticated_actor(monkeypatch, tmp_path):
     assert response.status_code == 200
     assert response.get_json()["verification"]["passed"] is True
     assert captured["actor"] == "local-operator"
+
+
+def test_backup_and_audit_export_routes_use_actor_and_structured_failures(monkeypatch, tmp_path):
+    _store(monkeypatch, tmp_path)
+    monkeypatch.setattr(web_core, "AUTH_ENABLED", False)
+    captured = []
+    monkeypatch.setattr(
+        operations,
+        "export_encrypted_backup",
+        lambda *, actor: captured.append(("backup", actor)) or {"snapshot": "backup.hdb"},
+    )
+    monkeypatch.setattr(
+        operations,
+        "audit_export_checkpoint",
+        lambda *, actor: captured.append(("audit", actor)) or {"written": True},
+    )
+    helios.app.config.update(TESTING=True)
+    client = helios.app.test_client()
+
+    backup = client.post("/api/operations/backup/export")
+    audit = client.post("/api/operations/audit-export/checkpoint")
+
+    assert backup.status_code == 200
+    assert backup.get_json()["export"]["snapshot"] == "backup.hdb"
+    assert audit.status_code == 200
+    assert audit.get_json()["checkpoint"]["written"] is True
+    assert captured == [("backup", "local-operator"), ("audit", "local-operator")]
+
+    monkeypatch.setattr(
+        operations,
+        "export_encrypted_backup",
+        lambda *, actor: (_ for _ in ()).throw(RuntimeError("destination unavailable")),
+    )
+    failed = client.post("/api/operations/backup/export")
+    body = failed.get_json()
+    assert failed.status_code == 503
+    assert body["code"] == "backup_export_failed"
+    assert body["retryable"] is True
+    assert "destination" in body["next_step"]
 
 
 def test_validation_exception_routes_create_and_resolve(monkeypatch, tmp_path):

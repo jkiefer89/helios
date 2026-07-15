@@ -27,6 +27,13 @@ _AUTO_LIVE_LAST_RUN: str | None = None
 DEFAULT_AUTO_LIVE_SYMBOLS = "core"
 
 
+def _structured_refresh_row(row: dict) -> dict:
+    """Add stable, secret-free remediation metadata to failed refresh logs."""
+    if str(row.get("status") or "").lower() not in {"error", "skipped"}:
+        return row
+    return {**row, **data.live_failure_metadata(str(row.get("message") or "Live data operation failed."))}
+
+
 def _auto_live_config() -> dict:
     raw_symbols = os.environ.get("HELIOS_AUTO_LIVE_SYMBOLS")
     if raw_symbols is None or not raw_symbols.strip():
@@ -59,12 +66,13 @@ def _auto_live_worker(config: dict) -> None:
                 max_workers=config["max_workers"],
             )
         except Exception as exc:
+            failure = data.live_failure_metadata(str(exc) or "Automatic live refresh failed.")
             result = {
                 "requested": config["symbols"],
                 "refreshed": 0,
                 "failed": len(config["symbols"]),
                 "max_workers": config["max_workers"],
-                "results": [{"symbol": symbol, "status": "error", "rows_added": 0, "message": str(exc)} for symbol in config["symbols"]],
+                "results": [{"symbol": symbol, "status": "error", "rows_added": 0, **failure} for symbol in config["symbols"]],
             }
         # Batch boundary: one encrypted snapshot write per refresh cycle.
         persistence.get_store().flush()
@@ -121,6 +129,7 @@ def _start_auto_live_refresh() -> dict:
     if not config["enabled"]:
         return config
     if not config["live_available"]:
+        failure = data.live_failure_metadata("No configured live price provider is available.")
         with _AUTO_LIVE_LOCK:
             global _AUTO_LIVE_LAST_RESULT, _AUTO_LIVE_LAST_RUN
             _AUTO_LIVE_LAST_RUN = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -134,7 +143,7 @@ def _start_auto_live_refresh() -> dict:
                         "symbol": symbol,
                         "status": "error",
                         "rows_added": 0,
-                        "message": "No configured live price provider is available.",
+                        **failure,
                     }
                     for symbol in config["symbols"]
                 ],
@@ -164,7 +173,7 @@ def _auto_live_status() -> dict:
 
 
 def _refresh_by_symbol() -> dict:
-    logs = persistence.get_store().refresh_log(limit=250)
+    logs = [_structured_refresh_row(row) for row in persistence.get_store().refresh_log(limit=250)]
     out = {}
     for row in logs:
         out.setdefault(row["symbol"], row)
@@ -176,7 +185,7 @@ def _data_status_payload() -> dict:
     models = portfolio.all_models()
     universe = provenance.universe(instruments)
     store_status = persistence.get_store().status()
-    refresh_logs = persistence.get_store().refresh_log(limit=10)
+    refresh_logs = [_structured_refresh_row(row) for row in persistence.get_store().refresh_log(limit=10)]
     real_instruments = [
         inst for inst in instruments
         if provenance.is_real_source(inst.source) and len(inst.df["close"].dropna()) >= 60
@@ -248,7 +257,7 @@ def data_jobs():
             "price_provider": getattr(inst, "price_provider", "") or "",
         })
     freshness.sort(key=lambda row: -row["age_calendar_days"])
-    logs = store.refresh_log(limit=100)
+    logs = [_structured_refresh_row(row) for row in store.refresh_log(limit=100)]
     failures = [row for row in logs if row.get("status") == "error"]
     return ok({
         "auto_live": _auto_live_status(),
@@ -312,10 +321,20 @@ def data_refresh():
     else:
         symbol = data.clean_symbol(raw_symbol, fallback="")
         if not symbol:
-            return err("Provide a valid live ticker symbol.", 400)
+            failure = data.live_failure_metadata("Provide a valid live ticker symbol.", preserved=False)
+            return err(
+                failure["message"], 400, code=failure["reason_code"],
+                reason_code=failure["reason_code"], retryable=False,
+                next_step=failure["next_step"], stale_result_preserved=failure["stale_result_preserved"],
+            )
         symbols = [symbol]
     if not _LIVE_SEMAPHORE.acquire(blocking=False):
-        return err("Too many live-data requests in flight — try again in a moment.", 429)
+        return err(
+            "Too many live-data requests are in flight.", 429,
+            code="request_busy", reason_code="request_busy", retryable=True,
+            next_step="Wait briefly and retry; the last persisted histories remain available.",
+            stale_result_preserved=bool(symbols),
+        )
     in_memory_before = data.snapshot_instruments()
     defer_privileged_state(
         rollback=lambda snapshot=in_memory_before: data.restore_instruments(snapshot)
@@ -434,14 +453,33 @@ def upload():
 
 @bp.route("/api/live", methods=["POST"])
 def live():
-    if not data.live_provider_available():
-        return err("Live data unavailable (no configured provider).", 400)
     payload = request.get_json(silent=True) or {}
     symbol = data.clean_symbol(payload.get("symbol", ""), fallback="")
+    if not data.live_provider_available():
+        failure = data.live_failure_metadata(
+            "Live data unavailable (no configured provider).",
+            preserved=bool(symbol and data.get(symbol) is not None),
+        )
+        return err(
+            failure["message"], 503, code=failure["reason_code"],
+            reason_code=failure["reason_code"], retryable=failure["retryable"],
+            next_step=failure["next_step"], stale_result_preserved=failure["stale_result_preserved"],
+            diagnostics={"live_provider_available": False},
+        )
     if not symbol:
-        return err("Provide a valid ticker symbol.")
+        failure = data.live_failure_metadata("Provide a valid ticker symbol.", preserved=False)
+        return err(
+            failure["message"], 400, code=failure["reason_code"],
+            reason_code=failure["reason_code"], retryable=False,
+            next_step=failure["next_step"], stale_result_preserved=failure["stale_result_preserved"],
+        )
     if not _LIVE_SEMAPHORE.acquire(blocking=False):
-        return err("Too many live-data requests in flight — try again in a moment.", 429)
+        return err(
+            "Too many live-data requests are in flight.", 429,
+            code="request_busy", reason_code="request_busy", retryable=True,
+            next_step="Wait briefly and retry; the last persisted history remains available.",
+            stale_result_preserved=bool(data.get(symbol) is not None),
+        )
     in_memory_before = data.snapshot_instruments()
     defer_privileged_state(
         rollback=lambda snapshot=in_memory_before: data.restore_instruments(snapshot)
@@ -449,10 +487,25 @@ def live():
     try:
         inst = data.fetch_live(symbol)
     except ValueError as e:
-        return err(str(e), 400)
+        failure = data.live_failure_metadata(str(e), preserved=bool(data.get(symbol) is not None))
+        return err(
+            failure["message"], 400, code=failure["reason_code"],
+            reason_code=failure["reason_code"], retryable=failure["retryable"],
+            next_step=failure["next_step"], stale_result_preserved=failure["stale_result_preserved"],
+            diagnostics={"symbol": symbol},
+        )
     except Exception:
         app.logger.exception("live fetch failed for %s", symbol)
-        return err(f"Could not fetch live data for '{symbol}'.", 502)
+        failure = data.live_failure_metadata(
+            f"Could not fetch live data for '{symbol}'.",
+            preserved=bool(data.get(symbol) is not None),
+        )
+        return err(
+            failure["message"], 502, code=failure["reason_code"],
+            reason_code=failure["reason_code"], retryable=failure["retryable"],
+            next_step=failure["next_step"], stale_result_preserved=failure["stale_result_preserved"],
+            diagnostics={"symbol": symbol, "live_provider_available": True},
+        )
     finally:
         _LIVE_SEMAPHORE.release()
     p = provenance.instrument(

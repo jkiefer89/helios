@@ -890,13 +890,13 @@ def opportunities_api():
 def evidence_lab_endpoint():
     kind = (request.args.get("kind") or "model").strip().lower()
     target_id = (request.args.get("id") or request.args.get("ticker") or "").strip()
-    horizon, horizon_error = _safe_int_arg("horizon", 21, 5, 252)
+    horizon, horizon_error = _safe_int_arg("horizon", 21, 5, 252, clamp=False)
     if horizon_error:
         return err(horizon_error, 400)
-    train_window, train_error = _safe_int_arg("train_window", 252, 90, 756)
+    train_window, train_error = _safe_int_arg("train_window", 252, 90, 756, clamp=False)
     if train_error:
         return err(train_error, 400)
-    step, step_error = _safe_int_arg("step", 21, 5, 63)
+    step, step_error = _safe_int_arg("step", 21, 5, 63, clamp=False)
     if step_error:
         return err(step_error, 400)
     if kind == "model":

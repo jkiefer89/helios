@@ -22,6 +22,7 @@ import type { ForecastConePoint } from "../components/charts/adapters/forecastCo
 import { DrawdownChart, EquityCurveChart, ForecastConeChart, HistogramChart, MacdChart, PriceTrendChart, RsiChart } from "../components/charts/Charts";
 import { EmptyState } from "../components/empty-states/EmptyState";
 import { TerminalSelect } from "../components/forms/TerminalSelect";
+import { RequestStatus } from "../components/states/RequestStatus";
 import { useViewFetch } from "../hooks/useViewFetch";
 import { fmtAuto, fmtMoney, fmtNumber, fmtPct, titleCase } from "../utils/format";
 
@@ -46,7 +47,7 @@ export function Analysis({
   const defaultTarget = selectedModel ? `model:${selectedModel}` : selectedInstrument ? `instrument:${selectedInstrument}` : "";
   const [target, setTarget] = useState(defaultTarget);
   const [horizon, setHorizon] = useState<string | number>(21);
-  const { payload, error, isLoading, load, isCurrentTarget } = useViewFetch<AnalysisResponse>({ failureMessage: "Analysis failed." });
+  const { payload, failure, staleResult, isLoading, load, retry, isCurrentTarget } = useViewFetch<AnalysisResponse>({ failureMessage: "Analysis failed." });
   const options = useMemo(() => [
     ...tickers.map((ticker) => ({ value: `instrument:${ticker.symbol}`, label: `${ticker.symbol} · ${ticker.name}` })),
     ...models.map((model) => ({ value: `model:${model.id}`, label: `${model.name} · model` })),
@@ -112,7 +113,7 @@ export function Analysis({
           <button type="submit">Analyze</button>
         </form>
       </header>
-      {error && <div className="notice danger" role="alert">{error}</div>}
+      <RequestStatus failure={failure} stale={staleResult} onRetry={retry} />
       {isLoading ? (
         <div className="loading" role="status">Loading analysis for the selected target...</div>
       ) : !payload ? (
@@ -419,12 +420,13 @@ function SecEventsPanel({ events }: { events: NonNullable<AnalysisResponse["sec_
  * against this, and the structured draw unlocks the income-bucket check.
  * Deliberately shared with the AI provider; keep client identities out.
  */
-function ThesisEditor({ payload }: { payload: AnalysisResponse }) {
+export function ThesisEditor({ payload }: { payload: AnalysisResponse }) {
   const modelId = String(payload.id || "");
   const [editing, setEditing] = useState(false);
   const [thesis, setThesis] = useState(payload.thesis || "");
   const [draw, setDraw] = useState(
     payload.thesis_params?.income_monthly_draw_usd ? String(payload.thesis_params.income_monthly_draw_usd) : "");
+  const [changeNote, setChangeNote] = useState("");
   const [state, setState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [message, setMessage] = useState("");
 
@@ -432,23 +434,31 @@ function ThesisEditor({ payload }: { payload: AnalysisResponse }) {
     setThesis(payload.thesis || "");
     setDraw(payload.thesis_params?.income_monthly_draw_usd
       ? String(payload.thesis_params.income_monthly_draw_usd) : "");
+    setChangeNote("");
     setEditing(false);
     setState("idle");
   }, [payload.id, payload.thesis, payload.thesis_params]);
 
   const save = async () => {
     if (state === "saving") return;
+    if (changeNote.trim().length < 5) {
+      setState("error");
+      setMessage("Add a change note describing why the thesis is changing.");
+      return;
+    }
     setState("saving");
     try {
       const parsed = Number(draw.replace(/[$,\s]/g, ""));
       await api.setModelThesis({
         id: modelId,
         thesis: thesis.trim(),
+        change_note: changeNote.trim(),
         thesis_params: Number.isFinite(parsed) && parsed > 0
           ? { income_monthly_draw_usd: parsed } : {},
       });
       setState("saved");
-      setMessage("Thesis saved — analyses and copilot dialogue now carry it.");
+      setMessage("Thesis saved with a pending-review governance record.");
+      setChangeNote("");
       setEditing(false);
     } catch (err) {
       setState("error");
@@ -483,7 +493,15 @@ function ThesisEditor({ payload }: { payload: AnalysisResponse }) {
         <input value={draw} onChange={(e) => setDraw(e.target.value)}
           placeholder="Income draw $/month (optional — unlocks the bucket check)"
           inputMode="numeric" aria-label="Monthly income draw in dollars" />
-        <button type="button" onClick={() => void save()} disabled={state === "saving"}>
+      </div>
+      <input
+        value={changeNote}
+        onChange={(e) => setChangeNote(e.target.value)}
+        placeholder="Required change note for the governance record"
+        aria-label="Thesis governance change note"
+      />
+      <div className="decision-form__row">
+        <button type="button" onClick={() => void save()} disabled={state === "saving" || changeNote.trim().length < 5}>
           {state === "saving" ? "Saving…" : "Save thesis"}
         </button>
         <button type="button" onClick={() => setEditing(false)}>Cancel</button>

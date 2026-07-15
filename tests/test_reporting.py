@@ -1,4 +1,5 @@
 from io import BytesIO
+from datetime import date
 
 import app as helios
 from conftest import price_csv, price_series
@@ -7,6 +8,139 @@ from conftest import price_csv, price_series
 def _client():
     helios.app.config.update(TESTING=True, PROPAGATE_EXCEPTIONS=False)
     return helios.app.test_client()
+
+
+def test_model_report_and_snapshot_preserve_current_aum_capacity_context(monkeypatch, tmp_path):
+    monkeypatch.setenv("HELIOS_DB_PATH", str(tmp_path / "helios.db"))
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION", "off")
+    from engine import persistence
+
+    persistence.reset_store_for_tests()
+    client = _client()
+    upload = client.post(
+        "/api/upload",
+        data={
+            "file": (BytesIO(price_csv(days=320)), "aum-aapl.csv"),
+            "symbol": "AAPL",
+            "name": "AAPL AUM report history",
+        },
+        content_type="multipart/form-data",
+    )
+    assert upload.status_code == 200
+    model_upload = client.post(
+        "/api/model/upload",
+        data={
+            "file": (BytesIO(b"Ticker,Weight\nAAPL,100\n"), "aum-model.csv"),
+            "name": "AUM Capacity Model",
+            "mandate": "pure_growth",
+        },
+        content_type="multipart/form-data",
+    )
+    assert model_upload.status_code == 200
+    model_id = model_upload.get_json()["id"]
+    as_of = date.today().isoformat()
+
+    report = client.get(
+        f"/api/report/model?id={model_id}&aum_usd=1000000&aum_as_of={as_of}"
+    )
+
+    assert report.status_code == 200
+    capital = report.get_json()["sections"]["capital_context"]
+    assert capital["aum_usd"] == 1_000_000
+    assert capital["aum_as_of"] == as_of
+    assert capital["capacity_status"] in {"within_capacity", "watch"}
+    assert capital["capacity_unsized_count"] == 0
+    assert capital["capacity_proxy_based_count"] == 1
+
+    save = client.post(
+        "/api/report/snapshots",
+        json={
+            "kind": "model",
+            "id": model_id,
+            "aum_usd": 1_000_000,
+            "aum_as_of": as_of,
+            "report_purpose": "advisor_review",
+        },
+    )
+
+    assert save.status_code == 200
+    snapshot_capital = save.get_json()["snapshot"]["capital_context"]
+    assert snapshot_capital["aum_usd"] == 1_000_000
+    assert snapshot_capital["aum_as_of"] == as_of
+    assert snapshot_capital["capacity_status"] in {"within_capacity", "watch"}
+
+    missing_aum = client.post(
+        "/api/report/snapshots",
+        json={"kind": "model", "id": model_id, "report_purpose": "client_review"},
+    )
+    assert missing_aum.status_code == 409
+    assert "current as-of AUM" in missing_aum.get_json()["error"]
+
+    proxy_capacity = client.post(
+        "/api/report/snapshots",
+        json={
+            "kind": "model", "id": model_id, "report_purpose": "investment_committee",
+            "aum_usd": 1_000_000, "aum_as_of": as_of,
+        },
+    )
+    assert proxy_capacity.status_code == 409
+    assert "observed market volume" in proxy_capacity.get_json()["error"]
+
+    stale_aum = client.post(
+        "/api/report/snapshots",
+        json={
+            "kind": "model", "id": model_id, "report_purpose": "client_review",
+            "aum_usd": 1_000_000, "aum_as_of": "2000-01-01",
+        },
+    )
+    assert stale_aum.status_code == 400
+    assert "refresh it within" in stale_aum.get_json()["error"]
+
+
+def test_model_client_export_gate_requires_current_sized_capacity(monkeypatch):
+    from engine import portfolio
+    from helios_web import reports
+
+    model = portfolio.Model(
+        id="CLIENT-CAP", name="Client Capacity", mandate_key="balanced",
+        mandate_context="", holdings=[portfolio.Holding("AAPL", 1.0)],
+    )
+    portfolio.register(model)
+    monkeypatch.setattr(
+        reports.research_gate, "model_readiness",
+        lambda _model: {"passed": True, "state": "pass", "blocked_reason": ""},
+    )
+    monkeypatch.setattr(
+        reports.model_governance, "payload",
+        lambda _models: {"models": [{"id": model.id, "approval_status": "approved"}]},
+    )
+
+    missing = reports._client_export_gate("model", model.id, report={"sections": {}})
+    assert missing["passed"] is False
+    assert "current as-of AUM" in missing["blocked_reason"]
+
+    ready = reports._client_export_gate("model", model.id, report={
+        "sections": {"capital_context": {
+            "aum_usd": 25_000_000,
+            "aum_as_of": date.today().isoformat(),
+            "capacity_status": "within_capacity",
+            "capacity_unsized_count": 0,
+            "capacity_proxy_based_count": 0,
+        }},
+    })
+    assert ready["passed"] is True
+
+    proxy_only = reports._client_export_gate("model", model.id, report={
+        "sections": {"capital_context": {
+            "aum_usd": 25_000_000,
+            "aum_as_of": date.today().isoformat(),
+            "capacity_status": "within_capacity",
+            "capacity_unsized_count": 0,
+            "capacity_proxy_based_count": 1,
+        }},
+    })
+    assert proxy_only["passed"] is False
+    assert "observed market volume" in proxy_only["blocked_reason"]
 
 
 def test_instrument_report_contains_required_sections_and_disclaimer():
@@ -376,6 +510,80 @@ def test_report_snapshot_can_generate_ai_narrative_when_provider_enabled(monkeyp
     html_text = client.get(snapshot["html_url"]).get_data(as_text=True)
     assert "AI narrative summary based only on Helios report facts" in html_text
     assert "Advisor Review Required" in html_text
+
+
+def test_cloud_report_narrative_requires_exact_transfer_confirmation(monkeypatch, tmp_path):
+    monkeypatch.setenv("HELIOS_DB_PATH", str(tmp_path / "helios.db"))
+    from engine import persistence
+
+    persistence.reset_store_for_tests()
+    client = _client()
+    upload = client.post(
+        "/api/upload",
+        data={
+            "file": (BytesIO(price_csv(days=260)), "cloud-report.csv"),
+            "symbol": "CLOUDREP",
+            "name": "Cloud Report Upload",
+        },
+        content_type="multipart/form-data",
+    )
+    assert upload.status_code == 200
+
+    class CloudProvider:
+        provider = "anthropic"
+        mode = "cloud"
+        model = "test-cloud-model"
+
+        def __init__(self):
+            self.calls = 0
+
+        def status(self):
+            return {
+                "enabled": True, "available": True, "provider": self.provider,
+                "mode": self.mode, "model": self.model,
+            }
+
+        def write_advisor_report(self, payload, regenerate=False):
+            self.calls += 1
+            assert regenerate is True
+            assert payload["report"]["kind"] == "instrument"
+            return {
+                "summary": "Confirmed cloud narrative from sanitized Helios facts.",
+                "key_points": [], "risks": ["Advisor review required."],
+                "what_would_invalidate": [], "advisor_language": "Analysis only.",
+                "compliance_caveats": ["No return guarantee."], "used_numbers": [],
+                "missing_information": [], "data_quality_statement": "Uploaded history.",
+                "provider": self.provider, "model": self.model, "needs_review": True,
+            }
+
+    provider = CloudProvider()
+    monkeypatch.setattr(helios.ai_copilot, "get_provider", lambda: provider)
+    request_body = {
+        "kind": "instrument", "id": "CLOUDREP", "include_ai_narrative": True,
+    }
+
+    first = client.post("/api/report/snapshots", json=request_body)
+
+    assert first.status_code == 409
+    disclosure = first.get_json()["cloud_transfer"]
+    assert disclosure["task"] == "report_narrative"
+    assert disclosure["provider"] == "anthropic"
+    assert disclosure["model"] == "test-cloud-model"
+    assert provider.calls == 0
+
+    confirmed = client.post("/api/report/snapshots", json={
+        **request_body,
+        "cloud_confirmation": {
+            "confirmed": True,
+            "disclosure_hash": disclosure["disclosure_hash"],
+        },
+    })
+
+    assert confirmed.status_code == 200, confirmed.get_json()
+    assert provider.calls == 1
+    snapshot = confirmed.get_json()["snapshot"]
+    assert snapshot["ai_narrative_status"] == "generated"
+    assert snapshot["ai_provider"]["cloud_transfer"]["confirmed"] is True
 
 
 def test_model_report_snapshot_includes_model_metadata_and_source_counts(monkeypatch, tmp_path):

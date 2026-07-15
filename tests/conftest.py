@@ -7,12 +7,14 @@ os.environ.setdefault("HELIOS_RF", "0.02")
 os.environ.setdefault("HELIOS_DB_PATH", "off")
 os.environ.setdefault("HELIOS_LOAD_DOTENV", "0")
 os.environ.setdefault("HELIOS_INSTITUTIONAL_CONTROLS", "0")
+os.environ.setdefault("HELIOS_TENANT_ID", "test-tenant")
+os.environ.setdefault("HELIOS_CLIENT_ID", "test-client")
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from engine import analytics_cache, data, fundamentals, macro, news, persistence, portfolio
+from engine import analytics_cache, data, fundamentals, identity, macro, news, persistence, portfolio
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -84,6 +86,7 @@ def reset_process_local_stores():
     news.invalidate_cache()
     macro._YIELD_CACHE.clear()
     persistence.reset_store_for_tests()
+    identity.reset_replay_cache_for_tests()
     yield
     data._STORE.clear()
     data._STORE.update(samples)
@@ -94,6 +97,7 @@ def reset_process_local_stores():
     news.invalidate_cache()
     macro._YIELD_CACHE.clear()
     persistence.reset_store_for_tests()
+    identity.reset_replay_cache_for_tests()
 
 
 def price_series(days: int = 260, start: float = 100.0, daily: float = 0.001,

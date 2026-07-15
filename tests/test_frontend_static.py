@@ -237,11 +237,12 @@ def test_ai_copilot_disabled_state_is_non_actionable_and_not_repetitive():
 
 
 def test_real_data_onboarding_copy_switches_when_live_histories_exist():
-    source = (ROOT / "frontend" / "src" / "components" / "layout" / "AppShell.tsx").read_text()
+    source = (ROOT / "frontend" / "src" / "components" / "data" / "DataIntakePanel.tsx").read_text()
 
-    assert "const onboardingCopy" in source
+    assert "const liveCount" in source
     assert "Live refresh active" in source
-    assert "ready for real research" in source
+    assert "real research" in source
+    assert "stale_result_preserved" not in source  # handled by the shared request-state component
     assert "Sample data remains demo-only." not in source
 
 
@@ -471,6 +472,9 @@ def test_evidence_lab_view_is_dedicated_and_routed():
     assert "Confidence Bands" in view_source
     assert "Prospective Validation" in view_source
     assert "Signal Journal" in view_source
+    assert "response.threshold_policy" in view_source
+    assert 'success_thresholds: { ...thresholdFloors }' in view_source
+    assert "min_observations: 5" not in view_source
 
 
 def test_payload_views_share_the_view_fetch_hook():

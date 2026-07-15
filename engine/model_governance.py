@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import math
 import os
 from collections import Counter
+from copy import deepcopy
 from html import escape
 from io import BytesIO
 from typing import Any
@@ -103,6 +105,7 @@ def record_event(
     approval_status: str = "",
     previous_model: portfolio.Model | None = None,
     committee_identity: dict[str, Any] | None = None,
+    initial_version: bool = False,
 ) -> dict[str, Any]:
     """Archive a governance event for the current model state."""
     store = persistence.get_store()
@@ -133,7 +136,7 @@ def record_event(
             "status_code": 400,
             "warning": identity_error,
         }
-    version = store.next_model_governance_version(model.id)
+    version = 1 if initial_version and not current_events else store.next_model_governance_version(model.id)
     snapshot = _snapshot(
         model,
         version=version,
@@ -224,6 +227,8 @@ def save_edit(
             portfolio.Holding(holding.ticker, holding.weight, source_by_ticker.get(holding.ticker, "pending"))
             for holding in draft.holdings
         ],
+        thesis=model.thesis,
+        thesis_params=deepcopy(model.thesis_params or {}),
     )
     store = persistence.get_store()
     if not store.available:
@@ -254,6 +259,53 @@ def save_edit(
         "saved": True,
         "event": event_result["event"],
     }
+
+
+def save_thesis(
+    model: portfolio.Model,
+    *,
+    thesis: str,
+    thesis_params: dict[str, Any] | None,
+    change_note: str,
+    actor: str = DEFAULT_ACTOR,
+) -> dict[str, Any]:
+    """Persist a thesis revision and its governance evidence atomically."""
+    note = str(change_note or "").strip()
+    if len(note) < 5:
+        return {"saved": False, "warning": "A change note is required before saving a model thesis."}
+    edited = deepcopy(model)
+    portfolio.apply_thesis(edited, thesis, thesis_params)
+    store = persistence.get_store()
+    if not store.available:
+        portfolio.register(edited)
+        return {
+            "saved": True,
+            "model": edited,
+            "event": None,
+            "warning": "Thesis is process-local because SQLite persistence is unavailable.",
+        }
+    try:
+        with store.transaction(durable=True):
+            persisted = portfolio._persist_model(edited, source_filename="model-thesis")
+            if not persisted.get("persisted"):
+                raise RuntimeError(persisted.get("warning") or "Could not persist the model thesis.")
+            event_result = record_event(
+                edited,
+                actor=actor or DEFAULT_ACTOR,
+                action="thesis_updated",
+                note=note,
+                approval_status="pending_review",
+                previous_model=model,
+            )
+            if not event_result.get("recorded"):
+                raise RuntimeError(
+                    event_result.get("warning") or "Could not record thesis governance evidence."
+                )
+    except Exception:
+        portfolio.register(model)
+        raise
+    portfolio.register(edited)
+    return {"saved": True, "model": edited, "event": event_result["event"], "warning": ""}
 
 
 def approval_packet(model: portfolio.Model) -> dict[str, Any]:
@@ -613,13 +665,16 @@ def _parse_editor_holdings(raw_holdings: list[dict[str, Any]], *, rebalance_to_t
     order: list[str] = []
     for raw in raw_holdings:
         if not isinstance(raw, dict):
-            continue
+            raise ValueError("Every proposed holding must be an object with a ticker and target weight.")
         ticker = data.clean_symbol(str(raw.get("ticker") or raw.get("symbol") or ""), fallback="")
         if not ticker:
-            continue
+            raise ValueError("Every proposed holding must include a valid ticker.")
         weight_pct = _editor_weight_pct(raw)
         if weight_pct <= 0:
-            continue
+            raise ValueError(
+                f"Target weight for {ticker} must be strictly positive. "
+                "Helios model governance supports long-only allocations; zero and short weights are rejected."
+            )
         if ticker not in merged:
             order.append(ticker)
         merged[ticker] = merged.get(ticker, 0.0) + weight_pct
@@ -644,9 +699,12 @@ def _editor_weight_pct(raw: dict[str, Any]) -> float:
         if isinstance(value, (int, float)) and 0 < float(value) <= 1:
             return float(value) * 100
     try:
-        return max(0.0, float(str(value).replace("%", "").strip()))
+        parsed = float(str(value).replace("%", "").strip())
+        if not math.isfinite(parsed):
+            raise ValueError
+        return parsed
     except (TypeError, ValueError):
-        return 0.0
+        raise ValueError("Every proposed holding must include a finite numeric target weight.")
 
 
 def _holdings_payload(holdings: list[portfolio.Holding]) -> list[dict[str, Any]]:
@@ -715,6 +773,9 @@ def _compact_model_snapshot(model: portfolio.Model, version: int) -> dict[str, A
             "name": model.name,
             "mandate": model.mandate_key,
             "mandate_label": mandate.get(model.mandate_key)["label"],
+            "mandate_context": model.mandate_context,
+            "thesis": model.thesis,
+            "thesis_params": deepcopy(model.thesis_params or {}),
         },
         "version": int(version),
         "holdings": _holdings_payload(model.holdings),
@@ -751,12 +812,22 @@ def _version_diff(before: portfolio.Model | None, after: portfolio.Model) -> dic
     ]
     all_tickers = set(before_weights) | set(after_weights)
     turnover_pct = round(sum(abs(after_weights.get(ticker, 0.0) - before_weights.get(ticker, 0.0)) for ticker in all_tickers) / 2.0, 2)
-    summary = f"{len(added)} added, {len(removed)} removed, {len(changed)} changed weights; estimated one-way turnover {turnover_pct:.2f}%."
+    thesis_changed = str(before.thesis or "") != str(after.thesis or "")
+    thesis_params_changed = (before.thesis_params or {}) != (after.thesis_params or {})
+    mandate_context_changed = str(before.mandate_context or "") != str(after.mandate_context or "")
+    non_holding = sum((thesis_changed, thesis_params_changed, mandate_context_changed))
+    summary = (
+        f"{len(added)} added, {len(removed)} removed, {len(changed)} changed weights; "
+        f"{non_holding} mandate/thesis field changes; estimated one-way turnover {turnover_pct:.2f}%."
+    )
     return {
         "added": added,
         "removed": removed,
         "changed_weights": changed,
         "turnover_pct": turnover_pct,
+        "thesis_changed": thesis_changed,
+        "thesis_params_changed": thesis_params_changed,
+        "mandate_context_changed": mandate_context_changed,
         "summary": summary,
     }
 
@@ -850,7 +921,10 @@ def _empty_version_diff() -> dict[str, Any]:
         "removed": [],
         "changed_weights": [],
         "turnover_pct": 0.0,
-        "summary": "No holding-level version changes recorded.",
+        "thesis_changed": False,
+        "thesis_params_changed": False,
+        "mandate_context_changed": False,
+        "summary": "No model version changes recorded.",
     }
 
 
@@ -1003,7 +1077,8 @@ def _normalise_action(value: Any, has_status: bool) -> str:
     action = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
     allowed = {
         "approval_update", "archive_snapshot", "change_note", "model_edit",
-        "model_uploaded", "model_replaced", *REBALANCE_ACTIONS,
+        "model_uploaded", "model_imported", "model_replaced", "thesis_updated",
+        *REBALANCE_ACTIONS,
     }
     if action in allowed:
         return action

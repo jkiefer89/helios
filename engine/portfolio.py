@@ -214,14 +214,23 @@ def parse_model_file(raw: bytes, filename: str, name: str,
     # exists and SOME weights parse, blank/unreadable cells used to merge as
     # 0.0 — dropped from the model with the remainder renormalized, no warning
     # (review finding). Reject and name the offenders instead.
-    any_weights = any(not np.isnan(w) for _, w in raw_pairs)
-    if wcol is not None and any_weights:
+    if wcol is not None:
         blank = [tk for tk, w in raw_pairs if np.isnan(w)]
         if blank:
-            shown = ", ".join(blank[:8]) + ("…" if len(blank) > 8 else "")
+            shown = ", ".join(blank[:8]) + ("..." if len(blank) > 8 else "")
             raise ValueError(
                 f"{len(blank)} holding(s) have a blank or unreadable Weight cell: {shown}. "
                 "Fix the Weight column, or remove it to equal-weight all holdings.")
+        nonpositive = [(tk, w) for tk, w in raw_pairs if w <= 0]
+        if nonpositive:
+            shown = ", ".join(f"{tk} ({w:g})" for tk, w in nonpositive[:8])
+            if len(nonpositive) > 8:
+                shown += ", ..."
+            raise ValueError(
+                "Explicit portfolio weights must be strictly positive. "
+                f"Unsupported zero, negative, or short allocations: {shown}. "
+                "Helios currently supports long-only models; remove the Weight column "
+                "only when an equal-weight model is intended.")
 
     # Merge duplicate tickers (sum their weights).
     merged: dict[str, float] = {}
@@ -229,14 +238,17 @@ def parse_model_file(raw: bytes, filename: str, name: str,
         merged[tk] = merged.get(tk, 0.0) + (0.0 if np.isnan(w) else w)
 
     tickers = list(merged.keys())
-    if not any_weights:
+    if wcol is None:
         weights = {tk: 1.0 / len(tickers) for tk in tickers}     # equal weight
     else:
-        total = sum(max(0.0, v) for v in merged.values())
-        if total <= 0:
-            weights = {tk: 1.0 / len(tickers) for tk in tickers}
-        else:
-            weights = {tk: max(0.0, v) / total for tk, v in merged.items()}  # normalize to 1
+        nonpositive = [(tk, value) for tk, value in merged.items() if value <= 0]
+        if nonpositive:
+            shown = ", ".join(f"{tk} ({value:g})" for tk, value in nonpositive[:8])
+            raise ValueError(
+                "Merged explicit portfolio weights must remain strictly positive. "
+                f"Unsupported allocations: {shown}.")
+        total = sum(merged.values())
+        weights = {tk: v / total for tk, v in merged.items()}  # normalize to 1
 
     holdings = [Holding(tk, round(weights[tk], 6)) for tk in tickers]
     holdings.sort(key=lambda h: h.weight, reverse=True)
@@ -299,12 +311,8 @@ def _persist_model(model: Model, source_filename: str = "") -> dict:
         return {"persisted": False, "warning": str(exc)}
 
 
-def set_thesis(model_id: str, thesis: str,
-               thesis_params: dict | None = None) -> Model:
-    """Update a model's operator thesis (in-memory + persisted)."""
-    model = get(model_id)
-    if model is None:
-        raise ValueError(f"Unknown model '{model_id}'.")
+def apply_thesis(model: Model, thesis: str, thesis_params: dict | None = None) -> Model:
+    """Sanitize thesis fields on a supplied model without persistence side effects."""
     model.thesis = re.sub(r"[\x00-\x1f\x7f]", "", (thesis or "").strip())[:2000]
     if thesis_params is not None:
         clean: dict = {}
@@ -326,7 +334,20 @@ def set_thesis(model_id: str, thesis: str,
                 except (TypeError, ValueError):
                     pass
         model.thesis_params = clean
-    _persist_model(model)
+    return model
+
+
+def set_thesis(model_id: str, thesis: str,
+               thesis_params: dict | None = None) -> Model:
+    """Update a process-local thesis for engine callers.
+
+    Durable thesis changes must use ``model_governance.save_thesis`` so the
+    model row and its pending-review governance evidence commit atomically.
+    """
+    model = get(model_id)
+    if model is None:
+        raise ValueError(f"Unknown model '{model_id}'.")
+    apply_thesis(model, thesis, thesis_params)
     return model
 
 

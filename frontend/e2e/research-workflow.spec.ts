@@ -21,7 +21,7 @@ function priceCsv(rows = 340) {
 }
 
 async function openDataIntake(page: Page) {
-  const heading = page.getByRole("heading", { name: /Real Data Onboarding|Real data active/i });
+  const heading = page.getByRole("heading", { name: /Real data setup|Real data active/i });
   if (await heading.isVisible()) return;
   const rail = page.getByRole("button", { name: "Show data intake panel" });
   if (await rail.isVisible()) {
@@ -46,7 +46,7 @@ test("Command Center recovers after a transient API failure", async ({ page, isM
 
   await page.goto("/");
   await expect(page.getByText("Command Center unavailable", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Retry Command Center" }).click();
+  await page.getByRole("button", { name: "Retry", exact: true }).click();
   await expect(page.getByText("Command Center unavailable", { exact: true })).not.toBeVisible();
   await expect(page.getByText("temporary failure", { exact: false })).not.toBeVisible();
   expect(attempts).toBeGreaterThanOrEqual(2);
@@ -67,8 +67,10 @@ test("first run remains blocked until real evidence is imported", async ({ page,
   await page.getByLabel("Uploaded series symbol").fill("E2EREAL");
   await page.getByRole("button", { name: "Upload price history" }).click();
 
-  await expect(page.getByRole("heading", { name: "Research readiness dashboard" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Research data workspace" })).toBeVisible();
   await expect(page.getByText("E2EREAL", { exact: true }).first()).toBeVisible();
+  await page.getByRole("tab", { name: /Data Quality/ }).click();
+  await expect(page.getByRole("heading", { name: "Research readiness dashboard" })).toBeVisible();
 
   await openDataIntake(page);
   await page.getByLabel("Model file").setInputFiles({
@@ -93,6 +95,8 @@ test("first run remains blocked until real evidence is imported", async ({ page,
   });
   await page.getByLabel("Uploaded series symbol").fill("E2EMISSING");
   await page.getByRole("button", { name: "Upload price history" }).click();
+  await expect(page.getByRole("heading", { name: "Research data workspace" })).toBeVisible();
+  await page.getByRole("tab", { name: /Data Quality/ }).click();
   await expect(page.getByRole("heading", { name: "Research readiness dashboard" })).toBeVisible();
 
   await page.getByRole("tab", { name: /Models/ }).click();
@@ -158,6 +162,7 @@ test("mobile puts the research surface before the collapsible intake", async ({ 
 });
 
 const workspaceRoutes = [
+  ["setup", "Research data workspace"],
   ["instruments", "Available price histories"],
   ["data-quality", "Research readiness dashboard"],
   ["models", "Client model workspace"],
@@ -171,6 +176,30 @@ const workspaceRoutes = [
   ["decisions", "Your calls vs the engine — scored"],
   ["reports", "Institutional Report System"],
 ] as const;
+
+test("Data Setup remains a full-width single-column workflow at tablet width", async ({ page, isMobile }) => {
+  test.skip(Boolean(isMobile), "tablet-specific layout check");
+  await page.setViewportSize({ width: 1024, height: 900 });
+  await page.goto("/#/setup");
+  await expect(page.getByRole("heading", { name: "Research data workspace" })).toBeVisible();
+  const panel = page.locator(".data-intake-panel--full");
+  await expect(panel).toBeVisible();
+  const forms = panel.locator(".data-intake-grid form");
+  await expect(forms).toHaveCount(3);
+  const boxes = await forms.evaluateAll((nodes) => nodes.map((node) => {
+    const box = node.getBoundingClientRect();
+    return { x: box.x, y: box.y, width: box.width };
+  }));
+  expect(Math.max(...boxes.map((box) => box.x)) - Math.min(...boxes.map((box) => box.x))).toBeLessThan(2);
+  expect(boxes[1].y).toBeGreaterThan(boxes[0].y);
+  expect(boxes[2].y).toBeGreaterThan(boxes[1].y);
+  expect(Math.min(...boxes.map((box) => box.width))).toBeGreaterThan(700);
+  const overflow = await page.evaluate(() => ({
+    viewport: document.documentElement.clientWidth,
+    body: document.body.scrollWidth,
+  }));
+  expect(overflow.body).toBeLessThanOrEqual(overflow.viewport + 1);
+});
 
 test("global controls and every operator workspace remain reachable", async ({ page, isMobile }) => {
   test.skip(Boolean(isMobile), "desktop control and route coverage");

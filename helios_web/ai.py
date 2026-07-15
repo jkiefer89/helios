@@ -64,6 +64,9 @@ def ai_chat():
     payload = body.get("payload") or {}
     if not isinstance(payload, dict):
         return err("payload must be a JSON object.", 400)
+    confirmation = body.get("cloud_confirmation")
+    if confirmation is not None and not isinstance(confirmation, dict):
+        return err("cloud_confirmation must be a JSON object.", 400)
     provider = ai_copilot.get_provider()
     status = provider.status()
     data_quality = ai_copilot.payload_data_quality(payload)
@@ -74,7 +77,21 @@ def ai_chat():
             "data_quality": data_quality,
         })), 503
     try:
-        result = provider.chat(messages, payload)
+        safe_transfer, transfer = ai_copilot.prepare_provider_transfer(
+            provider,
+            {"messages": messages, "payload": payload},
+            task="dialogue",
+            confirmation=confirmation,
+        )
+        result = provider.chat(safe_transfer["messages"], safe_transfer["payload"])
+    except ai_copilot.CloudConfirmationRequired as exc:
+        return err(
+            str(exc), exc.status_code,
+            code="cloud_ai_confirmation_required",
+            cloud_transfer=exc.disclosure,
+            status=exc.status,
+            retryable=True,
+        )
     except ValueError as exc:
         return err(str(exc), 400)
     except ai_copilot.AIError as exc:
@@ -88,6 +105,7 @@ def ai_chat():
         **result,
         "status": provider.status(),
         "data_quality": data_quality,
+        "cloud_transfer": transfer,
         "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
     })
 
@@ -96,7 +114,7 @@ def _ai_call(method_name: str, require_question: bool = False):
     parsed, parse_error = _ai_request_payload(require_question=require_question)
     if parse_error:
         return err(parse_error, 400)
-    payload, question, regenerate = parsed
+    payload, question, regenerate, confirmation = parsed
     provider = ai_copilot.get_provider()
     status = provider.status()
     data_quality = ai_copilot.payload_data_quality(payload)
@@ -107,10 +125,26 @@ def _ai_call(method_name: str, require_question: bool = False):
             "data_quality": data_quality,
         })), 503
     try:
+        safe_transfer, transfer = ai_copilot.prepare_provider_transfer(
+            provider,
+            {"payload": payload, "question": question},
+            task=method_name,
+            confirmation=confirmation,
+        )
+        payload = safe_transfer["payload"]
+        question = safe_transfer["question"]
         if method_name == "answer_question":
             result = provider.answer_question(payload, question, regenerate=regenerate)
         else:
             result = getattr(provider, method_name)(payload, regenerate=regenerate)
+    except ai_copilot.CloudConfirmationRequired as exc:
+        return err(
+            str(exc), exc.status_code,
+            code="cloud_ai_confirmation_required",
+            cloud_transfer=exc.disclosure,
+            status=exc.status,
+            retryable=True,
+        )
     except ai_copilot.AIError as exc:
         safe_status = exc.status or provider.status()
         return jsonify(clean({
@@ -126,6 +160,7 @@ def _ai_call(method_name: str, require_question: bool = False):
         "provider": result.get("provider"),
         "model": result.get("model"),
         "data_quality": data_quality,
+        "cloud_transfer": transfer,
         "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
     })
 
@@ -136,11 +171,17 @@ def _ai_request_payload(require_question: bool = False):
         return None, "Request body must be a JSON object."
     payload = body.get("payload")
     if payload is None:
-        payload = {k: v for k, v in body.items() if k not in {"question", "regenerate"}}
+        payload = {
+            k: v for k, v in body.items()
+            if k not in {"question", "regenerate", "cloud_confirmation"}
+        }
     if not isinstance(payload, dict):
         return None, "payload must be a JSON object."
     question = str(body.get("question") or "").strip()
     if require_question and not question:
         return None, "question is required."
     regenerate = bool(body.get("regenerate", False))
-    return (payload, question, regenerate), None
+    confirmation = body.get("cloud_confirmation")
+    if confirmation is not None and not isinstance(confirmation, dict):
+        return None, "cloud_confirmation must be a JSON object."
+    return (payload, question, regenerate, confirmation), None

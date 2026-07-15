@@ -6,11 +6,12 @@ const apiMocks = vi.hoisted(() => ({
   recordInstrumentSignal: vi.fn(),
   recordModelSignal: vi.fn(),
   recordDecision: vi.fn(),
+  setModelThesis: vi.fn(),
 }));
 
 vi.mock("../api/client", () => ({ api: apiMocks }));
 
-import { DecisionQuickLog } from "./Analysis";
+import { DecisionQuickLog, ThesisEditor } from "./Analysis";
 
 function payload(kind: "instrument" | "model"): AnalysisResponse {
   return {
@@ -30,6 +31,7 @@ beforeEach(() => {
   apiMocks.recordInstrumentSignal.mockReset().mockResolvedValue({ signal_journal_entry: {}, disclaimer: "Analysis only." });
   apiMocks.recordModelSignal.mockReset().mockResolvedValue({ signal_journal_entry: {}, disclaimer: "Analysis only." });
   apiMocks.recordDecision.mockReset().mockResolvedValue({});
+  apiMocks.setModelThesis.mockReset().mockResolvedValue({});
 });
 
 afterEach(cleanup);
@@ -58,5 +60,33 @@ describe("prospective signal recording", () => {
 
     await waitFor(() => expect(apiMocks.recordModelSignal).toHaveBeenCalledWith("MODEL-1", 21));
     expect(apiMocks.recordInstrumentSignal).not.toHaveBeenCalled();
+  });
+});
+
+describe("governed model thesis editing", () => {
+  it("requires and submits a governance change note", async () => {
+    const modelPayload = {
+      ...payload("model"),
+      thesis: "Capture durable growth with measured downside control.",
+      thesis_params: {},
+    } as AnalysisResponse;
+    render(<ThesisEditor payload={modelPayload} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    const save = screen.getByRole("button", { name: "Save thesis" }) as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+
+    fireEvent.change(screen.getByLabelText("Thesis governance change note"), {
+      target: { value: "Document committee rationale." },
+    });
+    expect(save.disabled).toBe(false);
+    fireEvent.click(save);
+
+    await waitFor(() => expect(apiMocks.setModelThesis).toHaveBeenCalledWith({
+      id: "MODEL-1",
+      thesis: "Capture durable growth with measured downside control.",
+      change_note: "Document committee rationale.",
+      thesis_params: {},
+    }));
   });
 });

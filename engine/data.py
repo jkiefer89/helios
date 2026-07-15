@@ -20,6 +20,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -758,12 +759,14 @@ def refresh_live_symbol(symbol: str, fetcher=None, refresh_journal: bool = True)
     """
     sym = clean_symbol(symbol, fallback="")
     if not sym:
-        return {"symbol": "", "status": "error", "rows_added": 0, "message": "Invalid ticker symbol."}
+        return {"symbol": "", "status": "error", "rows_added": 0,
+                **live_failure_metadata("Invalid ticker symbol.", preserved=False)}
     current = get(sym)
     if current is None or current.source != "live":
         message = "Refresh skipped: only existing live instruments can be refreshed."
         _record_refresh(sym, "skipped", 0, message)
-        return {"symbol": sym, "status": "skipped", "rows_added": 0, "message": message}
+        return {"symbol": sym, "status": "skipped", "rows_added": 0,
+                **live_failure_metadata(message, preserved=current is not None)}
     before_dates = _instrument_dates(current)
     try:
         if fetcher is None:
@@ -787,7 +790,53 @@ def refresh_live_symbol(symbol: str, fetcher=None, refresh_journal: bool = True)
     except Exception as exc:
         message = str(exc) or "Live refresh failed."
         _record_refresh(sym, "error", 0, message)
-        return {"symbol": sym, "status": "error", "rows_added": 0, "message": message}
+        return {"symbol": sym, "status": "error", "rows_added": 0,
+                **live_failure_metadata(message, preserved=current is not None)}
+
+
+def live_failure_metadata(message: str, *, preserved: bool = False) -> dict[str, Any]:
+    """Return stable, secret-free remediation metadata for provider failures."""
+    from . import persistence
+
+    safe_message = persistence.redact_secrets(str(message or "Live data operation failed."))
+    text = safe_message.lower()
+    if "invalid ticker" in text or "valid ticker" in text:
+        reason_code, retryable = "invalid_symbol", False
+        next_step = "Enter a valid exchange ticker symbol and try again."
+    elif "only existing live" in text:
+        reason_code, retryable = "not_live_managed", False
+        next_step = "Fetch this symbol from the live provider first; uploaded histories are not overwritten."
+    elif "no configured" in text or "provider is available" in text or "provider unavailable" in text:
+        reason_code, retryable = "provider_unavailable", False
+        next_step = "Configure an approved live price provider, license/entitlement controls, and credentials on the server."
+    elif any(term in text for term in ("license", "entitle", "cutover", "approved provider")):
+        reason_code, retryable = "provider_not_approved", False
+        next_step = "Complete provider licensing, entitlement, reconciliation, and cutover approval in Data Quality."
+    elif any(term in text for term in ("timeout", "timed out", "rate limit", "too many", "temporarily")):
+        reason_code, retryable = "provider_temporarily_unavailable", True
+        next_step = (
+            "Retry after the provider recovers; Helios retained the last persisted good history."
+            if preserved else "Retry after the provider recovers. No prior result is available for this symbol."
+        )
+    elif any(term in text for term in ("no live data", "no data", "empty", "not found", "delisted")):
+        reason_code, retryable = "symbol_not_found", False
+        next_step = "Verify the ticker, venue, and provider coverage before retrying."
+    elif any(term in text for term in ("persist", "database", "sqlite", "encrypted snapshot")):
+        reason_code, retryable = "persistence_failed", True
+        next_step = (
+            "Resolve local persistence or encryption custody, then retry; the prior stored history remains unchanged."
+            if preserved else "Resolve local persistence or encryption custody, then retry the initial fetch."
+        )
+    else:
+        reason_code, retryable = "provider_failed", True
+        next_step = "Review provider diagnostics and retry. If failure persists, use the approved backup provider."
+    return {
+        "message": safe_message,
+        "reason_code": reason_code,
+        "retryable": retryable,
+        "next_step": next_step,
+        "stale_result_preserved": bool(preserved),
+    }
 
 
 def expand_live_symbols(raw: str | list[str] | tuple[str, ...] | None) -> list[str]:
@@ -854,7 +903,8 @@ def ensure_live_symbols(
             return {"symbol": symbol, "status": "ok", "instrument": inst, "before_dates": before_dates}
         except Exception as exc:
             message = str(exc) or "Auto live update failed."
-            return {"symbol": symbol, "status": "error", "rows_added": 0, "message": message}
+            return {"symbol": symbol, "status": "error", "rows_added": 0,
+                    **live_failure_metadata(message)}
 
     if worker_count > 1:
         with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="helios-live") as executor:
@@ -879,11 +929,13 @@ def ensure_live_symbols(
             except Exception as exc:
                 message = str(exc) or "Auto live persistence failed."
                 _record_refresh(symbol, "error", 0, message)
-                results.append({"symbol": symbol, "status": "error", "rows_added": 0, "message": message})
+                results.append({"symbol": symbol, "status": "error", "rows_added": 0,
+                                **live_failure_metadata(message)})
         else:
             message = item["message"]
             _record_refresh(symbol, "error", 0, message)
-            results.append({"symbol": symbol, "status": "error", "rows_added": 0, "message": message})
+            results.append({"symbol": symbol, "status": "error", "rows_added": 0,
+                            **live_failure_metadata(message)})
     if any(item["status"] == "ok" for item in results):
         _refresh_signal_journal_forward_results()
     return {

@@ -24,6 +24,107 @@ REQUIRED_THRESHOLDS = (
     "max_false_positive_rate_pct", "confidence_level_pct",
 )
 
+TRIAL_THRESHOLD_POLICY_VERSION = "institutional-v1"
+TRIAL_THRESHOLD_FLOORS: dict[str, dict[str, float | int]] = {
+    "instrument": {
+        "min_observations": 30,
+        "min_hit_rate_pct": 52.0,
+        "min_net_alpha_pct": 0.10,
+        "max_false_positive_rate_pct": 48.0,
+        "confidence_level_pct": 95.0,
+    },
+    "pure_growth": {
+        "min_observations": 40,
+        "min_hit_rate_pct": 53.0,
+        "min_net_alpha_pct": 0.15,
+        "max_false_positive_rate_pct": 47.0,
+        "confidence_level_pct": 95.0,
+    },
+    "balanced": {
+        "min_observations": 50,
+        "min_hit_rate_pct": 54.0,
+        "min_net_alpha_pct": 0.10,
+        "max_false_positive_rate_pct": 46.0,
+        "confidence_level_pct": 95.0,
+    },
+    "income": {
+        "min_observations": 50,
+        "min_hit_rate_pct": 55.0,
+        "min_net_alpha_pct": 0.08,
+        "max_false_positive_rate_pct": 45.0,
+        "confidence_level_pct": 95.0,
+    },
+    "capital_preservation": {
+        "min_observations": 60,
+        "min_hit_rate_pct": 56.0,
+        "min_net_alpha_pct": 0.05,
+        "max_false_positive_rate_pct": 44.0,
+        "confidence_level_pct": 95.0,
+    },
+    "cd_alternative": {
+        "min_observations": 60,
+        "min_hit_rate_pct": 57.0,
+        "min_net_alpha_pct": 0.03,
+        "max_false_positive_rate_pct": 43.0,
+        "confidence_level_pct": 95.0,
+    },
+}
+
+# Historical evidence is a different decision surface from a preregistered
+# deployment trial.  These floors are deliberately explicit and mandate-aware
+# so "enough rows to calculate" is never confused with "edge supported".
+HISTORICAL_THRESHOLD_POLICY_VERSION = "historical-economic-v1"
+HISTORICAL_VALIDATION_FLOORS: dict[str, dict[str, float | int]] = {
+    "instrument": {
+        "min_observations": 12,
+        "min_hit_rate_pct": 51.0,
+        "min_net_alpha_pct": 0.05,
+        "max_false_positive_rate_pct": 49.0,
+        "min_benchmark_coverage_pct": 80.0,
+        "min_regime_count": 1,
+    },
+    "pure_growth": {
+        "min_observations": 12,
+        "min_hit_rate_pct": 52.0,
+        "min_net_alpha_pct": 0.10,
+        "max_false_positive_rate_pct": 48.0,
+        "min_benchmark_coverage_pct": 80.0,
+        "min_regime_count": 1,
+    },
+    "balanced": {
+        "min_observations": 16,
+        "min_hit_rate_pct": 53.0,
+        "min_net_alpha_pct": 0.08,
+        "max_false_positive_rate_pct": 47.0,
+        "min_benchmark_coverage_pct": 80.0,
+        "min_regime_count": 2,
+    },
+    "income": {
+        "min_observations": 16,
+        "min_hit_rate_pct": 54.0,
+        "min_net_alpha_pct": 0.05,
+        "max_false_positive_rate_pct": 46.0,
+        "min_benchmark_coverage_pct": 80.0,
+        "min_regime_count": 2,
+    },
+    "capital_preservation": {
+        "min_observations": 20,
+        "min_hit_rate_pct": 55.0,
+        "min_net_alpha_pct": 0.03,
+        "max_false_positive_rate_pct": 45.0,
+        "min_benchmark_coverage_pct": 80.0,
+        "min_regime_count": 2,
+    },
+    "cd_alternative": {
+        "min_observations": 20,
+        "min_hit_rate_pct": 56.0,
+        "min_net_alpha_pct": 0.02,
+        "max_false_positive_rate_pct": 44.0,
+        "min_benchmark_coverage_pct": 80.0,
+        "min_regime_count": 2,
+    },
+}
+
 
 def register(
     *,
@@ -37,7 +138,7 @@ def register(
     target = str(target_id or "").strip()
     if kind not in {"instrument", "model"} or not target:
         raise ValueError("Trial target must be an instrument or model.")
-    frozen = _validate_protocol(protocol)
+    frozen = _validate_protocol(protocol, target_kind=kind, target_id=target)
     target_snapshot, model_version = target_snapshot_for(kind, target, frozen)
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     trial_id = f"trial-{uuid.uuid4().hex[:20]}"
@@ -99,6 +200,16 @@ def close(trial_id: str, *, status: str, note: str, actor: str) -> dict[str, Any
         current = assess(trial)
         if not current.get("passed"):
             raise ValueError("A trial can be completed only after every preregistered success check passes.")
+        policy = deployment_policy_status(
+            trial.get("protocol") or {},
+            target_kind=str(trial.get("target_kind") or ""),
+            target_id=str(trial.get("target_id") or ""),
+        )
+        if not policy["passed"]:
+            raise ValueError(
+                "A trial can be completed only when its frozen thresholds meet the current "
+                "institutional deployment policy."
+            )
         if not verified_assessment_evidence(trial_id):
             raise ValueError("Record and replay-verify the passing trial assessment before completion.")
     result = persistence.get_store().close_prospective_trial(
@@ -538,7 +649,85 @@ def _history_snapshot(inst: data.Instrument, protocol: dict[str, Any]) -> dict[s
     }
 
 
-def _validate_protocol(protocol: dict[str, Any]) -> dict[str, Any]:
+def threshold_policy(target_kind: str, target_id: str) -> dict[str, Any]:
+    kind = str(target_kind or "").strip().lower()
+    target = str(target_id or "").strip()
+    if kind == "instrument":
+        profile = "instrument"
+        mandate_key = ""
+    elif kind == "model":
+        model = portfolio.get(target)
+        if model is None:
+            raise ValueError("Unknown model trial target.")
+        mandate_key = str(model.mandate_key or "balanced").strip().lower()
+        profile = mandate_key if mandate_key in TRIAL_THRESHOLD_FLOORS else "balanced"
+    else:
+        raise ValueError("Trial target must be an instrument or model.")
+    return {
+        "version": TRIAL_THRESHOLD_POLICY_VERSION,
+        "profile": profile,
+        "mandate_key": mandate_key,
+        "floors": dict(TRIAL_THRESHOLD_FLOORS[profile]),
+        "non_overridable": True,
+    }
+
+
+def historical_threshold_policy(*, target_kind: str, mandate_key: str = "") -> dict[str, Any]:
+    """Return non-overridable historical economic-evidence floors.
+
+    This helper accepts a mandate directly because validation may run against
+    an in-memory model before it has been persisted in the library.
+    """
+    kind = str(target_kind or "").strip().lower()
+    mandate = str(mandate_key or "balanced").strip().lower()
+    if kind == "instrument":
+        profile = "instrument"
+        mandate = ""
+    elif kind == "model":
+        profile = mandate if mandate in HISTORICAL_VALIDATION_FLOORS else "balanced"
+    else:
+        raise ValueError("Historical validation target must be an instrument or model.")
+    return {
+        "version": HISTORICAL_THRESHOLD_POLICY_VERSION,
+        "profile": profile,
+        "mandate_key": mandate,
+        "floors": dict(HISTORICAL_VALIDATION_FLOORS[profile]),
+        "non_overridable": True,
+        "basis": (
+            "Historical ranking evidence must separately pass data, method, and "
+            "mandate-specific after-cost economic-quality checks."
+        ),
+    }
+
+
+def deployment_policy_status(
+    protocol: dict[str, Any], *, target_kind: str, target_id: str,
+) -> dict[str, Any]:
+    policy = threshold_policy(target_kind, target_id)
+    thresholds = protocol.get("success_thresholds") if isinstance(protocol, dict) else None
+    if not isinstance(thresholds, dict):
+        return {**policy, "passed": False, "blockers": ["success_thresholds missing"]}
+    floors = policy["floors"]
+    blockers: list[str] = []
+    try:
+        if int(thresholds.get("min_observations")) < int(floors["min_observations"]):
+            blockers.append("min_observations")
+        if float(thresholds.get("min_hit_rate_pct")) < float(floors["min_hit_rate_pct"]):
+            blockers.append("min_hit_rate_pct")
+        if float(thresholds.get("min_net_alpha_pct")) < float(floors["min_net_alpha_pct"]):
+            blockers.append("min_net_alpha_pct")
+        if float(thresholds.get("max_false_positive_rate_pct")) > float(floors["max_false_positive_rate_pct"]):
+            blockers.append("max_false_positive_rate_pct")
+        if float(thresholds.get("confidence_level_pct")) < float(floors["confidence_level_pct"]):
+            blockers.append("confidence_level_pct")
+    except (TypeError, ValueError, OverflowError):
+        blockers.append("invalid_threshold_values")
+    return {**policy, "passed": not blockers, "blockers": blockers}
+
+
+def _validate_protocol(
+    protocol: dict[str, Any], *, target_kind: str, target_id: str,
+) -> dict[str, Any]:
     if not isinstance(protocol, dict):
         raise ValueError("Trial protocol must be a JSON object.")
     missing = [field for field in REQUIRED_PROTOCOL_FIELDS if field not in protocol]
@@ -577,10 +766,29 @@ def _validate_protocol(protocol: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(thresholds, dict) or any(field not in thresholds for field in REQUIRED_THRESHOLDS):
         raise ValueError("Trial success_thresholds are incomplete.")
     thresholds["min_observations"] = int(thresholds["min_observations"])
-    if thresholds["min_observations"] < 5:
-        raise ValueError("Trial min_observations must be at least 5.")
     for field in REQUIRED_THRESHOLDS[1:]:
         thresholds[field] = float(thresholds[field])
+        if not math.isfinite(thresholds[field]):
+            raise ValueError(f"Trial threshold '{field}' must be finite.")
+    if not 0 <= thresholds["min_hit_rate_pct"] <= 100:
+        raise ValueError("Trial min_hit_rate_pct must be between 0 and 100.")
+    if not 0 <= thresholds["max_false_positive_rate_pct"] <= 100:
+        raise ValueError("Trial max_false_positive_rate_pct must be between 0 and 100.")
+    if not 0 < thresholds["confidence_level_pct"] < 100:
+        raise ValueError("Trial confidence_level_pct must be between 0 and 100.")
+    policy = deployment_policy_status(out, target_kind=target_kind, target_id=target_id)
+    if not policy["passed"]:
+        required = ", ".join(
+            f"{field}={policy['floors'][field]}" for field in policy["blockers"]
+            if field in policy["floors"]
+        )
+        raise ValueError(
+            "Trial success thresholds are weaker than the non-overridable "
+            f"{policy['profile']} deployment floor ({required})."
+        )
+    out["threshold_policy"] = {
+        key: value for key, value in policy.items() if key not in {"passed", "blockers"}
+    }
     return out
 
 

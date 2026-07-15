@@ -6,6 +6,7 @@ import { DataQualityBanner, SourcePill } from "../components/badges/DataModeBadg
 import { Panel } from "../components/cards/Panel";
 import { HistogramChart, ScoreBar, ScoreScatter } from "../components/charts/Charts";
 import { TerminalSelect } from "../components/forms/TerminalSelect";
+import { RequestStatus } from "../components/states/RequestStatus";
 import { useViewFetch } from "../hooks/useViewFetch";
 import { fmtNumber, fmtPct } from "../utils/format";
 
@@ -25,7 +26,7 @@ export function OpportunityRadar({
   const [includeHold, setIncludeHold] = useState(true);
   const [sort, setSort] = useState<"opportunity_score" | "evidence_score" | "risk_score">("opportunity_score");
   const [selectedId, setSelectedId] = useState<string>("");
-  const { payload, error, isLoading, load: fetchRadar, isCurrentTarget } = useViewFetch<OpportunitiesResponse>({
+  const { payload, failure, staleResult, isLoading, load: fetchRadar, retry, isCurrentTarget } = useViewFetch<OpportunitiesResponse>({
     failureMessage: "Opportunity Radar failed.",
     keepPayloadWhileLoading: true,
     initialPayload,
@@ -113,7 +114,7 @@ export function OpportunityRadar({
           <button type="submit">Refresh</button>
         </form>
       </header>
-      {error && <div className="notice danger" role="alert">{error}</div>}
+      <RequestStatus failure={failure} stale={staleResult} onRetry={retry} />
       {items.length > 0 && (
         <section className="dashboard-grid">
           <Panel title="Opportunity Score Map" meta="return/risk review">

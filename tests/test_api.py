@@ -87,6 +87,25 @@ def test_live_malformed_json_returns_json_error(client, monkeypatch):
     assert "error" in resp.get_json()
 
 
+def test_live_provider_failure_returns_structured_secret_free_remediation(client, monkeypatch):
+    monkeypatch.setattr(data, "live_provider_available", lambda: False)
+
+    resp = client.post("/api/live", json={"symbol": "SPY"})
+
+    assert resp.status_code == 503
+    body = resp.get_json()
+    assert body["code"] == "provider_unavailable"
+    assert body["reason_code"] == "provider_unavailable"
+    assert body["retryable"] is False
+    assert body["stale_result_preserved"] is True
+    assert "approved live price provider" in body["next_step"]
+    assert body["diagnostics"] == {"live_provider_available": False}
+    assert "key" not in str(body).lower()
+
+    first_attempt = client.post("/api/live", json={"symbol": "NEVERSEEN"}).get_json()
+    assert first_attempt["stale_result_preserved"] is False
+
+
 def test_auto_live_config_defaults_to_core_universe(monkeypatch):
     monkeypatch.delenv("HELIOS_AUTO_LIVE_SYMBOLS", raising=False)
     monkeypatch.setenv("HELIOS_DB_PATH", ".helios/test-auto-live.db")
@@ -417,8 +436,64 @@ def test_same_origin_and_direct_posts_are_allowed(client, monkeypatch):
     for headers in ({}, {"Sec-Fetch-Site": "same-origin"}, {"Sec-Fetch-Site": "none"}):
         resp = client.post("/api/live", json={"symbol": "AAPL"}, headers=headers)
         # Reaches the handler (provider unavailable), not the CSRF gate.
-        assert resp.status_code == 400
+        assert resp.status_code == 503
         assert "unavailable" in resp.get_json()["error"].lower()
+
+
+def test_unsafe_request_requires_synchronizer_token_when_enforced(client, monkeypatch):
+    monkeypatch.setenv("HELIOS_TEST_ENFORCE_REQUEST_TOKEN", "1")
+    monkeypatch.setattr(data, "HAS_YF", False)
+
+    missing = client.post("/api/live", json={"symbol": "AAPL"})
+
+    assert missing.status_code == 403
+    assert missing.get_json()["code"] == "request_token_invalid"
+
+    bootstrap = client.get("/api/security/status").get_json()["request_protection"]
+    created = client.post(
+        "/api/auth/session",
+        headers={bootstrap["header"]: bootstrap["token"]},
+    )
+    assert created.status_code == 200
+
+    security = client.get("/api/security/status")
+    assert security.status_code == 200
+    protection = security.get_json()["request_protection"]
+    assert protection["header"] == "X-Helios-Request-Token"
+    assert protection["token"]
+
+    allowed = client.post(
+        "/api/live",
+        json={"symbol": "AAPL"},
+        headers={protection["header"]: protection["token"]},
+    )
+    assert allowed.status_code == 503
+
+    tampered = protection["token"][:-1] + ("0" if protection["token"][-1] != "0" else "1")
+    rejected = client.post(
+        "/api/live",
+        json={"symbol": "AAPL"},
+        headers={protection["header"]: tampered},
+    )
+    assert rejected.status_code == 403
+    assert rejected.get_json()["code"] == "request_token_invalid"
+
+    deleted = client.delete(
+        "/api/auth/session",
+        headers={protection["header"]: protection["token"]},
+    )
+    assert deleted.status_code == 200
+
+    revoked = client.post(
+        "/api/live",
+        json={"symbol": "AAPL"},
+        headers={protection["header"]: protection["token"]},
+    )
+    assert revoked.status_code == 403
+    assert revoked.get_json()["code"] == "request_token_invalid"
+
+    safe_get = client.get("/api/tickers")
+    assert safe_get.status_code == 200
 
 
 def test_mismatched_origin_post_is_rejected(client):
@@ -433,7 +508,7 @@ def test_matching_origin_post_is_allowed(client, monkeypatch):
     resp = client.post("/api/live", json={"symbol": "AAPL"},
                        headers={"Origin": "http://localhost"})
 
-    assert resp.status_code == 400
+    assert resp.status_code == 503
     assert "unavailable" in resp.get_json()["error"].lower()
 
 

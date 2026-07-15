@@ -7,6 +7,8 @@ import type {
 } from "../api/types";
 import { Panel, StatTile } from "../components/cards/Panel";
 import { EmptyState } from "../components/empty-states/EmptyState";
+import { RequestStatus } from "../components/states/RequestStatus";
+import { useViewFetch } from "../hooks/useViewFetch";
 import { fmtMoney, fmtNumber, fmtTimestamp } from "../utils/format";
 
 const ACTIONS = ["BUY", "ADD", "HOLD", "TRIM", "SELL"] as const;
@@ -17,9 +19,12 @@ const ACTIONS = ["BUY", "ADD", "HOLD", "TRIM", "SELL"] as const;
  * directly in the trading platform).
  */
 export function Decisions() {
-  const [data, setData] = useState<DecisionsResponse | null>(null);
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(true);
+  const {
+    payload: data, failure, isLoading: loading, load, retry, staleResult,
+  } = useViewFetch<DecisionsResponse>({
+    failureMessage: "Could not load the decision journal.",
+    keepPayloadWhileLoading: true,
+  });
 
   // Manual record form (for decisions made away from the Analysis view).
   const [targetKind, setTargetKind] = useState("instrument");
@@ -30,16 +35,8 @@ export function Decisions() {
   const [saveError, setSaveError] = useState("");
 
   const refresh = useCallback(async () => {
-    setLoading(true);
-    try {
-      setData(await api.listDecisions());
-      setError("");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load the decision journal.");
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+    await load("decision-journal", api.listDecisions);
+  }, [load]);
 
   useEffect(() => {
     void refresh();
@@ -173,7 +170,7 @@ export function Decisions() {
       <LedgerSection />
 
       <Panel title="Decisions" meta={`${decisions.length} recorded`}>
-        {error && <div className="notice danger" role="alert">{error}</div>}
+        <RequestStatus failure={failure} stale={staleResult} onRetry={retry} />
         {loading && !data ? (
           <EmptyState title="Loading" body="Reading the decision journal…" />
         ) : decisions.length === 0 ? (
@@ -425,7 +422,11 @@ function RebalancePanel({ accountId, modelId }: { accountId: string; modelId: st
         </button>
         {proposal?.method && <small>{proposal.method === "cvxpy_qp" ? "convex QP" : "capped projection"}</small>}
       </div>
-      {error && <p className="forecast-note tone-negative">{error}</p>}
+      {error && (
+        <div className="notice danger" role="alert">
+          {error} <button type="button" onClick={() => void propose()}>Retry proposal</button>
+        </div>
+      )}
       {proposal?.status === "blocked" && (
         <EmptyState title="Proposal blocked" body={proposal.reason || "Missing data."} />
       )}

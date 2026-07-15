@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { DataStatusResponse, ModelSummary, TickerSummary } from "../../api/types";
 import { SourcePill } from "../badges/DataModeBadge";
 import { Panel, StatTile } from "../cards/Panel";
 import { EmptyState } from "../empty-states/EmptyState";
 import { fmtNumber, fmtTimestamp } from "../../utils/format";
+import { RequestStatus, toRequestFailure, type RequestFailureState } from "../states/RequestStatus";
 
 const templates = [
   { label: "Close-only price CSV", body: "Date,Close" },
@@ -28,26 +29,33 @@ export function RealDataCenter({
 }) {
   const [pendingRefresh, setPendingRefresh] = useState("");
   const [copied, setCopied] = useState("");
+  const [refreshFailure, setRefreshFailure] = useState<RequestFailureState | null>(null);
+  const lastRefresh = useRef<{ key: string; action: () => Promise<void> } | null>(null);
   const liveCount = tickers.filter((ticker) => ticker.source === "live").length;
   const realRows = tickers.filter((ticker) => ticker.source === "live" || ticker.source === "upload");
   const missingTickers = dataStatus?.missing_data.missing_tickers || [];
   const autoLive = dataStatus?.auto_live;
   const encryption = dataStatus?.database.encryption;
-  const refreshAll = async () => {
-    setPendingRefresh("all");
+  const runRefresh = async (key: string, action: () => Promise<void>) => {
+    lastRefresh.current = { key, action };
+    setRefreshFailure(null);
+    setPendingRefresh(key);
     try {
-      await onRefreshData(undefined, true);
+      await action();
+    } catch (error) {
+      setRefreshFailure(toRequestFailure(error, "Live-data refresh failed."));
     } finally {
       setPendingRefresh("");
     }
   };
+  const refreshAll = async () => runRefresh("all", () => onRefreshData(undefined, true));
   const refreshSymbol = async (symbol: string) => {
-    setPendingRefresh(symbol);
-    try {
-      await onRefreshData(symbol, false);
-    } finally {
-      setPendingRefresh("");
-    }
+    await runRefresh(symbol, () => onRefreshData(symbol, false));
+  };
+  const retryRefresh = () => {
+    const previous = lastRefresh.current;
+    if (!previous) return;
+    void runRefresh(previous.key, previous.action);
   };
   const copyTemplate = async (label: string, body: string) => {
     try {
@@ -59,6 +67,7 @@ export function RealDataCenter({
   };
   return (
     <div className={`real-data-center ${compact ? "compact" : ""}`}>
+      <RequestStatus failure={refreshFailure} stale={refreshFailure?.staleResultPreserved} onRetry={retryRefresh} />
       <section className="dashboard-grid three">
         <Panel title="Persistence" meta={databaseLabel(dataStatus)}>
           <div className="metric-grid persistence-metrics">
@@ -86,6 +95,7 @@ export function RealDataCenter({
                 {dataStatus.refresh_log.slice(0, 3).map((row) => (
                   <li key={`${row.symbol}-${row.attempted_at}`}>
                     <strong>{row.symbol}</strong><span>{row.status} · {row.rows_added} rows · {fmtTimestamp(row.attempted_at)}</span>
+                    {row.reason_code && <small>{row.reason_code}{row.next_step ? ` · ${row.next_step}` : ""}</small>}
                   </li>
                 ))}
               </ul>

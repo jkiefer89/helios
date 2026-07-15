@@ -297,6 +297,10 @@ export interface RefreshLogEntry {
   rows_added: number;
   message: string;
   source: string;
+  reason_code?: string;
+  retryable?: boolean;
+  next_step?: string;
+  stale_result_preserved?: boolean;
 }
 
 export interface ModelCoverageStatus {
@@ -357,9 +361,15 @@ export interface DataRefreshResponse {
     rows_added: number;
     rows?: number;
     message: string;
+    reason_code?: string;
+    retryable?: boolean;
+    next_step?: string;
+    stale_result_preserved?: boolean;
   }>;
   warnings: string[];
   data_status: DataStatusResponse;
+  data_quality: DataQualityResponse;
+  incident_sync: Record<string, unknown>;
 }
 
 export interface DataQualityIssue {
@@ -493,6 +503,7 @@ export interface DataQualityResponse {
     };
   };
   disclaimer: string;
+  incident_sync?: Record<string, unknown>;
 }
 
 export interface AutoLiveStatus {
@@ -1005,15 +1016,15 @@ export interface EvidenceLabResponse extends ProvenancePayload {
   regime_robustness: {
     status: string;
     passed: boolean;
-    coverage_passed: boolean;
-    performance_consistent: boolean;
-    false_positive_control: boolean;
+    coverage_passed?: boolean;
+    performance_consistent?: boolean;
+    false_positive_control?: boolean;
     covered_regimes: number;
     required_regimes: number;
-    min_windows_per_regime: number;
+    min_windows_per_regime?: number;
     worst_net_alpha_pct?: number | null;
     worst_false_positive_rate_pct?: number | null;
-    basis: string;
+    basis?: string;
   };
   multiplicity: {
     evaluated_horizons: number;
@@ -1053,7 +1064,7 @@ export interface ModelValidationRow {
   mandate: string;
   role: string;
   validation_state: string;
-  validation_score: number;
+  validation_score: number | null;
   validation_grade: string;
   evidence_unavailable: boolean;
   reason: string;
@@ -1074,6 +1085,19 @@ export interface ModelValidationRow {
     latest_change_note: string;
     updated_by: string;
   };
+  validation_verdicts: {
+    policy: {
+      version: string;
+      profile: string;
+      mandate_key: string;
+      floors: Record<string, number>;
+      non_overridable: boolean;
+      basis: string;
+    };
+    data_valid: ModelValidationVerdict;
+    method_valid: ModelValidationVerdict;
+    edge_supported: ModelValidationVerdict;
+  };
   drift_alerts: ModelValidationAlert[];
   methodology: Record<string, unknown>;
   disclaimer: string;
@@ -1086,6 +1110,20 @@ export interface ModelValidationRow {
     window_count?: number; hit_rate_pct?: number | null; avg_alpha_pct?: number | null;
     false_positive_rate_pct?: number | null };
   ci_inputs?: Record<string, number>;
+}
+
+export interface ModelValidationVerdict {
+  passed: boolean;
+  detail: string;
+  required_action: string;
+  failed_checks: string[];
+  checks: Array<{
+    name: string;
+    passed: boolean;
+    actual: unknown;
+    required: unknown;
+    operator: string;
+  }>;
 }
 
 export interface ModelValidationResponse {
@@ -1201,6 +1239,13 @@ export interface ReportSnapshot {
   model_metadata: Record<string, unknown>;
   signal_journal?: ReportSignalJournalEvidence;
   client_risk_pack?: ClientRiskPack;
+  capital_context?: {
+    aum_usd?: number | null;
+    aum_as_of?: string;
+    capacity_status?: string;
+    capacity_unsized_count?: number;
+    capacity?: CapacityBlock;
+  };
   warnings: string[];
   ai_narrative_included: boolean;
   ai_narrative_status: string;
@@ -1230,6 +1275,9 @@ export interface ReportSnapshotSaveRequest {
   prepared_by?: string;
   reviewer?: string;
   report_purpose?: string;
+  aum_usd?: number;
+  aum_as_of?: string;
+  cloud_confirmation?: CloudAIConfirmation;
 }
 
 export interface ReportSnapshotSaveResponse {
@@ -1798,6 +1846,7 @@ export interface AIResponse {
   model: string;
   data_quality: DataQuality;
   disclaimer: string;
+  cloud_transfer?: CloudTransferDisclosure;
 }
 
 export interface AIChatResponse {
@@ -1809,6 +1858,30 @@ export interface AIChatResponse {
   status?: AIStatusResponse;
   data_quality?: DataQuality;
   disclaimer?: string;
+  cloud_transfer?: CloudTransferDisclosure;
+}
+
+export interface CloudAIConfirmation {
+  confirmed: true;
+  disclosure_hash: string;
+}
+
+export interface CloudTransferDisclosure {
+  disclosure_hash: string;
+  dlp_payload_hash: string;
+  provider: string;
+  model: string;
+  task: string;
+  transfer_scope: "final_sanitized_provider_request";
+  cloud_transfer: boolean;
+  confirmation_required: boolean;
+  confirmed: boolean;
+  redaction_count: number;
+  redaction_categories: Record<string, number>;
+  redacted_fields: string[];
+  raw_values_returned: boolean;
+  review_required: boolean;
+  basis: string;
 }
 
 
@@ -1855,8 +1928,8 @@ export interface RebalanceProposal {
 
 export interface DataJobsResponse {
   auto_live: Record<string, unknown> & { running?: boolean; last_run?: string | null };
-  refresh_log: Array<{ symbol: string; status: string; rows_added: number; message: string; attempted_at: string }>;
-  recent_failures: Array<{ symbol: string; status: string; message: string; attempted_at: string }>;
+  refresh_log: RefreshLogEntry[];
+  recent_failures: RefreshLogEntry[];
   freshness: Array<{ symbol: string; last_bar: string; age_calendar_days: number; rows: number; price_provider: string }>;
   stale_count: number;
   audit_chain: { status: string; entries?: number; first_bad_seq?: number };
@@ -1895,6 +1968,14 @@ export interface TrialProtocol {
   max_adv_participation_pct: number;
   planned_variants: string[];
   deleted_variants: string[];
+}
+
+export interface TrialThresholdPolicy {
+  version: string;
+  profile: string;
+  mandate_key: string;
+  floors: TrialProtocol["success_thresholds"];
+  non_overridable: boolean;
 }
 
 export interface TrialImplementationLayer {
@@ -1983,6 +2064,7 @@ export interface ProspectiveTrial {
 
 export interface ProspectiveTrialsResponse {
   trials: ProspectiveTrial[];
+  threshold_policy?: TrialThresholdPolicy | null;
   storage_available: boolean;
   disclaimer: string;
 }
@@ -2059,17 +2141,68 @@ export interface OperationsStatusResponse {
   latest_backup_verification: {
     created_at: string;
     outcome: string;
-    details: { passed?: boolean; isolated_restore_tested?: boolean; live_data_mutated?: boolean };
+    details: {
+      passed?: boolean;
+      isolated_restore_tested?: boolean;
+      live_data_mutated?: boolean;
+      rpo_seconds?: number;
+      rpo_target_seconds?: number;
+      rpo_met?: boolean;
+      rto_seconds?: number;
+      rto_target_seconds?: number;
+      rto_met?: boolean;
+      restore_drill_passed?: boolean;
+    };
   } | null;
   audit_chain: { status: string; entries?: number; total_entries?: number; warning?: string };
   privileged_chain: { status: string; entries?: number; total_entries?: number; warning?: string };
+  persistence_encryption: {
+    enabled: boolean;
+    key_id?: string;
+    key_version?: string;
+    custody_mode?: string;
+    custody_attested?: boolean;
+    external_custody?: boolean;
+    rotation_configured?: boolean;
+    recovery_key_count?: number;
+    recovery_key_used?: boolean;
+  };
+  backup_export: {
+    configured: boolean;
+    offhost_attested: boolean;
+    plaintext_exported: boolean;
+    external_custody_verified_by_helios: boolean;
+    latest_export: { created_at?: string; outcome?: string; resource?: string } | null;
+  };
+  audit_export: {
+    configured: boolean;
+    required: boolean;
+    worm_siem_attested: boolean;
+    written: boolean;
+    current_checkpoint?: boolean;
+    latest_event_hash?: string;
+    current_privileged_head?: string;
+    checkpoint_application_head?: string;
+    current_application_head?: string;
+    updated_at: string;
+    local_append_only_evidence: boolean;
+    external_immutability_verified_by_helios: boolean;
+  };
 }
 
 export interface SecurityStatusResponse {
-  principal: { user: string; roles: string[]; auth_method: string; mfa_verified: boolean };
+  principal: {
+    user: string;
+    roles: string[];
+    auth_method: string;
+    mfa_verified: boolean;
+    tenant_id: string;
+    client_id: string;
+  };
   authentication: {
     enabled: boolean;
     sso_enabled: boolean;
+    enterprise_identity: Record<string, unknown>;
     mfa_required_for_privileged_actions: boolean;
     session_idle_seconds: number;
     session_absolute_seconds: number;
@@ -2078,6 +2211,23 @@ export interface SecurityStatusResponse {
   audit: {
     privileged_chain: OperationsStatusResponse["privileged_chain"];
     application_chain: OperationsStatusResponse["audit_chain"];
+  };
+  workspace: {
+    tenant_id: string;
+    client_id: string;
+    scope_hash: string;
+    boundary: string;
+    database_bound: boolean;
+    scope_mismatch: boolean;
+  };
+  request_protection: {
+    header: string;
+    token: string;
+    expires_at: number;
+    expires_in_seconds: number;
+    available?: boolean;
+    binding?: "session" | "principal" | "session_bootstrap";
+    reason?: string;
   };
   external_requirements: string[];
 }

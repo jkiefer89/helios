@@ -6,6 +6,7 @@ import { Panel } from "../components/cards/Panel";
 import { MiniBars, ScoreBar } from "../components/charts/Charts";
 import { EmptyState } from "../components/empty-states/EmptyState";
 import { ResearchGate } from "../components/states/ResearchGate";
+import { RequestStatus, type RequestFailureState } from "../components/states/RequestStatus";
 import { isViewId, type ViewId } from "../components/layout/AppShell";
 import { fmtNumber, fmtPct, fmtTimestamp } from "../utils/format";
 
@@ -13,6 +14,7 @@ type DisclosureTone = "neutral" | "info" | "positive" | "warning";
 
 export function CommandCenter({
   payload,
+  failure,
   dataStatus,
   onOpenInstrument,
   onOpenModel,
@@ -20,6 +22,7 @@ export function CommandCenter({
   onRetry,
 }: {
   payload: CommandCenterResponse | null;
+  failure: RequestFailureState | null;
   dataStatus: DataStatusResponse | null;
   onOpenInstrument: (symbol: string) => void;
   onOpenModel: (id: string) => void;
@@ -28,9 +31,12 @@ export function CommandCenter({
 }) {
   if (!payload) {
     return (
-      <EmptyState title="Command Center unavailable" body="The backend did not return a command payload.">
-        <button type="button" onClick={() => void onRetry()}>Retry Command Center</button>
-      </EmptyState>
+      <div className="view-stack">
+        <RequestStatus failure={failure} onRetry={() => void onRetry()} />
+        <EmptyState title="Command Center unavailable" body="The backend did not return a command payload.">
+          {!failure && <button type="button" onClick={() => void onRetry()}>Retry Command Center</button>}
+        </EmptyState>
+      </div>
     );
   }
   const regime = payload.regime;
@@ -45,13 +51,14 @@ export function CommandCenter({
   const disclosureCards = buildDisclosureCards(payload, sourceStatus);
   return (
     <div className="view-stack command-terminal">
+      <RequestStatus failure={failure} stale={Boolean(failure)} onRetry={() => void onRetry()} />
       {regimeUnavailable ? (
         <Panel title="Market Regime" meta="benchmark data required">
           <EmptyState
             title="Market regime unavailable"
             body={regime.summary || "No benchmark price history loaded — regime unavailable."}
           >
-            <button type="button" onClick={() => { window.dispatchEvent(new Event("helios:reveal-data-intake")); onOpenView("instruments"); }}>
+            <button type="button" onClick={() => onOpenView("setup")}>
               Fetch or upload benchmark data
             </button>
           </EmptyState>
@@ -118,8 +125,8 @@ export function CommandCenter({
               title="Opportunity rankings locked"
               body={payload.required_action || "Live ticker data or uploaded real price history must pass provenance before rankings appear."}
               actions={[
-                { label: "Fetch live data", view: "instruments" },
-                { label: "Upload price CSV", view: "instruments" },
+                { label: "Fetch live data", view: "setup" },
+                { label: "Upload price CSV", view: "setup" },
               ]}
               onOpenView={onOpenView}
             />
@@ -138,7 +145,7 @@ export function CommandCenter({
               title="Risk ranking locked"
               body="Drawdown, volatility, and risk scores are hidden until eligible live or uploaded history exists."
               actions={[
-                { label: "Open real data setup", view: "instruments" },
+                { label: "Open real data setup", view: "setup" },
                 { label: "Run Strategy Lab later", view: "strategy" },
               ]}
               onOpenView={onOpenView}
@@ -160,7 +167,7 @@ export function CommandCenter({
               body="Alerts are generated only after an imported model and every analyzed holding pass real-data provenance checks."
               actions={[
                 { label: "Upload model", view: "models" },
-                { label: "Resolve holdings", view: "instruments" },
+                { label: "Resolve holdings", view: "setup" },
               ]}
               onOpenView={onOpenView}
             />
@@ -307,8 +314,7 @@ function WorkflowReadiness({
         title={payload.readiness.summary}
         actionLabel={payload.next_action.label}
         onAction={() => {
-          if (nextView === "instruments") window.dispatchEvent(new Event("helios:reveal-data-intake"));
-          onOpenView(nextView);
+          onOpenView(nextView === "instruments" ? "setup" : nextView);
         }}
       />
       <div className="command-workflow__grid">
@@ -373,7 +379,7 @@ function ResearchQueueRows({
         title="Research queue locked"
         body={payload.required_action || "Real research work appears after eligible live or uploaded evidence passes provenance checks."}
         actions={[
-          { label: "Open real data setup", view: "instruments" },
+          { label: "Open real data setup", view: "setup" },
           { label: "Review report caveats", view: "reports" },
         ]}
         onOpenView={onOpenView}
@@ -418,7 +424,6 @@ function LockedStatePanel({
 }
 
 function openView(view: ViewId, onOpenView: (view: ViewId) => void) {
-  if (view === "instruments") window.dispatchEvent(new Event("helios:reveal-data-intake"));
   onOpenView(view);
 }
 
@@ -441,7 +446,7 @@ function LockedRadarTable({
     ["Why locked", "advanced"],
   ];
   const rows: Array<{ area: string; status: string; evidence: string; nextStep: string; view: ViewId }> = [
-    { area: "Opportunity rankings", status: "Locked", evidence: "Eligible live/uploaded price history", nextStep: "Fetch or upload a real series", view: "instruments" },
+    { area: "Opportunity rankings", status: "Locked", evidence: "Eligible live/uploaded price history", nextStep: "Fetch or upload a real series", view: "setup" },
     { area: "Risk scoring", status: "Locked", evidence: "Drawdown and volatility from eligible history", nextStep: "Provide eligible market history", view: "strategy" },
     { area: "Client model coverage", status: "Pending", evidence: "Holdings with real price coverage", nextStep: "Upload a model and resolve missing holdings", view: "models" },
     { area: "Report publishing", status: "Blocked", evidence: "Passed provenance gate", nextStep: "Review evidence pack after real data passes", view: "reports" },
@@ -523,7 +528,7 @@ function buildRadarFilterConfig(message: string): Record<RadarFilterKey, RadarFi
       title: "Universe filter",
       detail: "The Command Center radar is scoped to instruments and models that pass the real-data provenance gate.",
       primaryAction: "Open real data setup",
-      primaryView: "instruments",
+      primaryView: "setup",
       fields: [
         { label: "Eligible rows", value: "0" },
         { label: "Current gate", value: message },
@@ -567,7 +572,7 @@ function buildRadarFilterConfig(message: string): Record<RadarFilterKey, RadarFi
       title: "Radar filters",
       detail: "These filters show exactly why the Command Center radar is locked and where to provide the missing evidence.",
       primaryAction: "Open real data setup",
-      primaryView: "instruments",
+      primaryView: "setup",
       fields: [
         { label: "Universe", value: "Real-data eligible only" },
         { label: "Score distribution", value: "Blocked without eligible rows" },
@@ -653,7 +658,7 @@ function safePriority(value?: string) {
 }
 
 function buildResearchQueue(payload: CommandCenterResponse) {
-  const defaultViews: ViewId[] = ["opportunities", "clinic", "instruments", "reports"];
+  const defaultViews: ViewId[] = ["opportunities", "clinic", "setup", "reports"];
   return payload.research_queue.map((row, index) => ({
     ...row,
     view: defaultViews[index] || "reports",
@@ -671,7 +676,7 @@ function buildStatusItems(payload: CommandCenterResponse, sourceStatus: string, 
   const sourceTone = payload.eligible_for_real_research ? "positive" : "warning";
   const sourceLabel = payload.eligible_for_real_research ? `Sources: ${sourceStatus}` : `Blocked/Mixed sources: ${sourceStatus}`;
   return [
-    { tone: payload.eligible_for_real_research ? "positive" : "warning", label: `Market Data: ${modeLabel}`, view: "instruments" },
+    { tone: payload.eligible_for_real_research ? "positive" : "warning", label: `Market Data: ${modeLabel}`, view: "setup" },
     { tone: sourceTone, label: sourceLabel, view: "reports" },
     payload.eligible_for_real_research
       ? { tone: "positive" as const, label: "Research: unlocked by provenance checks", view: "opportunities" as const }

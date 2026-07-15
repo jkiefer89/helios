@@ -10,6 +10,7 @@ describe("Command Center failure recovery", () => {
     render(
       <CommandCenter
         payload={null}
+        failure={null}
         dataStatus={null}
         onOpenInstrument={vi.fn()}
         onOpenModel={vi.fn()}

@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { api } from "./api/client";
+import { ApiError, api } from "./api/client";
 import type {
   CommandCenterResponse,
+  DataRefreshResponse,
   DataStatusResponse,
   MandateSummary,
   ModelGovernanceResponse,
@@ -24,11 +25,35 @@ import { SignalJournal } from "./views/SignalJournal";
 import { Decisions } from "./views/Decisions";
 import { RiskAnalytics } from "./views/RiskAnalytics";
 import { EvidenceLab } from "./views/EvidenceLab";
+import { DataSetup } from "./views/DataSetup";
+import { toRequestFailure, type RequestFailureState } from "./components/states/RequestStatus";
 
 interface HashRoute {
   view: ViewId;
   kind?: "instrument" | "model";
   id?: string;
+}
+
+export function refreshIncompleteError(result: DataRefreshResponse): ApiError | null {
+  const failures = result.results.filter((row) => row.status === "error" || row.status === "skipped");
+  if (!failures.length) return null;
+  const nextStep = [...new Set(failures.map((row) => row.next_step).filter(Boolean))].join(" ");
+  return new ApiError(
+    `${failures.length} live refresh ${failures.length === 1 ? "request did" : "requests did"} not complete.`,
+    207,
+    {
+      code: "live_refresh_incomplete",
+      retryable: failures.some((row) => row.retryable !== false),
+      next_step: nextStep,
+      stale_result_preserved: failures.every((row) => row.stale_result_preserved === true),
+      diagnostics: {
+        refreshed: result.refreshed,
+        failed: result.failed,
+        skipped: result.skipped,
+        reason_codes: failures.map((row) => row.reason_code || row.status),
+      },
+    },
+  );
 }
 
 function decodeHashPart(part: string): string | null {
@@ -77,7 +102,7 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState<string>("");
   const [setupNotice, setSetupNotice] = useState<string>("");
-  const [commandError, setCommandError] = useState<string>("");
+  const [commandFailure, setCommandFailure] = useState<RequestFailureState | null>(null);
 
   const refreshLists = async () => {
     const requests = [
@@ -110,9 +135,9 @@ export default function App() {
     try {
       const payload = await api.commandCenter();
       setCommand(payload);
-      setCommandError("");
+      setCommandFailure(null);
     } catch (error) {
-      setCommandError(error instanceof Error ? error.message : "Command Center could not refresh.");
+      setCommandFailure(toRequestFailure(error, "Command Center could not refresh."));
     }
   };
 
@@ -174,7 +199,7 @@ export default function App() {
       setNotice(`Uploaded ${result.symbol} with ${result.rows} rows.`);
       await Promise.all([refreshLists(), refreshCommand()]);
       selectInstrumentOnly(result.symbol);
-      setActiveView("data-quality");
+      setActiveView("setup");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Price upload failed.");
       throw error;
@@ -243,7 +268,7 @@ export default function App() {
       setNotice(`Fetched ${result.symbol} with ${result.rows} rows.`);
       await Promise.all([refreshLists(), refreshCommand()]);
       selectInstrumentOnly(result.symbol);
-      setActiveView("data-quality");
+      setActiveView("setup");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Live data fetch failed.");
       throw error;
@@ -255,8 +280,14 @@ export default function App() {
       const result = await api.refreshData({ symbol, all });
       setDataStatus(result.data_status);
       const target = all ? "live symbols" : result.requested;
-      setNotice(`Refresh checked ${target}: ${result.refreshed} refreshed, ${result.failed} failed, ${result.skipped} skipped.`);
+      const failures = result.results.filter((row) => row.status === "error" || row.status === "skipped");
+      const remediation = failures.slice(0, 2).map((row) =>
+        `${row.symbol || "request"}: ${row.reason_code || row.status}${row.next_step ? ` — ${row.next_step}` : ""}`,
+      ).join(" ");
+      setNotice(`Refresh checked ${target}: ${result.refreshed} refreshed, ${result.failed} failed, ${result.skipped} skipped.${remediation ? ` ${remediation}` : ""}`);
       await Promise.all([refreshLists(), refreshCommand()]);
+      const incomplete = refreshIncompleteError(result);
+      if (incomplete) throw incomplete;
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Data refresh failed.");
       throw error;
@@ -276,7 +307,7 @@ export default function App() {
   const content = (() => {
     if (loading) return <div className="loading">Loading Helios Pro APIs...</div>;
     if (activeView === "command") {
-      return <CommandCenter payload={command} dataStatus={dataStatus} onOpenInstrument={openInstrument} onOpenModel={openModel} onOpenView={setActiveView} onRetry={refreshCommand} />;
+      return <CommandCenter payload={command} failure={commandFailure} dataStatus={dataStatus} onOpenInstrument={openInstrument} onOpenModel={openModel} onOpenView={setActiveView} onRetry={refreshCommand} />;
     }
     if (activeView === "instruments") {
       return (
@@ -286,6 +317,22 @@ export default function App() {
           dataStatus={dataStatus}
           onOpenInstrument={openInstrument}
           onRefreshData={onRefreshData}
+        />
+      );
+    }
+    if (activeView === "setup") {
+      return (
+        <DataSetup
+          tickers={tickers}
+          models={models}
+          mandates={mandates}
+          dataStatus={dataStatus}
+          liveAvailable={liveAvailable}
+          onUploadPrice={onUploadPrice}
+          onUploadModel={onUploadModel}
+          onFetchLive={onFetchLive}
+          onRefreshData={onRefreshData}
+          onOpenInstrument={openInstrument}
         />
       );
     }
@@ -393,7 +440,7 @@ export default function App() {
       onUploadModel={onUploadModel}
       onFetchLive={onFetchLive}
       liveAvailable={liveAvailable}
-      notice={[notice, setupNotice, commandError].filter(Boolean).join(" ")}
+      notice={[notice, setupNotice].filter(Boolean).join(" ")}
       dataStatus={dataStatus}
       onRefreshData={onRefreshData}
     >

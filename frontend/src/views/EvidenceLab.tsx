@@ -1,15 +1,21 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
-import type { EvidenceLabResponse, ModelSummary, ProspectiveTrial, TickerSummary, TrialProtocol } from "../api/types";
+import type { EvidenceLabResponse, ModelSummary, ProspectiveTrial, TickerSummary, TrialProtocol, TrialThresholdPolicy } from "../api/types";
 import { DataQualityBanner } from "../components/badges/DataModeBadge";
 import { Panel, StatTile } from "../components/cards/Panel";
 import { ChartSummary, LineChart, MiniBars } from "../components/charts/Charts";
 import { EmptyState } from "../components/empty-states/EmptyState";
 import { TerminalSelect } from "../components/forms/TerminalSelect";
+import { RequestStatus } from "../components/states/RequestStatus";
 import { useViewFetch } from "../hooks/useViewFetch";
 import { fmtNumber, fmtPct, titleCase } from "../utils/format";
 
 type TargetKind = "model" | "instrument";
+const EVIDENCE_LIMITS = {
+  horizon: { min: 5, max: 252, label: "Horizon" },
+  trainWindow: { min: 90, max: 756, label: "Train rows" },
+  step: { min: 5, max: 63, label: "Step" },
+} as const;
 
 export function EvidenceLab({
   tickers,
@@ -35,48 +41,61 @@ export function EvidenceLab({
   const [target, setTarget] = useState(defaultTarget);
   const [horizon, setHorizon] = useState("21");
   const [trainWindow, setTrainWindow] = useState("252");
+  const [step, setStep] = useState("21");
   const [trial, setTrial] = useState<ProspectiveTrial | null>(null);
+  const [trialPolicy, setTrialPolicy] = useState<TrialThresholdPolicy | null>(null);
   const [trialLoading, setTrialLoading] = useState(false);
   const [trialError, setTrialError] = useState("");
-  const { payload, error, isLoading, load, isCurrentTarget } = useViewFetch<EvidenceLabResponse>({ failureMessage: "Evidence Lab failed." });
+  const trialLoadGeneration = useRef(0);
+  const { payload, failure, staleResult, isLoading, load, retry, isCurrentTarget } = useViewFetch<EvidenceLabResponse>({ failureMessage: "Evidence Lab failed." });
 
   const targetOptions = [
     ...models.map((model) => ({ value: `model:${model.id}`, label: `${model.name} · model` })),
     ...tickers.map((ticker) => ({ value: `instrument:${ticker.symbol}`, label: `${ticker.symbol} · ${ticker.name}` })),
   ];
   const selected = parseTarget(target);
+  const horizonError = integerInputError(horizon, EVIDENCE_LIMITS.horizon);
+  const trainWindowError = integerInputError(trainWindow, EVIDENCE_LIMITS.trainWindow);
+  const stepError = integerInputError(step, EVIDENCE_LIMITS.step);
+  const controlError = horizonError || trainWindowError || stepError;
 
   const loadTrial = useCallback(async (requestedTarget: string) => {
+    const loadGeneration = ++trialLoadGeneration.current;
     const parsed = parseTarget(requestedTarget);
     if (!parsed) {
       setTrial(null);
+      setTrialPolicy(null);
       return;
     }
     setTrialLoading(true);
     setTrialError("");
+    setTrialPolicy(null);
     try {
       const response = await api.trials({ kind: parsed.kind, id: parsed.id });
+      if (loadGeneration !== trialLoadGeneration.current) return;
       setTrial(response.trials.find((row) => row.status === "open") || response.trials[0] || null);
+      setTrialPolicy(response.threshold_policy || null);
     } catch (caught) {
+      if (loadGeneration !== trialLoadGeneration.current) return;
       setTrialError(caught instanceof Error ? caught.message : "Trial registry unavailable.");
     } finally {
-      setTrialLoading(false);
+      if (loadGeneration === trialLoadGeneration.current) setTrialLoading(false);
     }
   }, []);
 
   const run = useCallback((requestedTarget: string) => {
     const parsed = parseTarget(requestedTarget);
-    if (!parsed) return;
+    if (!parsed || controlError) return;
     if (parsed.kind === "model") onSelectModel(parsed.id);
     if (parsed.kind === "instrument") onSelectInstrument(parsed.id);
     void load(requestedTarget, () => api.evidenceLab({
       kind: parsed.kind,
       id: parsed.id,
-      horizon: parseBoundedInt(horizon, 21),
-      trainWindow: parseBoundedInt(trainWindow, 252),
-      step: 21,
+      horizon: Number(horizon),
+      trainWindow: Number(trainWindow),
+      step: Number(step),
     }));
-  }, [horizon, load, onSelectInstrument, onSelectModel, trainWindow]);
+  }, [controlError, horizon, load, onSelectInstrument, onSelectModel, step, trainWindow]);
 
   useEffect(() => {
     if (!defaultTarget || isCurrentTarget(defaultTarget)) return;
@@ -92,6 +111,14 @@ export function EvidenceLab({
   const registerTrial = useCallback(async (owner: string, hypothesis: string) => {
     const parsed = parseTarget(target);
     if (!parsed) return;
+    if (controlError) {
+      setTrialError(controlError);
+      return;
+    }
+    if (!trialPolicy) {
+      setTrialError("The server trial threshold policy is unavailable for this target.");
+      return;
+    }
     setTrialLoading(true);
     setTrialError("");
     try {
@@ -99,7 +126,7 @@ export function EvidenceLab({
         target_kind: parsed.kind,
         target_id: parsed.id,
         actor: owner,
-        protocol: trialProtocol(parsed, parseBoundedInt(horizon, 21), owner, hypothesis),
+        protocol: trialProtocol(parsed, Number(horizon), Number(step), owner, hypothesis, trialPolicy.floors),
       });
       setTrial(response.trial);
     } catch (caught) {
@@ -107,7 +134,7 @@ export function EvidenceLab({
     } finally {
       setTrialLoading(false);
     }
-  }, [horizon, target]);
+  }, [controlError, horizon, step, target, trialPolicy]);
 
   const assessTrial = useCallback(async () => {
     if (!trial) return;
@@ -158,13 +185,14 @@ export function EvidenceLab({
         </div>
         <form className="toolbar" onSubmit={(event) => { event.preventDefault(); run(target); }}>
           <label>Target<TerminalSelect ariaLabel="Evidence Lab target" value={target} onChange={setTarget} options={targetOptions} disabled={targetOptions.length === 0} /></label>
-          <label>Horizon<input value={horizon} onChange={(event) => setHorizon(event.currentTarget.value)} inputMode="numeric" /></label>
-          <label>Train rows<input value={trainWindow} onChange={(event) => setTrainWindow(event.currentTarget.value)} inputMode="numeric" /></label>
-          <button type="submit" disabled={!selected || isLoading}>{isLoading ? "Running..." : "Run evidence"}</button>
+          <label>Horizon<input aria-label="Horizon" type="number" min={EVIDENCE_LIMITS.horizon.min} max={EVIDENCE_LIMITS.horizon.max} step="1" value={horizon} onChange={(event) => setHorizon(event.currentTarget.value)} aria-invalid={Boolean(horizonError)} aria-describedby={horizonError ? "evidence-horizon-error" : undefined} />{horizonError && <small id="evidence-horizon-error" className="field-error">{horizonError}</small>}</label>
+          <label>Train rows<input aria-label="Train rows" type="number" min={EVIDENCE_LIMITS.trainWindow.min} max={EVIDENCE_LIMITS.trainWindow.max} step="1" value={trainWindow} onChange={(event) => setTrainWindow(event.currentTarget.value)} aria-invalid={Boolean(trainWindowError)} aria-describedby={trainWindowError ? "evidence-train-error" : undefined} />{trainWindowError && <small id="evidence-train-error" className="field-error">{trainWindowError}</small>}</label>
+          <label>Step<input aria-label="Step" type="number" min={EVIDENCE_LIMITS.step.min} max={EVIDENCE_LIMITS.step.max} step="1" value={step} onChange={(event) => setStep(event.currentTarget.value)} aria-invalid={Boolean(stepError)} aria-describedby={stepError ? "evidence-step-error" : undefined} />{stepError && <small id="evidence-step-error" className="field-error">{stepError}</small>}</label>
+          <button type="submit" disabled={!selected || isLoading || Boolean(controlError)}>{isLoading ? "Running..." : "Run evidence"}</button>
         </form>
       </header>
 
-      {error && <div className="notice danger" role="alert">{error}</div>}
+      <RequestStatus failure={failure} stale={staleResult} onRetry={retry} />
       {isLoading && <div className="loading" role="status">Running walk-forward evidence windows...</div>}
       {targetOptions.length === 0 && (
         <Panel title="Evidence Lab Gate" meta="target required">
@@ -175,6 +203,7 @@ export function EvidenceLab({
       {selected && (
         <ProspectiveTrialPanel
           trial={trial}
+          policy={trialPolicy}
           loading={trialLoading}
           error={trialError}
           eligible={Boolean(payload && !payload.evidence_unavailable && payload.eligible_for_real_research)}
@@ -401,6 +430,7 @@ function ProspectiveValidationPanel({ payload }: { payload: EvidenceLabResponse 
 
 function ProspectiveTrialPanel({
   trial,
+  policy,
   loading,
   error,
   eligible,
@@ -409,6 +439,7 @@ function ProspectiveTrialPanel({
   onClose,
 }: {
   trial: ProspectiveTrial | null;
+  policy: TrialThresholdPolicy | null;
   loading: boolean;
   error: string;
   eligible: boolean;
@@ -429,10 +460,10 @@ function ProspectiveTrialPanel({
           <label>Owner<input value={owner} onChange={(event) => setOwner(event.currentTarget.value)} /></label>
           <label className="span-two">Preregistered hypothesis<textarea value={hypothesis} onChange={(event) => setHypothesis(event.currentTarget.value)} rows={2} /></label>
         </div>
-        <p className="muted">Protocol: 21-session horizon and step, SPY benchmark, 5-observation minimum, 90% familywise confidence, all three price regimes, full fee/spread/slippage/impact/tax/idle-cash stack, and $1B expected AUM capacity review.</p>
+        <p className="muted">Protocol: 21-session horizon and step, SPY benchmark, {policy ? `${policy.floors.min_observations}-observation minimum, ${policy.floors.confidence_level_pct}% familywise confidence, and ${policy.profile.replace(/_/g, " ")} non-overridable deployment floors` : "server policy required"}; all three price regimes; full fee/spread/slippage/impact/tax/idle-cash stack; and $1B expected AUM capacity review.</p>
         <button
           type="button"
-          disabled={!eligible || loading || owner.trim().length < 2 || hypothesis.trim().length < 12}
+          disabled={!eligible || !policy || loading || owner.trim().length < 2 || hypothesis.trim().length < 12}
           onClick={() => void onRegister(owner.trim(), hypothesis.trim())}
         >
           {loading ? "Registering..." : "Register immutable trial"}
@@ -503,14 +534,16 @@ function ImplementationLayer({ title, layer }: { title: string; layer: Prospecti
 function trialProtocol(
   target: { kind: TargetKind; id: string },
   horizonDays: number,
+  stepDays: number,
   owner: string,
   hypothesis: string,
+  thresholdFloors: TrialProtocol["success_thresholds"],
 ): TrialProtocol {
   return {
     hypothesis,
     primary_metric: "net_directional_alpha_pct",
     horizon_days: horizonDays,
-    step_days: horizonDays,
+    step_days: stepDays,
     benchmark: "SPY",
     cost_assumptions: {
       commission_bps_per_side: 1,
@@ -520,13 +553,7 @@ function trialProtocol(
       tax_drag_bps: 5,
       idle_cash_pct: 2,
     },
-    success_thresholds: {
-      min_observations: 5,
-      min_hit_rate_pct: 50,
-      min_net_alpha_pct: 0,
-      max_false_positive_rate_pct: 50,
-      confidence_level_pct: 90,
-    },
+    success_thresholds: { ...thresholdFloors },
     regimes: ["risk_on", "neutral", "risk_off"],
     owner,
     allowed_sources: ["live", "upload"],
@@ -560,9 +587,14 @@ function parseTarget(target: string): { kind: TargetKind; id: string } | null {
   return null;
 }
 
-function parseBoundedInt(value: string, fallback: number) {
-  const parsed = Number.parseInt(value, 10);
-  return Number.isFinite(parsed) ? parsed : fallback;
+function integerInputError(value: string, limits: { min: number; max: number; label: string }) {
+  if (!value.trim()) return `${limits.label} is required.`;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed)) return `${limits.label} must be a whole number.`;
+  if (parsed < limits.min || parsed > limits.max) {
+    return `${limits.label} must be between ${limits.min} and ${limits.max}.`;
+  }
+  return "";
 }
 
 function toneForSigned(value: unknown) {

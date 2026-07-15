@@ -224,15 +224,38 @@ def test_provider_disagreement_warns_never_blocks():
     assert fundamentals._reconcile([("fmp", {"trailing_pe": 14.0})]) == []
 
 
-def test_delete_account_removes_all_ledger_rows(store):
+def test_archive_account_retains_all_ledger_rows_and_blocks_new_imports(store):
     ledger.import_fills(_fills_csv(["2026-06-01,JPM,BUY,10,200.00,1.00,"]), "ACC-DEL")
     store.record_account_snapshot({"account_id": "ACC-DEL", "as_of": "2026-06-30",
                                    "cash": 0.0, "total_value": 2000.0})
-    result = store.delete_ledger_account("ACC-DEL")
-    assert result["deleted"] is True and result["fills_removed"] == 1
-    assert store.fills("ACC-DEL") == []
-    assert store.account_snapshots("ACC-DEL") == []
+    result = store.archive_ledger_account(
+        "ACC-DEL", reason="Bad source import must be retired.", actor="Operations",
+    )
+    assert result["archived"] is True
+    assert result["deleted"] is False
+    assert result["preserved"]["fills"] == 1
+    assert len(store.fills("ACC-DEL")) == 1
+    assert len(store.account_snapshots("ACC-DEL")) == 1
     assert all(a["account_id"] != "ACC-DEL" for a in store.ledger_accounts())
+    archived = next(a for a in store.ledger_accounts(include_archived=True) if a["account_id"] == "ACC-DEL")
+    assert archived["status"] == "archived"
+    assert archived["archive_reason"] == "Bad source import must be retired."
+    with pytest.raises(ValueError, match="archived and immutable"):
+        ledger.import_fills(_fills_csv(["2026-06-02,JPM,BUY,1,201.00,0.00,"]), "ACC-DEL")
+    with pytest.raises(ValueError, match="archived and immutable"):
+        store.record_account_snapshot(
+            {"account_id": "ACC-DEL", "as_of": "2026-07-31", "cash": 0.0, "total_value": 2100.0},
+            positions=[{"ticker": "JPM", "shares": 10, "price": 210, "market_value": 2100}],
+        )
+
+
+def test_delete_alias_never_destroys_ledger_evidence(store):
+    ledger.import_fills(_fills_csv(["2026-06-01,JPM,BUY,10,200.00,1.00,"]), "ACC-KEEP")
+
+    refused = store.delete_ledger_account("ACC-KEEP")
+
+    assert refused["deleted"] is False
+    assert len(store.fills("ACC-KEEP")) == 1
 
 
 # --------------------------------------------------------------------------- #

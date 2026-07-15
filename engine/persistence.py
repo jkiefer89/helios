@@ -7,6 +7,7 @@ belong here.
 from __future__ import annotations
 
 import atexit
+import hashlib
 import json
 import os
 import re
@@ -22,13 +23,15 @@ from typing import Any
 
 import pandas as pd
 
+from . import tenancy
+
 try:
     from cryptography.fernet import Fernet, InvalidToken
 except Exception:  # pragma: no cover - exercised when dependency install is broken.
     Fernet = None
     InvalidToken = Exception
 
-SCHEMA_VERSION = 13  # 13: institutional provider, security, incident, and validation controls
+SCHEMA_VERSION = 14  # 14: immutable ledger retirement and workspace identity controls
 REAL_SOURCES = {"live", "upload"}
 DISABLED_VALUES = {"", "0", "false", "off", "disabled", "none"}
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[1] / ".helios" / "helios.db"
@@ -111,10 +114,29 @@ def safe_filename(filename: str | None) -> str:
 class _FieldCipher:
     """Encrypt/decrypt the local SQLite snapshot and legacy encrypted fields."""
 
-    def __init__(self, key: str, *, key_source: str, required: bool, mode: str):
+    def __init__(
+        self,
+        key: str,
+        *,
+        key_source: str,
+        required: bool,
+        mode: str,
+        previous_keys: list[str] | None = None,
+    ):
         if Fernet is None:
             raise RuntimeError("database encryption requires the cryptography package")
         self._fernet = Fernet(key.encode("utf-8"))
+        self._decrypt_fernets = [self._fernet]
+        for previous in previous_keys or []:
+            self._decrypt_fernets.append(Fernet(previous.encode("utf-8")))
+        key_id = (os.environ.get("HELIOS_DB_ENCRYPTION_KEY_ID") or "").strip()
+        if not key_id:
+            key_id = "sha256:" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
+        key_version = (os.environ.get("HELIOS_DB_ENCRYPTION_KEY_VERSION") or "1").strip()[:32]
+        custody_mode = (os.environ.get("HELIOS_DB_KEY_CUSTODY_MODE") or key_source).strip().lower()[:48]
+        custody_attested = (os.environ.get("HELIOS_DB_KEY_CUSTODY_ATTESTED") or "0").strip().lower() in {
+            "1", "true", "yes", "on",
+        }
         self.status = {
             "enabled": True,
             "required": bool(required),
@@ -123,6 +145,14 @@ class _FieldCipher:
             "algorithm": "fernet",
             "at_rest_format": "fernet-sqlite-snapshot",
             "plaintext_lookup_keys": [],
+            "key_id": redact_secrets(key_id)[:80],
+            "key_version": redact_secrets(key_version),
+            "custody_mode": redact_secrets(custody_mode),
+            "custody_attested": custody_attested,
+            "external_custody": custody_mode in {"kms", "hsm", "kms_hsm", "vault", "external"},
+            "rotation_configured": bool(previous_keys),
+            "recovery_key_count": len(previous_keys or []),
+            "recovery_key_used": False,
         }
 
     def encrypt(self, value: Any) -> Any:
@@ -138,19 +168,29 @@ class _FieldCipher:
         if not isinstance(value, str) or not value.startswith(ENCRYPTED_PREFIX):
             return value
         token = value[len(ENCRYPTED_PREFIX):].encode("ascii")
-        try:
-            return self._fernet.decrypt(token).decode("utf-8")
-        except InvalidToken as exc:
-            raise RuntimeError("encrypted database value could not be decrypted with the configured key") from exc
+        for index, cipher in enumerate(self._decrypt_fernets):
+            try:
+                result = cipher.decrypt(token).decode("utf-8")
+                if index:
+                    self.status["recovery_key_used"] = True
+                return result
+            except InvalidToken:
+                continue
+        raise RuntimeError("encrypted database value could not be decrypted with the configured active or recovery keys")
 
     def encrypt_bytes(self, value: bytes) -> bytes:
         return self._fernet.encrypt(value)
 
     def decrypt_bytes(self, value: bytes) -> bytes:
-        try:
-            return self._fernet.decrypt(value)
-        except InvalidToken as exc:
-            raise RuntimeError("encrypted SQLite persistence file could not be decrypted with the configured key") from exc
+        for index, cipher in enumerate(self._decrypt_fernets):
+            try:
+                result = cipher.decrypt(value)
+                if index:
+                    self.status["recovery_key_used"] = True
+                return result
+            except InvalidToken:
+                continue
+        raise RuntimeError("encrypted SQLite persistence file could not be decrypted with the configured active or recovery keys")
 
 
 def _disabled_encryption_status(mode: str = "off", required: bool = False, warning: str = "") -> dict[str, Any]:
@@ -162,6 +202,14 @@ def _disabled_encryption_status(mode: str = "off", required: bool = False, warni
         "algorithm": "",
         "at_rest_format": "sqlite",
         "plaintext_lookup_keys": [],
+        "key_id": "",
+        "key_version": "",
+        "custody_mode": "",
+        "custody_attested": False,
+        "external_custody": False,
+        "rotation_configured": False,
+        "recovery_key_count": 0,
+        "recovery_key_used": False,
         "warning": warning,
     }
 
@@ -308,10 +356,15 @@ def _configured_cipher(path: Path | None) -> tuple[_FieldCipher | None, dict[str
         warning = "SQLite persistence encryption requires the cryptography package."
         return None, _disabled_encryption_status(mode=mode, required=required, warning=warning), warning
 
+    raw_previous = (os.environ.get("HELIOS_DB_ENCRYPTION_PREVIOUS_KEYS") or "").strip()
+    previous_keys = [part.strip() for part in raw_previous.split(",") if part.strip()]
     raw_key = (os.environ.get("HELIOS_DB_ENCRYPTION_KEY") or "").strip()
     if raw_key:
         try:
-            cipher = _FieldCipher(raw_key, key_source="environment", required=required, mode=mode)
+            cipher = _FieldCipher(
+                raw_key, key_source="environment", required=required, mode=mode,
+                previous_keys=previous_keys,
+            )
             return cipher, cipher.status, ""
         except Exception as exc:
             # An explicitly configured key that cannot be used is fatal in every
@@ -332,7 +385,10 @@ def _configured_cipher(path: Path | None) -> tuple[_FieldCipher | None, dict[str
         if key_path.is_file():
             try:
                 key = key_path.read_text(encoding="utf-8").strip()
-                cipher = _FieldCipher(key, key_source="local_key_file", required=required, mode=mode)
+                cipher = _FieldCipher(
+                    key, key_source="local_key_file", required=required, mode=mode,
+                    previous_keys=previous_keys,
+                )
             except Exception as exc:
                 # An existing key file that cannot be read or parsed is fatal in
                 # every mode — never silently fall back to a plaintext database.
@@ -353,7 +409,10 @@ def _configured_cipher(path: Path | None) -> tuple[_FieldCipher | None, dict[str
             except Exception:
                 pass
             key_source = "generated_local_key_file"
-        cipher = _FieldCipher(key, key_source=key_source, required=required, mode=mode)
+        cipher = _FieldCipher(
+            key, key_source=key_source, required=required, mode=mode,
+            previous_keys=previous_keys,
+        )
         return cipher, cipher.status, ""
     except Exception as exc:
         warning = f"SQLite persistence encryption unavailable: {exc}"
@@ -381,6 +440,7 @@ class SQLiteStore:
         self.disabled = disabled
         self.available = False
         self.warning = ""
+        self.scope_mismatch = False
         self._cipher, self.encryption, encryption_warning = _configured_cipher(path)
         self._conn_lock = threading.RLock()
         self._transaction_local = threading.local()
@@ -413,18 +473,19 @@ class SQLiteStore:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             if self._cipher:
-                self._backup_existing_snapshot()
                 self._ensure_encrypted_snapshot()
             else:
                 if self.path.is_file() and self.path.read_bytes()[:len(ENCRYPTED_DB_MAGIC)] == ENCRYPTED_DB_MAGIC:
                     raise RuntimeError("encrypted SQLite persistence requires encryption to be enabled with the configured key")
                 with self._connect() as conn:
                     _preflight_schema_version(conn)
+                    _preflight_workspace_identity(conn)
                     _create_schema(conn)
                     _check_schema_version(conn)
             self.available = True
             self.warning = ""
         except Exception as exc:
+            self.scope_mismatch = isinstance(exc, tenancy.ScopeMismatchError)
             self.available = False
             self.warning = f"SQLite persistence unavailable: {exc}"
 
@@ -455,6 +516,11 @@ class SQLiteStore:
         self._memory_conn = conn
         with self._connect() as active:
             _preflight_schema_version(active)
+            _preflight_workspace_identity(active)
+            # Back up only after the loaded snapshot is proven to belong to
+            # this tenant/client scope. A mismatched process must not rotate
+            # or create artifacts beside another client's database.
+            self._backup_existing_snapshot()
             _create_schema(active)
             # Fail closed on a newer-schema database before touching its rows
             # or rewriting the on-disk snapshot.
@@ -807,11 +873,17 @@ class SQLiteStore:
             )
 
     def status(self) -> dict[str, Any]:
+        try:
+            scope = tenancy.configured_scope().public()
+        except ValueError as exc:
+            scope = {"error": str(exc), "boundary": "single_tenant_client_database"}
         status = {
             "configured": self.configured and not self.disabled,
             "available": self.available,
             "path": str(self.path) if self.path else "",
             "warning": self.warning,
+            "scope": scope,
+            "scope_mismatch": self.scope_mismatch,
             "schema_version": SCHEMA_VERSION if self.available else None,
             "encryption": dict(self.encryption),
             "backups": self.backup_status(),
@@ -1727,6 +1799,8 @@ class SQLiteStore:
         """Idempotent fill import: the dedupe key makes CSV re-imports no-ops."""
         if not self.available:
             return {"inserted": 0, "duplicates": 0, "warning": self.warning}
+        for account_id in {str(fill.get("account_id") or "") for fill in fills}:
+            self._require_active_ledger_account(account_id)
         inserted = duplicates = 0
         try:
             with self.transaction(durable=True) as conn:
@@ -1813,6 +1887,7 @@ class SQLiteStore:
                                 positions: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         if not self.available:
             return {"recorded": False, "warning": self.warning}
+        self._require_active_ledger_account(str(snapshot.get("account_id") or ""))
         try:
             account_id = redact_secrets(str(snapshot["account_id"]))[:64]
             as_of = str(snapshot["as_of"])[:10]
@@ -2491,10 +2566,28 @@ class SQLiteStore:
         except Exception as exc:
             return {"status": "error", "warning": str(exc)}
 
+    def _require_active_ledger_account(self, account_id: str) -> None:
+        clean_id = redact_secrets(str(account_id))[:64]
+        if not clean_id or not self.available:
+            return
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT status FROM ledger_accounts WHERE account_id = ?", (clean_id,),
+            ).fetchone()
+        if row is not None and str(row["status"] or "active") != "active":
+            raise ValueError(
+                f"Ledger account '{clean_id}' is archived and immutable. "
+                "Create a new account identifier for new imports or mappings."
+            )
+
     def upsert_ledger_account(self, account_id: str, display_name: str = "",
                               model_id: str = "") -> None:
         if not self.available:
             return
+        clean_id = redact_secrets(str(account_id))[:64]
+        if not clean_id:
+            raise ValueError("account_id is required.")
+        self._require_active_ledger_account(clean_id)
         try:
             with self._connect() as conn:
                 conn.execute(
@@ -2509,50 +2602,101 @@ class SQLiteStore:
                                       THEN excluded.model_id
                                       ELSE ledger_accounts.model_id END
                     """,
-                    (redact_secrets(str(account_id))[:64],
+                    (clean_id,
                      self._store_text(str(display_name)[:80]),
                      str(model_id)[:64], utc_now()),
                 )
         except Exception as exc:
             self.warning = f"Could not upsert ledger account: {exc}"
 
-    def ledger_accounts(self) -> list[dict[str, Any]]:
+    def ledger_accounts(self, *, include_archived: bool = False) -> list[dict[str, Any]]:
         if not self.available:
             return []
         try:
             with self._connect() as conn:
-                rows = conn.execute(
-                    "SELECT * FROM ledger_accounts ORDER BY account_id ASC").fetchall()
+                query = "SELECT * FROM ledger_accounts"
+                if not include_archived:
+                    query += " WHERE status = 'active'"
+                query += " ORDER BY account_id ASC"
+                rows = conn.execute(query).fetchall()
                 return [{
                     "account_id": row["account_id"],
                     "display_name": self._load_text(row["display_name"]),
                     "model_id": row["model_id"],
                     "created_at": row["created_at"],
+                    "status": row["status"],
+                    "archived_at": row["archived_at"],
+                    "archive_reason": self._load_text(row["archive_reason"]),
+                    "archived_by": row["archived_by"],
                 } for row in rows]
         except Exception:
             return []
 
-    def delete_ledger_account(self, account_id: str) -> dict[str, Any]:
-        """Remove an account and ALL its ledger rows (undo for a bad import)."""
+    def archive_ledger_account(self, account_id: str, *, reason: str, actor: str) -> dict[str, Any]:
+        """Retire an account while retaining every ledger fact and revision."""
         if not self.available:
-            return {"deleted": False, "warning": self.warning}
+            return {"archived": False, "deleted": False, "warning": self.warning}
+        clean_id = redact_secrets(str(account_id))[:64]
+        clean_reason = redact_secrets(str(reason)).strip()[:500]
+        clean_actor = redact_secrets(str(actor or "local-operator"))[:120]
+        if not clean_id:
+            raise ValueError("account_id is required.")
+        if len(clean_reason) < 8:
+            raise ValueError("An archive reason of at least 8 characters is required.")
         try:
-            with self._connect() as conn:
-                fills = conn.execute("DELETE FROM trade_fills WHERE account_id = ?", (account_id,)).rowcount
-                snaps = conn.execute("DELETE FROM account_snapshots WHERE account_id = ?", (account_id,)).rowcount
-                conn.execute("DELETE FROM account_positions WHERE account_id = ?", (account_id,))
-                revision_ids = [row["snapshot_id"] for row in conn.execute(
-                    "SELECT snapshot_id FROM account_snapshot_revisions WHERE account_id = ?",
-                    (account_id,),
-                ).fetchall()]
-                for snapshot_id in revision_ids:
-                    conn.execute("DELETE FROM account_position_revisions WHERE snapshot_id = ?", (snapshot_id,))
-                conn.execute("DELETE FROM account_snapshot_revisions WHERE account_id = ?", (account_id,))
-                conn.execute("DELETE FROM ledger_accounts WHERE account_id = ?", (account_id,))
-            return {"deleted": True, "fills_removed": fills, "snapshots_removed": snaps}
+            with self.transaction(durable=True) as conn:
+                row = conn.execute(
+                    "SELECT * FROM ledger_accounts WHERE account_id = ?", (clean_id,),
+                ).fetchone()
+                if row is None:
+                    return {"archived": False, "deleted": False, "status_code": 404, "warning": "Unknown ledger account."}
+                counts = {
+                    "fills": int(conn.execute(
+                        "SELECT COUNT(*) FROM trade_fills WHERE account_id = ?", (clean_id,),
+                    ).fetchone()[0]),
+                    "snapshots": int(conn.execute(
+                        "SELECT COUNT(*) FROM account_snapshots WHERE account_id = ?", (clean_id,),
+                    ).fetchone()[0]),
+                    "snapshot_revisions": int(conn.execute(
+                        "SELECT COUNT(*) FROM account_snapshot_revisions WHERE account_id = ?", (clean_id,),
+                    ).fetchone()[0]),
+                }
+                if str(row["status"] or "active") == "archived":
+                    return {
+                        "archived": True, "deleted": False, "already_archived": True,
+                        "account_id": clean_id, "preserved": counts,
+                    }
+                archived_at = utc_now()
+                conn.execute(
+                    "UPDATE ledger_accounts SET status = 'archived', archived_at = ?, "
+                    "archive_reason = ?, archived_by = ? WHERE account_id = ?",
+                    (archived_at, self._store_text(clean_reason), clean_actor, clean_id),
+                )
+                self.audit_append(
+                    "ledger.account_archived",
+                    {"account_id": clean_id, "reason": clean_reason, "preserved": counts},
+                    actor=clean_actor,
+                    required=True,
+                )
+            return {
+                "archived": True, "deleted": False, "already_archived": False,
+                "account_id": clean_id, "archived_at": archived_at,
+                "preserved": counts,
+                "retention": "immutable_local_ledger_evidence",
+            }
         except Exception as exc:
-            self.warning = f"Could not delete ledger account: {exc}"
-            return {"deleted": False, "warning": str(exc)}
+            self.warning = f"Could not archive ledger account: {exc}"
+            return {"archived": False, "deleted": False, "warning": str(exc)}
+
+    def delete_ledger_account(self, account_id: str, *, reason: str = "", actor: str = "") -> dict[str, Any]:
+        """Compatibility alias; destructive ledger deletion is intentionally unavailable."""
+        if not reason:
+            return {
+                "archived": False,
+                "deleted": False,
+                "warning": "Destructive deletion is disabled; provide a reason to archive the account.",
+            }
+        return self.archive_ledger_account(account_id, reason=reason, actor=actor)
 
     # ------------------------------------------------------------------ #
     # Point-in-time fundamentals: what Helios KNEW on each date
@@ -2775,6 +2919,17 @@ def _create_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS workspace_identity (
+          singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+          tenant_id TEXT NOT NULL,
+          client_id TEXT NOT NULL,
+          scope_hash TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS instruments (
           symbol TEXT PRIMARY KEY,
           display_name TEXT NOT NULL,
@@ -2986,7 +3141,11 @@ def _create_schema(conn: sqlite3.Connection) -> None:
           display_name TEXT NOT NULL DEFAULT '',
           model_id TEXT NOT NULL DEFAULT '',
           created_at TEXT NOT NULL,
-          metadata_json TEXT NOT NULL DEFAULT '{}'
+          metadata_json TEXT NOT NULL DEFAULT '{}',
+          status TEXT NOT NULL DEFAULT 'active',
+          archived_at TEXT NOT NULL DEFAULT '',
+          archive_reason TEXT NOT NULL DEFAULT '',
+          archived_by TEXT NOT NULL DEFAULT ''
         )
         """
     )
@@ -3381,6 +3540,11 @@ def _create_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "decision_journal", "trial_id", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(conn, "evidence_snapshots", "envelope_hash", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(conn, "audit_chain", "chain_version", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(conn, "ledger_accounts", "status", "TEXT NOT NULL DEFAULT 'active'")
+    _ensure_column(conn, "ledger_accounts", "archived_at", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "ledger_accounts", "archive_reason", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "ledger_accounts", "archived_by", "TEXT NOT NULL DEFAULT ''")
+    _ensure_workspace_identity(conn)
     _backfill_evidence_envelope_hashes(conn)
     conn.execute(
         "INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES (?, ?)",
@@ -3425,10 +3589,45 @@ def _preflight_schema_version(conn: sqlite3.Connection) -> None:
         )
 
 
+def _preflight_workspace_identity(conn: sqlite3.Connection) -> None:
+    """Validate scope before any schema creation, migration, or backfill."""
+    tables = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+    }
+    if not tables:
+        return
+    if "workspace_identity" in tables:
+        row = conn.execute(
+            "SELECT tenant_id, client_id, scope_hash FROM workspace_identity WHERE singleton = 1"
+        ).fetchone()
+        if row is not None:
+            tenancy.assert_database_scope(row["tenant_id"], row["client_id"], row["scope_hash"])
+            return
+    tenancy.assert_legacy_scope_adoption_allowed()
+
+
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
     columns = {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
     if column not in columns:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _ensure_workspace_identity(conn: sqlite3.Connection) -> None:
+    row = conn.execute(
+        "SELECT tenant_id, client_id, scope_hash FROM workspace_identity WHERE singleton = 1"
+    ).fetchone()
+    if row is None:
+        scope = tenancy.assert_new_database_scope_configured()
+        conn.execute(
+            "INSERT INTO workspace_identity(singleton, tenant_id, client_id, scope_hash, created_at) "
+            "VALUES (1, ?, ?, ?, ?)",
+            (scope.tenant_id, scope.client_id, scope.scope_hash, utc_now()),
+        )
+        return
+    tenancy.assert_database_scope(row["tenant_id"], row["client_id"], row["scope_hash"])
 
 
 def _backfill_evidence_envelope_hashes(conn: sqlite3.Connection) -> None:

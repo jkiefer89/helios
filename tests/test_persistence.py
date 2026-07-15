@@ -6,6 +6,7 @@ from io import BytesIO
 
 import pandas as pd
 import pytest
+from cryptography.fernet import Fernet
 
 import app as helios
 from engine import data, evidence, persistence, portfolio
@@ -221,6 +222,11 @@ def test_refresh_endpoint_fails_gracefully_without_live_provider(monkeypatch, tm
     assert body["failed"] == 1
     assert body["results"][0]["status"] == "error"
     assert "unavailable" in body["results"][0]["message"].lower()
+    assert body["results"][0]["reason_code"] == "provider_unavailable"
+    assert body["results"][0]["retryable"] is False
+    assert body["results"][0]["stale_result_preserved"] is True
+    assert "approved live price provider" in body["results"][0]["next_step"]
+    assert body["data_status"]["refresh_log"][0]["reason_code"] == "provider_unavailable"
 
 
 def test_refresh_endpoint_uses_mocked_live_fetch_without_network(monkeypatch, tmp_path):
@@ -243,6 +249,52 @@ def test_refresh_endpoint_uses_mocked_live_fetch_without_network(monkeypatch, tm
     assert body["refreshed"] == 1
     assert body["results"][0]["rows_added"] == 5
     assert body["data_status"]["last_refresh"]["status"] == "ok"
+
+
+def test_refresh_all_preserves_reason_codes_for_mixed_batch_results(monkeypatch, tmp_path):
+    _use_db(monkeypatch, tmp_path)
+    monkeypatch.setenv("HELIOS_LIVE_REFRESH_WORKERS", "1")
+    for symbol in ("BATCHOK", "BATCHFAIL", "BATCHSKIP"):
+        instrument = data.Instrument(symbol, symbol, _ohlcv(days=90), "live", [])
+        data.register(instrument)
+        data._persist_instrument(instrument, adjusted=True)
+
+    def fake_refresh(symbol, refresh_journal=False):
+        assert refresh_journal is False
+        if symbol == "BATCHOK":
+            return {"symbol": symbol, "status": "ok", "rows_added": 1}
+        if symbol == "BATCHFAIL":
+            return {
+                "symbol": symbol, "status": "error", "message": "Provider timed out.",
+                "reason_code": "provider_timeout", "retryable": True,
+                "next_step": "Retry after the provider recovers.",
+                "stale_result_preserved": True,
+            }
+        return {
+            "symbol": symbol, "status": "skipped", "message": "No newer bar.",
+            "reason_code": "already_current", "retryable": False,
+            "next_step": "Wait for the next market bar.",
+            "stale_result_preserved": True,
+        }
+
+    monkeypatch.setattr(data, "refresh_live_symbol", fake_refresh)
+    monkeypatch.setattr(data, "_refresh_signal_journal_forward_results", lambda: None)
+
+    response = _client().post("/api/data/refresh", json={"all": True})
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert (body["refreshed"], body["failed"], body["skipped"]) == (1, 1, 1)
+    by_symbol = {row["symbol"]: row for row in body["results"]}
+    assert by_symbol["BATCHFAIL"]["reason_code"] == "provider_timeout"
+    assert by_symbol["BATCHFAIL"]["retryable"] is True
+    assert by_symbol["BATCHFAIL"]["stale_result_preserved"] is True
+    assert by_symbol["BATCHFAIL"]["next_step"] == "Retry after the provider recovers."
+    assert by_symbol["BATCHSKIP"]["reason_code"] == "already_current"
+    assert by_symbol["BATCHSKIP"]["retryable"] is False
+    assert by_symbol["BATCHSKIP"]["stale_result_preserved"] is True
+    assert by_symbol["BATCHSKIP"]["next_step"] == "Wait for the next market bar."
+    assert body["warnings"]
 
 
 def test_auto_live_bootstrap_fetches_and_persists_live_symbols(monkeypatch, tmp_path):
@@ -558,6 +610,47 @@ def test_required_encryption_without_key_fails_closed(monkeypatch, tmp_path):
     assert store.available is False
     assert "encryption" in store.warning.lower()
     assert store.status()["encryption"]["required"] is True
+
+
+def test_encryption_key_rotation_reads_previous_key_and_rewrites_with_active_key(monkeypatch, tmp_path):
+    old_key = Fernet.generate_key().decode("ascii")
+    new_key = Fernet.generate_key().decode("ascii")
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION", "required")
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION_KEY", old_key)
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION_KEY_ID", "key-old")
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION_KEY_VERSION", "1")
+    store = _use_db(monkeypatch, tmp_path)
+    store.audit_append("rotation.seed", {"status": "old-key"}, required=True)
+    store.flush(force=True)
+    persistence.reset_store_for_tests()
+
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION_KEY", new_key)
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION_PREVIOUS_KEYS", old_key)
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION_KEY_ID", "key-new")
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION_KEY_VERSION", "2")
+    monkeypatch.setenv("HELIOS_DB_KEY_CUSTODY_MODE", "kms_hsm")
+    monkeypatch.setenv("HELIOS_DB_KEY_CUSTODY_ATTESTED", "1")
+    rotated = persistence.get_store()
+
+    status = rotated.status()["encryption"]
+    assert rotated.available is True
+    assert status["key_id"] == "key-new"
+    assert status["key_version"] == "2"
+    assert status["rotation_configured"] is True
+    assert status["recovery_key_count"] == 1
+    assert status["recovery_key_used"] is True
+    assert status["external_custody"] is True
+    assert status["custody_attested"] is True
+    assert old_key not in str(status)
+    assert new_key not in str(status)
+
+    rotated.audit_append("rotation.complete", {"status": "new-key"}, required=True)
+    rotated.flush(force=True)
+    persistence.reset_store_for_tests()
+    monkeypatch.delenv("HELIOS_DB_ENCRYPTION_PREVIOUS_KEYS")
+    reloaded = persistence.get_store()
+    assert reloaded.available is True
+    assert reloaded.audit_verify()["entries"] == 2
 
 
 def test_encrypted_database_does_not_load_as_plaintext(monkeypatch, tmp_path):

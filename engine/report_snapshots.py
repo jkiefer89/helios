@@ -12,7 +12,13 @@ from . import ai_copilot, data, portfolio, report_exports, reporting, signal_jou
 from .reporting import DISCLAIMER
 
 
-def report_for_snapshot(kind: str, target_id: str) -> dict:
+def report_for_snapshot(
+    kind: str,
+    target_id: str,
+    *,
+    aum_usd: float | None = None,
+    aum_as_of: str = "",
+) -> dict:
     """Build the fresh deterministic report a snapshot is taken from.
 
     Raises ValueError with a user-facing message on any invalid target.
@@ -29,7 +35,7 @@ def report_for_snapshot(kind: str, target_id: str) -> dict:
         mdl = portfolio.get(target_id)
         if mdl is None:
             raise ValueError("Unknown model.")
-        return reporting.model_report(mdl)
+        return reporting.model_report(mdl, aum_usd=aum_usd, aum_as_of=aum_as_of)
     raise ValueError("Report snapshot kind must be 'instrument' or 'model'.")
 
 
@@ -134,6 +140,7 @@ def resolve_narrative(
     *,
     provided_narrative: str,
     include_ai_narrative: bool | None,
+    cloud_confirmation: dict[str, Any] | None = None,
 ) -> tuple[str, dict]:
     """Resolve the snapshot narrative: provided text, generated text, or none.
 
@@ -164,13 +171,27 @@ def resolve_narrative(
     }
     if not status.get("available"):
         return "", {"status": "provider_unavailable", "provider": provider_meta}
+    # The report build timestamp changes between the disclosure response and
+    # the operator's confirmed retry. It is not research evidence; excluding
+    # it keeps the exact provider payload stable while the source dates,
+    # ranges, provenance, and calculations remain bound by the hash.
+    stable_report = {key: value for key, value in report.items() if key != "timestamp"}
+    transfer_payload = {
+        "report": stable_report,
+        "title": report.get("title"),
+        "preview_locked": not bool(report.get("eligible_for_real_research")),
+        "analysis_only_disclaimer": DISCLAIMER,
+    }
     try:
-        result = provider.write_advisor_report({
-            "report": report,
-            "title": report.get("title"),
-            "preview_locked": not bool(report.get("eligible_for_real_research")),
-            "analysis_only_disclaimer": DISCLAIMER,
-        }, regenerate=True)
+        safe_payload, transfer = ai_copilot.prepare_provider_transfer(
+            provider,
+            transfer_payload,
+            task="report_narrative",
+            confirmation=cloud_confirmation,
+        )
+        result = provider.write_advisor_report(safe_payload, regenerate=True)
+    except ai_copilot.CloudConfirmationRequired:
+        raise
     except ai_copilot.AIError as exc:
         safe_status = exc.status or status
         return "", {
@@ -186,6 +207,7 @@ def resolve_narrative(
         "provider": result.get("provider") or provider_meta["provider"],
         "model": result.get("model") or provider_meta["model"],
         "needs_review": bool(result.get("needs_review", True)),
+        "cloud_transfer": transfer,
     })
     return report_exports.ai_result_to_narrative(result), {
         "status": "generated",

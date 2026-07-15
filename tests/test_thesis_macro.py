@@ -112,7 +112,7 @@ def test_playbook_loads_into_prompts(monkeypatch, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# Model thesis: persisted, surfaced, and deterministically checked
+# Model thesis: sanitized, surfaced, and deterministically checked
 # --------------------------------------------------------------------------- #
 def test_thesis_roundtrip_and_income_bucket(monkeypatch, tmp_path):
     from engine import persistence

@@ -84,13 +84,27 @@ to disable that.
 | `HELIOS_AUTH` | `1` | `0` disables the password gate (localhost dev only) |
 | `HELIOS_INSTITUTIONAL_CONTROLS` | `1` | Fail closed on provider, deployment, approval, export, and validation controls |
 | `HELIOS_TRUSTED_HOSTS` | empty in code | Optional host allowlist; `.env.example` limits it to localhost |
-| `HELIOS_SSO_ENABLED` | `0` | Accept identity headers only from `HELIOS_TRUSTED_PROXY_IPS` |
+| `HELIOS_SSO_ENABLED` | `0` | Require signed enterprise assertions from `HELIOS_TRUSTED_PROXY_IPS` |
+| `HELIOS_SSO_ASSERTION_SECRET` | empty | Server/proxy HMAC secret (minimum 32 bytes); keep local and never expose to the browser |
+| `HELIOS_SSO_ISSUER` / `HELIOS_SSO_AUDIENCE` | empty / `helios` | Exact signed-assertion issuer and audience policy |
+| `HELIOS_SSO_MAX_TTL_SECONDS` | `300` | Maximum lifetime of a signed proxy identity assertion |
+| `HELIOS_SSO_ALLOW_BASIC_FALLBACK` | `0` | Explicitly allow Basic Auth alongside enabled SSO; disabled by default |
 | `HELIOS_REQUIRE_MFA` | `0` | Require an MFA-verified principal for privileged operations |
+| `HELIOS_REQUEST_TOKEN_SECONDS` | `1800` | Lifetime of the synchronizer token required on unsafe browser requests; institutional mode first issues a five-minute, session-bootstrap-only token, then session-bound tokens |
 | `HELIOS_RF` | `0.02` | Risk-free / CD benchmark rate used by mandates, projections, and Sharpe/Sortino metrics |
 | `HELIOS_DB_PATH` | `.helios/helios.db` | Local SQLite store for parsed live/uploaded data (`off` disables persistence) |
+| `HELIOS_TENANT_ID` / `HELIOS_CLIENT_ID` | `local-workspace` / `local-client` in non-institutional code paths; blank in `.env.example` | Single tenant/client scope permanently bound to this process and database; a new institutional database requires explicit non-default IDs |
+| `HELIOS_ALLOW_LEGACY_SCOPE_ADOPTION` | `0` | One-time opt-in required in institutional mode before assigning a pre-scope database to explicit tenant/client IDs |
 | `HELIOS_DB_ENCRYPTION` | `auto` | Encrypt sensitive local persistence payloads; use `required` to fail closed without a key |
 | `HELIOS_DB_ENCRYPTION_KEY` | empty | Optional Fernet key for persistence encryption; keep it local and never commit it |
 | `HELIOS_DB_ENCRYPTION_KEY_PATH` | `<HELIOS_DB_PATH dir>/helios.key` | Optional local key-file path when `HELIOS_DB_ENCRYPTION=auto` |
+| `HELIOS_DB_ENCRYPTION_KEY_ID` / `HELIOS_DB_ENCRYPTION_KEY_VERSION` | empty / `1` | Operator-managed custody identifier and active key version recorded without exposing key material |
+| `HELIOS_DB_ENCRYPTION_PREVIOUS_KEYS` | empty | Comma-separated decrypt-only Fernet recovery keys used during rotation; new writes always use the active key |
+| `HELIOS_DB_KEY_CUSTODY_MODE` / `HELIOS_DB_KEY_CUSTODY_ATTESTED` | `local_key_file` / `0` | Declared external KMS/HSM/vault custody mode and independent attestation state |
+| `HELIOS_OFFHOST_BACKUP_EXPORT_DIR` / `HELIOS_OFFHOST_BACKUP_ATTESTED` | empty / `0` | Operator-mounted destination for encrypted/checksummed backup exports and external custody attestation |
+| `HELIOS_AUDIT_EXPORT_PATH` / `HELIOS_AUDIT_EXPORT_REQUIRED` | empty / `0` in code (`1` in `.env.example`) | Append-only privileged-event export path; institutional readiness requires mandatory mode and a current audit-head checkpoint |
+| `HELIOS_WORM_SIEM_ATTESTED` | `0` | External assertion that the audit destination has immutable WORM/SIEM retention |
+| `HELIOS_RESTORE_RPO_HOURS` / `HELIOS_RESTORE_RTO_SECONDS` | `24` / `300` | Restore-drill recovery-point and recovery-time objectives |
 | `HELIOS_LOAD_DOTENV` | `1` | Load a repo-local `.env` at startup (`0` disables; exported shell vars always win) |
 | `HELIOS_AUTO_LIVE_SYMBOLS` | `core` (auto-disabled when `HELIOS_DB_PATH` is off) | Automatic live polling universe; use `off` to disable or provide tickers/presets |
 | `HELIOS_AUTO_LIVE_PERIOD` | `2y` | Provider history window fetched by automatic live polling |
@@ -116,8 +130,14 @@ HELIOS_USER=jkiefer HELIOS_PASSWORD='choose-a-strong-one' ./run.sh
   built-in Werkzeug TLS path. That server is for loopback development only.
 - **Reverse proxy / SSO:** keep Helios bound to `127.0.0.1`, keep its waitress port
   inaccessible to clients, configure exact trusted proxy IPs, and let a
-  user-managed proxy/IdP terminate trusted TLS and assert identity/MFA headers.
-  Helios does not provision an IdP or certificate authority.
+  user-managed proxy/IdP terminate trusted TLS and sign a short-lived
+  `X-Helios-Assertion`. Helios verifies its HMAC signature, issuer, audience,
+  time bounds, a process-local one-time assertion ID, roles, MFA claim, tenant,
+  and client. The trusted proxy must issue a unique ID for every assertion.
+  Assertion-backed sessions cannot outlive the assertion. Bare identity headers
+  are rejected. Institutional readiness additionally requires at least one exact
+  trusted proxy and disallows Basic fallback. Helios does not provision an IdP
+  or certificate authority.
 
 An empty installation contains no sample market universe, placeholder ranking,
 or generated research. Real research remains blocked until eligible retained
@@ -186,6 +206,28 @@ builds, screenshots, or test fixtures as real research evidence. The database
 path is controlled by `HELIOS_DB_PATH`; set `HELIOS_DB_PATH=off` for an
 ephemeral session.
 
+Each database is bound on first creation or schema migration to exactly one
+`HELIOS_TENANT_ID` and `HELIOS_CLIENT_ID`. A process configured for a different
+scope refuses to open that database. Helios does not provide shared-database
+multi-tenancy; deploy a separate process and `HELIOS_DB_PATH` per client. The
+same scope is carried by Basic Auth, signed SSO principals, sessions, security
+status, and privileged audit events.
+
+A brand-new institutional database does not accept the built-in
+`local-workspace` / `local-client` defaults. Set explicit, non-default tenant and
+client IDs before first startup. Non-institutional local use retains the defaults.
+
+An existing database created before workspace identity binding is never silently
+claimed in institutional mode. Set explicit tenant and client IDs, verify the
+database belongs to that scope, enable `HELIOS_ALLOW_LEGACY_SCOPE_ADOPTION=1`
+for one startup, and disable it again after the identity row is written. Scope
+mismatches are rejected before schema migration or backfill begins.
+
+Ledger account retirement is non-destructive. Retired accounts disappear from
+normal account lists and reject new imports or mappings, while fills, snapshots,
+positions, and revision history remain available for audit replay. Destructive
+per-account deletion is not exposed by the application.
+
 The default `.helios/` workspace layout is:
 
 ```
@@ -219,7 +261,15 @@ values, refresh logs, journal results, or metadata at rest. Keep the local key
 outside Git and protect/back it up like other client research secrets; without
 that key, the encrypted local research store cannot be opened.
 
-The React **Real Data Center** shows database availability, persisted
+The React **Data Setup** workspace is the first-class intake and remediation
+workflow. It combines approved live fetch, live-universe refresh, price-history
+upload, model import, persistence state, coverage, date ranges, and provider
+diagnostics in one route. Failed live operations return stable reason codes,
+retryability, a next step, and whether the last stored good result was retained;
+the UI preserves that result and offers a bounded retry rather than turning a
+provider outage into a false provenance lock.
+
+The embedded **Real Data Center** shows database availability, persisted
 instrument/model counts, date ranges, row counts, live-refresh status, model
 coverage, missing tickers, and copyable import templates. Refresh controls only
 refresh symbols already imported as `live`; uploaded CSVs are never silently
@@ -253,6 +303,14 @@ advisor leaves **Include AI narrative when available** enabled and a provider is
 configured, save can generate a sanitized report narrative at snapshot time.
 Provider failures do not block deterministic report saving, and every exported
 AI narrative remains marked for advisor review.
+
+Model reports intended for a client or investment committee require current AUM
+and an AUM as-of date. They also carry deterministic capacity facts and fail
+closed when any material holding is unsized or relies on a static liquidity
+proxy. External client/committee capacity must be based on observed live or
+uploaded market volume. Missing average-daily-volume data is never treated as
+unlimited liquidity: a material rebalance is blocked unless a governed liquidity
+override exists and remains visible in the evidence.
 
 For a no-upload live workflow, automatic polling defaults to the built-in
 `core` liquid advisor universe. To choose a different universe before startup:
@@ -317,6 +375,11 @@ authentication, MFA or trusted-proxy SSO, and trusted TLS. These checks gate
 approval and external-facing report export; the rest of the application remains
 available so an operator can remediate the blocker.
 
+Prospective trial registration applies versioned, non-overridable success floors
+for instruments and each model mandate. A completed legacy trial is checked
+again against the current deployment policy before it can satisfy the research
+gate; a historical completion flag alone cannot unlock a model.
+
 Decision-bearing artifacts use immutable evidence envelopes with source/provider,
 retrieval time, transformations, model and calculation versions, series hashes,
 date ranges, and row counts. The replay endpoint independently recalculates
@@ -337,6 +400,17 @@ no lookahead — and the lab is blocked entirely for ineligible data or
 histories shorter than the training window plus the longest horizon. A
 prospective-validation panel layers in same-target Signal Journal entries so
 historical walk-forward evidence and live paper tracking sit side by side.
+The UI and API accept only whole-number controls within the server contract: horizon
+5-252 sessions, training window 90-756 rows, and step 5-63 sessions. Invalid
+or out-of-range values are rejected rather than silently clamped; the UI shows
+them inline and cannot start a run or register a mismatched trial.
+
+Historical validation publishes three separate verdicts: **data valid**,
+**method valid**, and **edge supported**. A clean dataset or causal method does
+not become an edge claim. Edge support additionally requires the mandate's
+versioned economic floors for observations, hit rate, after-cost benchmark alpha,
+false positives, confidence, regime robustness, and capacity evidence. Only the
+edge-supported verdict can satisfy the historical ranking gate.
 
 ### Risk Analytics and governed risk packs
 
@@ -439,6 +513,16 @@ omitted, and holdings are omitted unless `HELIOS_AI_SEND_HOLDINGS=1`. Payloads
 prefer computed metrics, drivers, warnings, provenance, persistence metadata,
 source/date ranges, row counts, and analysis-only disclaimers. Blocked payloads
 must remain labeled as unavailable for research.
+
+Cloud providers add a second, explicit transfer boundary. Helios locally applies
+key-based, camelCase-aware, contextual-name, pattern-based, and payload-derived identifier DLP
+redaction. It calculates a disclosure hash over the final sanitized provider
+request, including provider, model, task, system instructions, and prompt or
+dialogue, then asks the advisor to confirm that fingerprint before the request
+is sent. A confirmation for a different payload, task, model, or provider is
+rejected. Local
+AI remains local-provider controlled and does not use the cloud confirmation
+path. Provider/model metadata can be returned; secrets cannot.
 
 Provider output is parsed into a fixed JSON schema and checked for unsupported
 numeric claims, prohibited assurance phrases, data-mode drift, and attempts to
@@ -636,7 +720,7 @@ engine/
 | `POST /api/providers/cutovers` | approve a current, reconciled, institutionally ready provider pair |
 | `GET /api/operations/status` | incidents, owners, backup state, encryption, and both audit chains |
 | `POST /api/operations/incidents/sync` | reconcile monitored conditions into the incident lifecycle |
-| `POST /api/operations/backup/verify` | isolated in-memory decrypt/restore plus integrity, schema and audit checks |
+| `POST /api/operations/backup/verify` | isolated restore of the latest off-host encrypted export plus manifest checksum, scope, schema, RPO/RTO, and both audit-chain checks |
 | `GET /api/security/status` | principal, roles, MFA, session, transport, and audit posture without secrets |
 | `POST/DELETE /api/auth/session` | create or revoke an expiring HttpOnly local session |
 | `GET /api/ai/status` | AI Copilot provider availability without exposing secrets |
@@ -711,16 +795,25 @@ reverse proxy.
 Going live on a network was reviewed adversarially; the following safeguards are
 built in:
 
-- **Authentication and authorization** — Basic Auth or a trusted-proxy SSO
+- **Authentication and authorization** — Basic Auth or a cryptographically
+  verified trusted-proxy SSO
   principal gates every route. Role permissions separate viewing, research,
   data operations, sponsorship, independent validation, approval, and admin.
-  MFA can be required for privileged actions. Auth, CSRF, and lockout
+  SSO assertions are short-lived and validated for signature, issuer, audience,
+  time, a process-local one-time ID, roles, MFA, and tenant/client scope;
+  unsigned identity headers fail closed. MFA can be required for privileged actions. Auth, CSRF, and lockout
   errors return the standard JSON error envelope on `/api/*` paths (plain
   text elsewhere so the browser login prompt still works).
 - **Brute-force throttle** — failed logins are counted per remote IP with a
   short per-attempt delay; ten failures trigger a 60-second lockout (HTTP 429).
 - **CSRF heuristic** — non-GET requests with cross-site browser fetch metadata
   (`Sec-Fetch-Site`/`Origin`) are rejected with 403 before any handler runs.
+- **Unsafe-request synchronizer** — every non-safe browser method also requires a
+  short-lived HMAC token bound to the authenticated principal, tenant/client, and
+  current session in institutional mode. The authenticated session-creation
+  endpoint is the bootstrap step; no principal-only institutional mutation token
+  is issued. The React client obtains the token from server security status and
+  refreshes it once after an expiry rejection.
 - **Trusted transport** — localhost is the default. Institutional mode refuses
   direct public/LAN binding. A production reverse proxy must terminate trusted
   TLS while Helios remains on loopback so its origin cannot be bypassed.
@@ -751,8 +844,17 @@ built in:
   canonical inputs, outputs, provenance, model/calculation versions, and series
   hashes. Supported artifacts are independently recalculated during replay;
   privileged operations and application audit events are hash-chained. Encrypted
-  backups are decrypted into an isolated in-memory SQLite connection for
-  integrity, schema, count, and audit-chain restore tests.
+  off-host exported backups and manifests are checksum-, scope-, schema-, and
+  audit-head verified, then decrypted into an isolated in-memory SQLite
+  connection for integrity, count, application-audit, and privileged-audit
+  restore tests. The live database is not used as the drill source.
+- **Custody and recovery evidence** — active and decrypt-only prior encryption
+  keys support explicit rotation; encrypted off-host snapshots carry checksums
+  and manifests; institutional readiness requires privileged events to append to
+  an operator-attested WORM/SIEM destination and requires the latest checkpoint
+  to match the current application and privileged audit heads; restore drills
+  measure configured RPO and RTO. Helios
+  records external custody/immutability attestations but cannot create them.
 
 **External controls still required:** contracts and entitlements for primary and
 backup data providers; a separately managed IdP/MFA and trusted reverse proxy;
