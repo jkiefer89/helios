@@ -5,7 +5,7 @@ from flask import Blueprint, request
 
 from engine import custodian, ledger, persistence, portfolio
 
-from .core import ANALYSIS_ONLY_DISCLAIMER, err, ok
+from .core import ANALYSIS_ONLY_DISCLAIMER, current_actor, err, ok
 
 bp = Blueprint("ledger", __name__)
 
@@ -59,7 +59,8 @@ def upload_positions():
 
 @bp.route("/api/ledger/accounts")
 def list_accounts():
-    return ok({"accounts": persistence.get_store().ledger_accounts()})
+    include_archived = str(request.args.get("include_archived") or "").lower() in {"1", "true", "yes"}
+    return ok({"accounts": persistence.get_store().ledger_accounts(include_archived=include_archived)})
 
 
 @bp.route("/api/ledger/account/map", methods=["POST"])
@@ -73,16 +74,31 @@ def map_account():
         return err("account_id is required.", 400)
     if model_id and portfolio.get(model_id) is None:
         return err(f"Unknown model '{model_id}'.", 404)
-    persistence.get_store().upsert_ledger_account(
-        account_id, display_name=str(body.get("display_name") or ""), model_id=model_id)
+    try:
+        persistence.get_store().upsert_ledger_account(
+            account_id, display_name=str(body.get("display_name") or ""), model_id=model_id)
+    except ValueError as exc:
+        return err(str(exc), 409)
     persistence.get_store().flush()
     return ok({"accounts": persistence.get_store().ledger_accounts()})
 
 
 @bp.route("/api/ledger/account/<account_id>", methods=["DELETE"])
 def delete_account(account_id: str):
-    """Undo for a bad import: removes the account and all its ledger rows."""
-    result = persistence.get_store().delete_ledger_account(str(account_id).strip())
+    """Retire an account without destroying its immutable ledger evidence."""
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return err("Request body must include an archive reason.", 400)
+    try:
+        result = persistence.get_store().archive_ledger_account(
+            str(account_id).strip(),
+            reason=str(body.get("reason") or ""),
+            actor=current_actor(),
+        )
+    except ValueError as exc:
+        return err(str(exc), 400)
+    if not result.get("archived"):
+        return err(result.get("warning") or "Could not archive ledger account.", int(result.get("status_code") or 503))
     persistence.get_store().flush()
     return ok(result)
 

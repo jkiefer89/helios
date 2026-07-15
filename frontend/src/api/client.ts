@@ -1,5 +1,6 @@
 import type {
   AIChatResponse,
+  CloudAIConfirmation,
   AIResponse,
   AIStatusResponse,
   DecisionEntry,
@@ -46,8 +47,61 @@ import type {
   SecurityStatusResponse,
 } from "./types";
 
-async function request<T>(url: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(url, options);
+export class ApiError extends Error {
+  status: number;
+  code: string;
+  details: Record<string, unknown>;
+
+  constructor(message: string, status: number, details: Record<string, unknown> = {}) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = typeof details.code === "string" ? details.code : "request_failed";
+    this.details = details;
+  }
+}
+
+type RequestProtection = { header: string; token: string; expires_at: number };
+let requestToken: RequestProtection | null = null;
+let requestTokenPromise: Promise<RequestProtection> | null = null;
+
+function isUnsafe(options?: RequestInit) {
+  const method = String(options?.method || "GET").toUpperCase();
+  return !["GET", "HEAD", "OPTIONS"].includes(method);
+}
+
+function isSessionBootstrap(url: string, options?: RequestInit) {
+  return url === "/api/auth/session" && String(options?.method || "GET").toUpperCase() === "POST";
+}
+
+async function unsafeRequestToken(): Promise<RequestProtection> {
+  if (requestToken && requestToken.expires_at > Math.floor(Date.now() / 1000) + 30) {
+    return requestToken;
+  }
+  if (!requestTokenPromise) {
+    requestTokenPromise = fetch("/api/security/status")
+      .then(async (response) => {
+        const body = await response.json().catch(() => null) as SecurityStatusResponse | null;
+        if (!response.ok || !body?.request_protection?.token) {
+          throw new ApiError("Unsafe-request protection is unavailable.", response.status, {});
+        }
+        requestToken = body.request_protection;
+        return requestToken;
+      })
+      .finally(() => { requestTokenPromise = null; });
+  }
+  return requestTokenPromise;
+}
+
+async function request<T>(url: string, options?: RequestInit, retriedToken = false): Promise<T> {
+  let requestOptions = options;
+  if (isUnsafe(options)) {
+    const protection = await unsafeRequestToken();
+    const headers = new Headers(options?.headers || {});
+    headers.set(protection!.header, protection!.token);
+    requestOptions = { ...options, headers };
+  }
+  const response = await fetch(url, requestOptions);
   const contentType = response.headers.get("content-type") || "";
   const payload = contentType.includes("application/json")
     ? await response.json().catch(() => null)
@@ -59,8 +113,21 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
       : typeof payload === "string" && payload.trim()
         ? payload.trim()
         : `Request failed (${response.status})`;
-    throw new Error(message);
+    const details = payload && typeof payload === "object"
+      ? payload as Record<string, unknown>
+      : {};
+    if (
+      response.status === 403
+      && details.code === "request_token_invalid"
+      && isUnsafe(options)
+      && !retriedToken
+    ) {
+      requestToken = null;
+      return request<T>(url, options, true);
+    }
+    throw new ApiError(message, response.status, details);
   }
+  if (isSessionBootstrap(url, options)) requestToken = null;
   return payload as T;
 }
 
@@ -155,7 +222,12 @@ export const api = {
     `/api/model/risk?id=${encodeURIComponent(id)}${aumUsd ? `&aum=${encodeURIComponent(String(aumUsd))}` : ""}`),
   reportInstrument: (symbol: string) =>
     request<ReportResponse>(`/api/report/instrument?ticker=${encodeURIComponent(symbol)}`),
-  reportModel: (id: string) => request<ReportResponse>(`/api/report/model?id=${encodeURIComponent(id)}`),
+  reportModel: (id: string, aumUsd?: number, aumAsOf?: string) => {
+    const query = new URLSearchParams({ id });
+    if (aumUsd) query.set("aum_usd", String(aumUsd));
+    if (aumAsOf) query.set("aum_as_of", aumAsOf);
+    return request<ReportResponse>(`/api/report/model?${query}`);
+  },
   reportSnapshots: () => request<ReportSnapshotHistoryResponse>("/api/report/snapshots"),
   saveReportSnapshot: (payload: ReportSnapshotSaveRequest) =>
     request<ReportSnapshotSaveResponse>("/api/report/snapshots", {
@@ -242,30 +314,30 @@ export const api = {
       body: JSON.stringify({ symbol }),
     }),
   aiStatus: () => request<AIStatusResponse>("/api/ai/status"),
-  aiOpportunityExplain: (payload: Record<string, unknown>, regenerate = false) =>
-    aiPost("/api/ai/opportunity/explain", payload, undefined, regenerate),
-  aiOpportunityCritique: (payload: Record<string, unknown>, regenerate = false) =>
-    aiPost("/api/ai/opportunity/critique", payload, undefined, regenerate),
-  aiStrategySummary: (payload: Record<string, unknown>, regenerate = false) =>
-    aiPost("/api/ai/strategy/summary", payload, undefined, regenerate),
-  aiClinicSummary: (payload: Record<string, unknown>, regenerate = false) =>
-    aiPost("/api/ai/clinic/summary", payload, undefined, regenerate),
-  aiReport: (payload: Record<string, unknown>, regenerate = false) =>
-    aiPost("/api/ai/report", payload, undefined, regenerate),
-  aiQuestion: (payload: Record<string, unknown>, question: string, regenerate = false) =>
-    aiPost("/api/ai/question", payload, question, regenerate),
-  aiChat: (messages: Array<{ role: "user" | "assistant"; content: string }>, payload: Record<string, unknown>) =>
+  aiOpportunityExplain: (payload: Record<string, unknown>, regenerate = false, confirmation?: CloudAIConfirmation) =>
+    aiPost("/api/ai/opportunity/explain", payload, undefined, regenerate, confirmation),
+  aiOpportunityCritique: (payload: Record<string, unknown>, regenerate = false, confirmation?: CloudAIConfirmation) =>
+    aiPost("/api/ai/opportunity/critique", payload, undefined, regenerate, confirmation),
+  aiStrategySummary: (payload: Record<string, unknown>, regenerate = false, confirmation?: CloudAIConfirmation) =>
+    aiPost("/api/ai/strategy/summary", payload, undefined, regenerate, confirmation),
+  aiClinicSummary: (payload: Record<string, unknown>, regenerate = false, confirmation?: CloudAIConfirmation) =>
+    aiPost("/api/ai/clinic/summary", payload, undefined, regenerate, confirmation),
+  aiReport: (payload: Record<string, unknown>, regenerate = false, confirmation?: CloudAIConfirmation) =>
+    aiPost("/api/ai/report", payload, undefined, regenerate, confirmation),
+  aiQuestion: (payload: Record<string, unknown>, question: string, regenerate = false, confirmation?: CloudAIConfirmation) =>
+    aiPost("/api/ai/question", payload, question, regenerate, confirmation),
+  aiChat: (messages: Array<{ role: "user" | "assistant"; content: string }>, payload: Record<string, unknown>, confirmation?: CloudAIConfirmation) =>
     request<AIChatResponse>("/api/ai/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ messages, payload }),
+      body: JSON.stringify({ messages, payload, cloud_confirmation: confirmation }),
     }),
   macro: () => request<Record<string, unknown>>("/api/macro"),
   aiMacroBrief: (payload: Record<string, unknown>, regenerate = false) =>
     aiPost("/api/ai/macro/brief", payload, undefined, regenerate),
   listDecisions: (limit = 200) => request<DecisionsResponse>(`/api/decisions?limit=${limit}`),
-  setModelThesis: (body: { id: string; thesis: string; thesis_params?: Record<string, number> }) =>
-    request<{ id: string; thesis: string; thesis_params: Record<string, number> }>("/api/model/thesis", {
+  setModelThesis: (body: { id: string; thesis: string; change_note: string; thesis_params?: Record<string, number> }) =>
+    request<{ id: string; thesis: string; thesis_params: Record<string, number>; governance_event?: Record<string, unknown> }>("/api/model/thesis", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -318,6 +390,8 @@ export const api = {
       body: JSON.stringify(payload),
     }),
   verifyBackup: () => request<{ verification: Record<string, unknown> }>("/api/operations/backup/verify", { method: "POST" }),
+  exportBackup: () => request<{ export: Record<string, unknown> }>("/api/operations/backup/export", { method: "POST" }),
+  checkpointAuditExport: () => request<{ checkpoint: Record<string, unknown> }>("/api/operations/audit-export/checkpoint", { method: "POST" }),
   securityStatus: () => request<SecurityStatusResponse>("/api/security/status"),
   createSession: () => request<{ session: Record<string, unknown> }>("/api/auth/session", { method: "POST" }),
   deleteSession: () => request<{ revoked: boolean }>("/api/auth/session", { method: "DELETE" }),
@@ -388,10 +462,16 @@ export const api = {
     }),
 };
 
-function aiPost(url: string, payload: Record<string, unknown>, question?: string, regenerate = false) {
+function aiPost(
+  url: string,
+  payload: Record<string, unknown>,
+  question?: string,
+  regenerate = false,
+  confirmation?: CloudAIConfirmation,
+) {
   return request<AIResponse>(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ payload, question, regenerate }),
+    body: JSON.stringify({ payload, question, regenerate, cloud_confirmation: confirmation }),
   });
 }

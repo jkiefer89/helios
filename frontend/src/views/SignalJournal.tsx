@@ -1,32 +1,29 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 import { api } from "../api/client";
 import type { SignalJournalBenchmarkComparison, SignalJournalEntry, SignalJournalModelEvidence, SignalJournalResponse } from "../api/types";
 import { ChartSummary, LineChart } from "../components/charts/Charts";
 import { Panel, StatTile } from "../components/cards/Panel";
 import { EmptyState } from "../components/empty-states/EmptyState";
+import { RequestStatus } from "../components/states/RequestStatus";
+import { useViewFetch } from "../hooks/useViewFetch";
 import { fmtNumber, fmtPct, fmtTimestamp, sourceSummary, titleCase } from "../utils/format";
 
 export function SignalJournal() {
-  const [payload, setPayload] = useState<SignalJournalResponse | null>(null);
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(true);
+  const {
+    payload, failure, isLoading: loading, load, retry, staleResult,
+  } = useViewFetch<SignalJournalResponse>({
+    failureMessage: "Signal Journal unavailable.",
+    keepPayloadWhileLoading: true,
+  });
 
-  const load = async () => {
-    setLoading(true);
-    setError("");
-    try {
-      setPayload(await api.signalJournal());
-    } catch (err) {
-      setPayload(null);
-      setError(err instanceof Error ? err.message : "Signal Journal unavailable.");
-    } finally {
-      setLoading(false);
-    }
-  };
+  const refresh = useCallback(
+    () => load("signal-journal", api.signalJournal),
+    [load],
+  );
 
   useEffect(() => {
-    void load();
-  }, []);
+    void refresh();
+  }, [refresh]);
 
   const pending = useMemo(() => payload?.entries.filter((entry) => entry.forward_status !== "measured") || [], [payload]);
   const measured = useMemo(() => payload?.entries.filter((entry) => entry.forward_status === "measured") || [], [payload]);
@@ -47,12 +44,12 @@ export function SignalJournal() {
           <h1>Paper performance tracking</h1>
           <p>Deliberately recorded Helios signals are tracked with input range, action, benchmark, pending or measured forward result, and analysis-only caveats.</p>
         </div>
-        <form className="toolbar" onSubmit={(event) => { event.preventDefault(); void load(); }}>
+        <form className="toolbar" onSubmit={(event) => { event.preventDefault(); void refresh(); }}>
           <button type="submit">{loading ? "Refreshing..." : "Refresh journal"}</button>
         </form>
       </header>
 
-      {error && <div className="notice danger" role="alert">{error}</div>}
+      <RequestStatus failure={failure} stale={staleResult} onRetry={retry} />
       {!payload ? (
         <EmptyState title="Signal Journal unavailable" body="The backend did not return paper-performance journal data." />
       ) : payload.entries.length === 0 ? (

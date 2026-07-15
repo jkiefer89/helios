@@ -103,7 +103,12 @@ def instrument_report(inst) -> dict:
     )
 
 
-def model_report(model: portfolio.Model) -> dict:
+def model_report(
+    model: portfolio.Model,
+    *,
+    aum_usd: float | None = None,
+    aum_as_of: str = "",
+) -> dict:
     clinic = portfolio_clinic.analyze_clinic(model)
     if not clinic.get("eligible_for_real_research"):
         p = {
@@ -156,7 +161,20 @@ def model_report(model: portfolio.Model) -> dict:
     )
     st = strategy.analyze_strategy(ps.close)
     metrics = indicators.metrics_summary(ps.close)
-    risk = risk_exposure.analyze_model_risk(model)
+    risk = risk_exposure.analyze_model_risk(model, aum_usd=aum_usd)
+    capacity = risk.get("capacity") if isinstance(risk.get("capacity"), dict) else {}
+    capital_context = {
+        "aum_usd": float(aum_usd) if aum_usd is not None else None,
+        "aum_as_of": str(aum_as_of or ""),
+        "capacity_status": capacity.get("status") or "unavailable",
+        "capacity_unsized_count": int(capacity.get("unsized_count") or 0),
+        "capacity_proxy_based_count": int(capacity.get("proxy_based_count") or 0),
+        "capacity": capacity,
+        "basis": (
+            "Capacity is sized from the operator-supplied as-of AUM and available "
+            "observed liquidity. It is an implementation review, not trade execution."
+        ),
+    }
     warnings = list(ps.warnings) + list(clinic.get("warnings", [])) + list(sig.get("caveats", []))
     if ps.provenance.get("simulated_weight_pct", 0):
         warnings.append(
@@ -187,6 +205,7 @@ def model_report(model: portfolio.Model) -> dict:
                 "warnings": warnings,
             },
             "client_risk_pack": risk.get("client_risk_pack", {}),
+            "capital_context": capital_context,
             "forecast": {
                 "expected_return_pct": fc["expected_return_pct"],
                 "expected_vol_pct": fc["expected_vol_pct"],

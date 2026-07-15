@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import app as helios
 from engine import data, persistence, portfolio, rebalance
 from tests.conftest import price_series
 
@@ -105,6 +106,50 @@ def test_unpriced_ticker_blocks_never_invents(store):
     assert out["status"] == "blocked"
     assert "ZZZQ" in out["unpriced_tickers"]
     assert "invented" in out["reason"]
+
+
+def test_missing_adv_blocks_material_rebalance_instead_of_granting_infinite_capacity(store):
+    series = price_series(days=120)
+    data.register(data.Instrument(
+        "NOADV", "No ADV", pd.DataFrame({"close": series}), "upload", [],
+    ))
+    portfolio.register(portfolio.Model(
+        id="RNOADV", name="No ADV", mandate_key="balanced", mandate_context="",
+        holdings=[portfolio.Holding("NOADV", 0.20)],
+    ))
+    _snapshot(store, "ACC-NOADV", [], cash=100_000.0)
+
+    out = rebalance.propose_rebalance("ACC-NOADV", "RNOADV")
+
+    assert out["status"] == "blocked"
+    assert out["liquidity_status"] == "adv_required"
+    assert out["missing_adv"][0]["ticker"] == "NOADV"
+    assert out["missing_adv"][0]["required_move_usd"] == pytest.approx(20_000.0)
+    assert "never treated as unlimited" in out["reason"]
+
+
+def test_rebalance_api_preserves_missing_adv_block(store):
+    series = price_series(days=120)
+    data.register(data.Instrument(
+        "API-NOADV", "API No ADV", pd.DataFrame({"close": series}), "upload", [],
+    ))
+    portfolio.register(portfolio.Model(
+        id="API-RNOADV", name="API No ADV", mandate_key="balanced", mandate_context="",
+        holdings=[portfolio.Holding("API-NOADV", 0.20)],
+    ))
+    _snapshot(store, "API-ACC-NOADV", [], cash=100_000.0)
+    helios.app.config.update(TESTING=True, PROPAGATE_EXCEPTIONS=False)
+
+    response = helios.app.test_client().post(
+        "/api/rebalance/propose",
+        json={"account_id": "API-ACC-NOADV", "model_id": "API-RNOADV"},
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["status"] == "blocked"
+    assert body["liquidity_status"] == "adv_required"
+    assert body["missing_adv"][0]["ticker"] == "API-NOADV"
 
 
 def test_missing_snapshot_blocks(store):
@@ -206,8 +251,12 @@ def test_snapshot_and_positions_must_share_a_date(store):
 
 
 def test_rebalance_prices_are_aligned_to_snapshot_date(store):
-    index = pd.to_datetime(["2026-07-09", "2026-07-10", "2026-07-13"])
-    frame = pd.DataFrame({"close": [99.0, 100.0, 200.0], "volume": [100_000, 100_000, 100_000]}, index=index)
+    history_index = pd.bdate_range(end="2026-07-10", periods=60)
+    frame = pd.DataFrame({
+        "close": np.linspace(90.0, 100.0, len(history_index)),
+        "volume": 100_000,
+    }, index=history_index)
+    frame.loc[pd.Timestamp("2026-07-13")] = {"close": 200.0, "volume": 100_000}
     data.register(data.Instrument("ASOF", "As Of", frame, "upload", []))
     portfolio.register(portfolio.Model(
         id="RASOF", name="As Of", mandate_key="balanced", mandate_context="",

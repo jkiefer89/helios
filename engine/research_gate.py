@@ -11,7 +11,7 @@ from typing import Any
 import pandas as pd
 
 from . import (
-    data, data_quality, evidence_lab, independent_validation, portfolio,
+    data, data_quality, evidence_lab, independent_validation, model_validation, portfolio,
     operations, persistence, provenance, provider_registry, trials,
 )
 
@@ -118,6 +118,11 @@ def _prospective_trial_control(model: portfolio.Model) -> dict[str, Any]:
     )
     for row in rows:
         if row.get("status") != "completed":
+            continue
+        policy = trials.deployment_policy_status(
+            row.get("protocol") or {}, target_kind="model", target_id=model.id,
+        )
+        if not policy.get("passed"):
             continue
         assessment = trials.assess(row)
         verified = trials.verified_assessment_evidence(str(row.get("trial_id") or ""))
@@ -253,26 +258,19 @@ def _model_provenance(model: portfolio.Model) -> tuple[bool, str]:
 
 def _model_validation(model: portfolio.Model) -> dict[str, Any]:
     evidence = evidence_lab.analyze_model(model)
+    verdicts = model_validation.historical_verdicts(model, evidence)
+    ranking = verdicts["edge_supported"]
     summary = evidence.get("summary") if isinstance(evidence.get("summary"), dict) else {}
     measured = int(summary.get("measured_count") or 0)
     coverage = summary.get("benchmark_coverage_pct")
-    coverage_value = float(coverage) if isinstance(coverage, (int, float)) else 0.0
-    passed = bool(
-        evidence.get("eligible_for_real_research")
-        and not evidence.get("evidence_unavailable")
-        and measured >= MIN_VALIDATION_MEASURED
-        and coverage_value >= MIN_BENCHMARK_COVERAGE_PCT
-    )
+    passed = bool(ranking["passed"])
     if passed:
-        reason = (
-            f"{measured} benchmark-measured directional windows; "
-            f"{coverage_value:.1f}% benchmark coverage."
-        )
+        reason = "Historical data, method, and mandate-specific economic edge checks pass."
     else:
-        reason = str(evidence.get("reason") or evidence.get("required_action") or (
-            f"Only {measured} benchmark-measured directional windows and "
-            f"{coverage_value:.1f}% benchmark coverage are available."
-        ))
+        failed = []
+        for key in ("data_valid", "method_valid", "edge_supported"):
+            failed.extend(verdicts[key]["failed_checks"])
+        reason = "Historical validation failed: " + ", ".join(dict.fromkeys(failed)) + "."
     return {
         "passed": passed,
         "measured_count": measured,
@@ -280,6 +278,7 @@ def _model_validation(model: portfolio.Model) -> dict[str, Any]:
         "benchmark": evidence.get("benchmark") or {},
         "parameters": evidence.get("parameters") or {},
         "reason": reason,
+        "verdicts": verdicts,
     }
 
 

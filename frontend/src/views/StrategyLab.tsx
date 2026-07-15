@@ -7,6 +7,7 @@ import { Panel, StatTile } from "../components/cards/Panel";
 import { ChartSummary, DrawdownChart, EquityCurveChart, RollingSharpeChart } from "../components/charts/Charts";
 import { EmptyState } from "../components/empty-states/EmptyState";
 import { TerminalSelect } from "../components/forms/TerminalSelect";
+import { RequestStatus } from "../components/states/RequestStatus";
 import { useViewFetch } from "../hooks/useViewFetch";
 import { fmtAuto, fmtNumber, fmtPct, fmtTimestamp, titleCase } from "../utils/format";
 
@@ -30,7 +31,7 @@ export function StrategyLab({
   const [target, setTarget] = useState(defaultTarget);
   const [costBps, setCostBps] = useState(5);
   const [slippageBps, setSlippageBps] = useState(0);
-  const { payload, error, isLoading, load, isCurrentTarget } = useViewFetch<StrategyResponse>({ failureMessage: "Strategy Lab failed." });
+  const { payload, failure, staleResult, isLoading, load, retry, isCurrentTarget } = useViewFetch<StrategyResponse>({ failureMessage: "Strategy Lab failed." });
   const options = useMemo(() => [
     ...tickers.map((ticker) => ({ value: `instrument:${ticker.symbol}`, label: `${ticker.symbol} · ${ticker.name}` })),
     ...models.map((model) => ({ value: `model:${model.id}`, label: `${model.name} · model` })),
@@ -79,7 +80,7 @@ export function StrategyLab({
           <button type="submit">Run</button>
         </form>
       </header>
-      {error && <div className="notice danger" role="alert">{error}</div>}
+      <RequestStatus failure={failure} stale={staleResult} onRetry={retry} />
       {selectedInstrumentMeta && (
         <div className="source-context-strip">
           <span><b>Source</b>{selectedInstrumentMeta.source}</span>

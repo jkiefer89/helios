@@ -1,10 +1,13 @@
 """Reports blueprint: printable advisor reports and saved snapshot exports."""
 from __future__ import annotations
 
+import os
+from datetime import date
+
 from flask import Blueprint, Response, request
 
 from engine import (
-    data, evidence, model_governance, persistence, portfolio, report_exports,
+    ai_copilot, data, evidence, model_governance, persistence, portfolio, report_exports,
     report_snapshots, reporting, research_gate,
 )
 
@@ -32,8 +35,11 @@ def report_model():
     mdl = portfolio.get(request.args.get("id", ""))
     if mdl is None:
         return err("Unknown model.", 404)
+    aum_usd, aum_as_of, input_error = _model_capital_input(request.args)
+    if input_error:
+        return err(input_error, 400)
     try:
-        return ok(reporting.model_report(mdl))
+        return ok(reporting.model_report(mdl, aum_usd=aum_usd, aum_as_of=aum_as_of))
     except ValueError as e:
         return err(str(e), 400)
 
@@ -75,23 +81,41 @@ def save_report_snapshot():
     # an explicit false excludes even a provided/generated one.
     raw_include = body.get("include_ai_narrative")
     include_ai_narrative = None if raw_include is None else bool(raw_include)
+    cloud_confirmation = body.get("cloud_confirmation")
+    if cloud_confirmation is not None and not isinstance(cloud_confirmation, dict):
+        return err("cloud_confirmation must be a JSON object.", 400)
     prepared_for = str(body.get("prepared_for") or "").strip()
     prepared_by = str(body.get("prepared_by") or "").strip()
     reviewer = str(body.get("reviewer") or "").strip()
     report_purpose = str(body.get("report_purpose") or "").strip()
+    aum_usd, aum_as_of, input_error = _model_capital_input(body)
+    if kind == "model" and input_error:
+        return err(input_error, 400)
     try:
-        report = report_snapshots.report_for_snapshot(kind, target_id)
+        report = report_snapshots.report_for_snapshot(
+            kind, target_id, aum_usd=aum_usd, aum_as_of=aum_as_of,
+        )
     except ValueError as exc:
         return err(str(exc), 400)
     if report_purpose in {"client_review", "investment_committee"}:
-        gate = _client_export_gate(kind, target_id)
+        gate = _client_export_gate(kind, target_id, report=report)
         if not gate["passed"]:
             return err(gate["blocked_reason"] or "Client-ready report export is blocked.", 409)
-    ai_narrative, ai_meta = report_snapshots.resolve_narrative(
-        report,
-        provided_narrative=ai_narrative,
-        include_ai_narrative=include_ai_narrative,
-    )
+    try:
+        ai_narrative, ai_meta = report_snapshots.resolve_narrative(
+            report,
+            provided_narrative=ai_narrative,
+            include_ai_narrative=include_ai_narrative,
+            cloud_confirmation=cloud_confirmation,
+        )
+    except ai_copilot.CloudConfirmationRequired as exc:
+        return err(
+            str(exc), exc.status_code,
+            code="cloud_ai_confirmation_required",
+            cloud_transfer=exc.disclosure,
+            status=exc.status,
+            retryable=True,
+        )
     snapshot = report_exports.build_snapshot(
         target_kind=kind,
         target_id=target_id,
@@ -125,6 +149,8 @@ def save_report_snapshot():
                 "reviewer": reviewer,
                 "report_purpose": report_purpose,
                 "ai_narrative_status": ai_meta["status"],
+                "aum_usd": aum_usd,
+                "aum_as_of": aum_as_of,
             },
         },
         output_payload=snapshot,
@@ -155,7 +181,7 @@ def save_report_snapshot():
     })
 
 
-def _client_export_gate(kind: str, target_id: str) -> dict:
+def _client_export_gate(kind: str, target_id: str, *, report: dict | None = None) -> dict:
     if kind == "instrument":
         inst = data.get(data.clean_symbol(target_id, fallback=""))
         if inst is None:
@@ -168,14 +194,58 @@ def _client_export_gate(kind: str, target_id: str) -> dict:
     governance = model_governance.payload([mdl])
     row = next((item for item in governance.get("models", []) if item.get("id") == mdl.id), {})
     approved = row.get("approval_status") == "approved"
-    if approved and readiness["passed"]:
+    capital = ((report or {}).get("sections") or {}).get("capital_context") or {}
+    capacity_status = str(capital.get("capacity_status") or "aum_not_set")
+    capacity_unsized = int(capital.get("capacity_unsized_count") or 0)
+    capacity_proxy_based = int(capital.get("capacity_proxy_based_count") or 0)
+    capacity_passed = (
+        capital.get("aum_usd") is not None
+        and bool(capital.get("aum_as_of"))
+        and capacity_status in {"within_capacity", "watch"}
+        and capacity_unsized == 0
+        and capacity_proxy_based == 0
+    )
+    if approved and readiness["passed"] and capacity_passed:
         return readiness
     reasons = []
     if not approved:
         reasons.append("The current model version requires committee approval before client export.")
     if not readiness["passed"]:
         reasons.append(readiness["blocked_reason"])
+    if not capacity_passed:
+        reasons.append(
+            "Client and investment-committee model reports require current as-of AUM "
+            "and fully sized capacity from observed market volume with no missing or proxy ADV."
+        )
     return {**readiness, "passed": False, "state": "blocked", "blocked_reason": " ".join(reasons)}
+
+
+def _model_capital_input(values) -> tuple[float | None, str, str]:
+    raw_aum = values.get("aum_usd") if hasattr(values, "get") else None
+    raw_as_of = values.get("aum_as_of") if hasattr(values, "get") else None
+    if raw_aum in (None, "") and raw_as_of in (None, ""):
+        return None, "", ""
+    try:
+        aum = float(str(raw_aum).replace(",", ""))
+    except (TypeError, ValueError):
+        return None, "", "AUM must be a positive dollar amount."
+    if not (0 < aum <= 10_000_000_000_000):
+        return None, "", "AUM must be between $0 and $10 trillion."
+    try:
+        as_of = date.fromisoformat(str(raw_as_of or ""))
+    except ValueError:
+        return None, "", "AUM as-of date must use YYYY-MM-DD."
+    today = date.today()
+    if as_of > today:
+        return None, "", "AUM as-of date cannot be in the future."
+    try:
+        max_age = max(0, min(31, int(os.environ.get("HELIOS_REPORT_AUM_MAX_AGE_DAYS", "7"))))
+    except ValueError:
+        max_age = 7
+    age = (today - as_of).days
+    if age > max_age:
+        return None, "", f"AUM as-of date is {age} days old; refresh it within {max_age} days."
+    return aum, as_of.isoformat(), ""
 
 
 @bp.route("/api/report/snapshots/<snapshot_id>.html")

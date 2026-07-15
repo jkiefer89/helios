@@ -37,13 +37,16 @@ def _config(**overrides):
 class FakeProvider:
     def __init__(self, provider="anthropic"):
         self.provider = provider
+        self.mode = "cloud" if provider != "local" else "local"
         self.model = "fake-model"
+        self.last_payload = None
+        self.last_question = None
 
     def status(self):
         return {
             "enabled": True,
             "provider": self.provider,
-            "mode": "cloud" if self.provider != "local" else "local",
+            "mode": self.mode,
             "model": self.model,
             "available": True,
             "reason": "fake provider ready",
@@ -71,6 +74,7 @@ class FakeProvider:
         }
 
     def explain_opportunity(self, payload, regenerate=False):
+        self.last_payload = payload
         return self._result("opportunity_explain")
 
     def critique_opportunity(self, payload, regenerate=False):
@@ -86,9 +90,29 @@ class FakeProvider:
         return self._result("report_narrative")
 
     def answer_question(self, payload, question, regenerate=False):
+        self.last_payload = payload
+        self.last_question = question
         result = self._result("question")
         result["summary"] = f"Answered using supplied Helios facts: {question}"
         return result
+
+
+def _confirmed_cloud_post(client, path, payload):
+    first = client.post(path, json=payload)
+    assert first.status_code == 409
+    first_body = first.get_json()
+    assert first_body["code"] == "cloud_ai_confirmation_required"
+    disclosure = first_body["cloud_transfer"]
+    assert disclosure["cloud_transfer"] is True
+    assert disclosure["confirmed"] is False
+    confirmed = {
+        **payload,
+        "cloud_confirmation": {
+            "confirmed": True,
+            "disclosure_hash": disclosure["disclosure_hash"],
+        },
+    }
+    return first_body, client.post(path, json=confirmed)
 
 
 def test_ai_disabled_status(client, monkeypatch):
@@ -122,15 +146,18 @@ def test_claude_fake_provider_success(client, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "TEST_ANTHROPIC_KEY_NEVER_RETURNED")
     monkeypatch.setattr(helios.ai_copilot, "get_provider", lambda: FakeProvider("anthropic"))
 
-    resp = client.post(
+    first, resp = _confirmed_cloud_post(
+        client,
         "/api/ai/opportunity/explain",
-        json={"payload": {"symbol": "AAPL", "score": 42, "data_mode": "real"}},
+        {"payload": {"symbol": "AAPL", "score": 42, "data_mode": "real"}},
     )
 
     assert resp.status_code == 200
     body = resp.get_json()
     assert body["provider"] == "anthropic"
     assert body["result"]["summary"]
+    assert body["cloud_transfer"]["confirmed"] is True
+    assert first["cloud_transfer"]["raw_values_returned"] is False
     assert "TEST_ANTHROPIC_KEY_NEVER_RETURNED" not in json.dumps(body)
 
 
@@ -139,9 +166,12 @@ def test_provider_timeout_returns_503(client, monkeypatch):
         def explain_opportunity(self, payload, regenerate=False):
             raise ai_copilot.AITimeoutError("Provider timed out.", self.status())
 
-    monkeypatch.setattr(helios.ai_copilot, "get_provider", lambda: TimeoutProvider())
+    provider = TimeoutProvider()
+    monkeypatch.setattr(helios.ai_copilot, "get_provider", lambda: provider)
 
-    resp = client.post("/api/ai/opportunity/explain", json={"payload": {"symbol": "AAPL"}})
+    _first, resp = _confirmed_cloud_post(
+        client, "/api/ai/opportunity/explain", {"payload": {"symbol": "AAPL"}},
+    )
 
     assert resp.status_code == 503
     assert "timed out" in resp.get_json()["error"].lower()
@@ -217,10 +247,114 @@ def test_api_keys_never_appear_in_status_or_response(client, monkeypatch):
     assert status.status_code == 200
     assert sentinel not in json.dumps(status.get_json())
 
-    monkeypatch.setattr(helios.ai_copilot, "get_provider", lambda: FakeProvider("anthropic"))
-    resp = client.post("/api/ai/question", json={"payload": {"score": 42}, "question": "What matters?"})
+    provider = FakeProvider("anthropic")
+    monkeypatch.setattr(helios.ai_copilot, "get_provider", lambda: provider)
+    _first, resp = _confirmed_cloud_post(
+        client,
+        "/api/ai/question",
+        {"payload": {"score": 42}, "question": "What matters?"},
+    )
     assert resp.status_code == 200
     assert sentinel not in json.dumps(resp.get_json())
+
+
+def test_cloud_confirmation_redacts_sensitive_values_before_provider_call(client, monkeypatch):
+    provider = FakeProvider("anthropic")
+    monkeypatch.setattr(helios.ai_copilot, "get_provider", lambda: provider)
+    secret = "sk-" + "ant-api03-FAKE-DLP-TEST-SENTINEL"
+    request_payload = {
+        "payload": {
+            "clientName": "Jane Private",
+            "accountName": "Private Family Account",
+            "preparedFor": "Jane Private",
+            "score": 42,
+            "notes": f"Contact jane.private@example.com and never expose {secret}",
+        },
+        "question": (
+            "Review Jane Private and the Private Family Account; "
+            "account number: 123456789."
+        ),
+    }
+
+    first, response = _confirmed_cloud_post(client, "/api/ai/question", request_payload)
+
+    assert response.status_code == 200
+    assert first["cloud_transfer"]["redaction_count"] >= 3
+    transferred = json.dumps({"payload": provider.last_payload, "question": provider.last_question})
+    assert "Jane Private" not in transferred
+    assert "jane.private@example.com" not in transferred
+    assert "Private Family Account" not in transferred
+    assert secret not in transferred
+    assert "123456789" not in transferred
+    assert "[redacted:" in transferred
+    assert first["cloud_transfer"]["task"] == "answer_question"
+    assert first["cloud_transfer"]["transfer_scope"] == "final_sanitized_provider_request"
+    assert first["cloud_transfer"]["disclosure_hash"] != first["cloud_transfer"]["dlp_payload_hash"]
+
+
+def test_cloud_confirmation_is_bound_to_the_exact_redacted_payload(client, monkeypatch):
+    provider = FakeProvider("anthropic")
+    monkeypatch.setattr(helios.ai_copilot, "get_provider", lambda: provider)
+    payload = {"payload": {"score": 42}, "question": "Explain the evidence."}
+
+    first = client.post("/api/ai/question", json=payload)
+    assert first.status_code == 409
+    rejected = client.post("/api/ai/question", json={
+        **payload,
+        "cloud_confirmation": {"confirmed": True, "disclosure_hash": "wrong-payload-hash"},
+    })
+
+    assert rejected.status_code == 409
+    assert rejected.get_json()["code"] == "cloud_ai_confirmation_required"
+    assert provider.last_payload is None
+
+
+def test_cloud_chat_redacts_contextual_client_name_without_structured_identity(client, monkeypatch):
+    provider = FakeProvider("anthropic")
+    monkeypatch.setattr(helios.ai_copilot, "get_provider", lambda: provider)
+    request_payload = {
+        "payload": {"score": 42},
+        "question": (
+            "Explain the evidence for my client Jane Private without adding facts. "
+            "Please review for John Smith household. Prepared for Smith Family Trust."
+        ),
+    }
+
+    first, response = _confirmed_cloud_post(client, "/api/ai/question", request_payload)
+
+    assert response.status_code == 200
+    assert provider.last_question is not None
+    assert "Jane Private" not in provider.last_question
+    assert "John Smith" not in provider.last_question
+    assert "Smith Family Trust" not in provider.last_question
+    assert "[redacted:client_name]" in provider.last_question
+    assert first["cloud_transfer"]["redaction_categories"]["client_name"] >= 3
+
+
+def test_cloud_confirmation_hash_binds_provider_model_task_and_final_request():
+    provider = FakeProvider("anthropic")
+    value = {"payload": {"score": 42}, "question": "Explain the evidence."}
+
+    with pytest.raises(ai_copilot.CloudConfirmationRequired) as first:
+        ai_copilot.prepare_provider_transfer(
+            provider, value, task="answer_question",
+        )
+    with pytest.raises(ai_copilot.CloudConfirmationRequired) as changed_task:
+        ai_copilot.prepare_provider_transfer(
+            provider, value, task="opportunity_explain",
+        )
+    provider.model = "different-model"
+    with pytest.raises(ai_copilot.CloudConfirmationRequired) as changed_model:
+        ai_copilot.prepare_provider_transfer(
+            provider, value, task="answer_question",
+        )
+
+    hashes = {
+        first.value.disclosure["disclosure_hash"],
+        changed_task.value.disclosure["disclosure_hash"],
+        changed_model.value.disclosure["disclosure_hash"],
+    }
+    assert len(hashes) == 3
 
 
 def test_sanitization_redacts_names_and_omits_raw_files_and_history():

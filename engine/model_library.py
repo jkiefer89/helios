@@ -117,19 +117,30 @@ def get(slug: str) -> dict | None:
     return None
 
 
-def import_template(slug: str) -> portfolio.Model | None:
+def build_template(slug: str) -> portfolio.Model | None:
     template = get(slug)
     if not template:
         return None
-    model = portfolio.Model(
+    return portfolio.Model(
         id=template["model_id"],
         name=template["name"],
         mandate_key=template["mandate"],
         mandate_context=_context(template),
         holdings=[portfolio.Holding(holding["ticker"], float(holding["weight"])) for holding in template["holdings"]],
+        thesis=template.get("thesis") or "",
     )
+
+
+def import_template(slug: str) -> portfolio.Model | None:
+    """Import a process-local template directly for non-web callers.
+
+    Durable imports must use the web governance workflow, which pairs model
+    persistence and the pending-review event in one transaction.
+    """
+    model = build_template(slug)
+    if not model:
+        return None
     portfolio.register(model)
-    portfolio._persist_model(model, source_filename=f"model-library-{template['slug']}.csv")
     return model
 
 

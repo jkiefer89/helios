@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type FocusEvent, type FormEvent, type ReactNode } from "react";
 import type { DataMode, DataStatusResponse, MandateSummary, ModelSummary, TickerSummary } from "../../api/types";
 import { DataModeBadge, SourcePill } from "../badges/DataModeBadge";
-import { TerminalSelect } from "../forms/TerminalSelect";
+import { DataIntakePanel } from "../data/DataIntakePanel";
 import { fmtMoney, fmtPct } from "../../utils/format";
 import { api } from "../../api/client";
 import type { SecurityStatusResponse } from "../../api/types";
 
-export type ViewId = "command" | "instruments" | "models" | "opportunities" | "strategy" | "evidence" | "clinic" | "risk" | "reports" | "journal" | "decisions" | "data-quality" | "analysis";
+export type ViewId = "command" | "setup" | "instruments" | "models" | "opportunities" | "strategy" | "evidence" | "clinic" | "risk" | "reports" | "journal" | "decisions" | "data-quality" | "analysis";
 
 interface ShellProps {
   activeView: ViewId;
@@ -31,6 +31,7 @@ interface ShellProps {
 
 const views: Array<{ id: ViewId; label: string }> = [
   { id: "command", label: "Command Center" },
+  { id: "setup", label: "Data Setup" },
   { id: "instruments", label: "Instruments" },
   { id: "models", label: "Models" },
   { id: "opportunities", label: "Opportunity Radar" },
@@ -47,7 +48,7 @@ const views: Array<{ id: ViewId; label: string }> = [
 
 // The five first-class workspaces follow the review-to-decision workflow.
 export const navGroups: Array<{ label: string; ids: ViewId[] }> = [
-  { label: "Setup", ids: ["command", "instruments", "data-quality", "models"] },
+  { label: "Setup", ids: ["command", "setup", "instruments", "data-quality", "models"] },
   { label: "Research", ids: ["opportunities", "analysis", "strategy"] },
   { label: "Evidence & Risk", ids: ["evidence", "clinic", "risk"] },
   { label: "Decisions", ids: ["journal", "decisions"] },
@@ -121,25 +122,18 @@ export function AppShell(props: ShellProps) {
     const active = nav.querySelector("button.active");
     active?.scrollIntoView({ behavior: "auto", inline: "nearest", block: "nearest" });
   }, [props.activeView]);
-  // First-run CTAs open Instruments but the ONLY fetch/upload controls live in
-  // this (default-collapsed) sidebar — an onboarding dead end (review finding).
-  // CTAs call this to actually reveal the intake panel; the explicit choice is
-  // persisted like a manual toggle.
-  const revealDataIntake = () => {
-    setSidebarCollapsed(false);
-    try {
-      localStorage.setItem("helios_sidebar", "open");
-    } catch {
-      // best-effort persistence
-    }
-  };
+  // The compact sidebar remains available for repeat work, while every setup
+  // CTA routes to the full-page Data Setup workspace.
+  const revealDataIntake = useCallback(() => {
+    onViewChange("setup");
+  }, [onViewChange]);
   useEffect(() => {
     // Views deep in the tree (Command Center CTA, Instruments empty state)
     // request the reveal via this event — no prop drilling through App.
     const onReveal = () => revealDataIntake();
     window.addEventListener("helios:reveal-data-intake", onReveal);
     return () => window.removeEventListener("helios:reveal-data-intake", onReveal);
-  }, []);
+  }, [revealDataIntake]);
   const toggleSidebar = () => {
     setSidebarCollapsed((current) => {
       const next = !current;
@@ -375,7 +369,7 @@ export function AppShell(props: ShellProps) {
                       {density === "compact" ? "Density: Compact ●" : "Density: Comfortable ●"}
                     </button>
                     <button type="button" role="menuitem" onClick={() => runAdvisorAction("command")}>Command Center</button>
-                    <button type="button" role="menuitem" onClick={() => runAdvisorAction("instruments")}>Real Data Setup</button>
+                    <button type="button" role="menuitem" onClick={() => runAdvisorAction("setup")}>Real Data Setup</button>
                     <button type="button" role="menuitem" onClick={() => runAdvisorAction("models")}>Client Models</button>
                     <button type="button" role="menuitem" onClick={() => runAdvisorAction("journal")}>Signal Journal</button>
                     <button type="button" role="menuitem" onClick={() => runAdvisorAction("evidence")}>Evidence Lab</button>
@@ -498,7 +492,7 @@ export function AppShell(props: ShellProps) {
               ⟨ Hide
             </button>
           </div>
-          <ImportPanel {...props} />
+          <DataIntakePanel {...props} />
           <section className="side-section">
             <h2>Client Models</h2>
             <div className="side-list">
@@ -549,6 +543,7 @@ function ShellIcon({ id }: { id: ViewId }) {
             <path {...common} d="M5 6h5v5H5zM14 6h5v5h-5zM5 15h5v3H5zM14 15h5v3h-5z" />
           </>
         )}
+        {id === "setup" && <path {...common} d="M4 6h16v12H4zM8 10h8M8 14h5M6 3v3m12-3v3" />}
         {id === "instruments" && <path {...common} d="M7 17V7m5 10V4m5 13v-6M4 17h16" />}
         {id === "models" && <path {...common} d="M7 8a4 4 0 0 1 8 0v1h1a3 3 0 0 1 0 6h-2m-4 0H8a3 3 0 0 1-.6-5.9" />}
         {id === "opportunities" && <path {...common} d="M12 4v3m0 10v3M4 12h3m10 0h3m-5.5-4.5 2-2m-9 9-2 2m0-11 2 2m9 9-2-2" />}
@@ -562,154 +557,5 @@ function ShellIcon({ id }: { id: ViewId }) {
         {id === "analysis" && <path {...common} d="M5 17l4-4 3 3 7-8M5 21h14" />}
       </svg>
     </span>
-  );
-}
-
-function ImportPanel(props: ShellProps) {
-  const [formNotice, setFormNotice] = useState("");
-  const [pendingForm, setPendingForm] = useState<"" | "live" | "price" | "model" | "refresh">("");
-  const [modelMandate, setModelMandate] = useState(props.mandates[0]?.key || "");
-  const mandateOptions = props.mandates.map((mandate) => ({ value: mandate.key, label: mandate.label }));
-  useEffect(() => {
-    if (modelMandate || !props.mandates[0]) return;
-    setModelMandate(props.mandates[0].key);
-  }, [modelMandate, props.mandates]);
-  const clearNotice = () => setFormNotice("");
-  const priceForm = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const form = event.currentTarget;
-    const file = (form.elements.namedItem("priceFile") as HTMLInputElement).files?.[0];
-    const symbol = (form.elements.namedItem("priceSymbol") as HTMLInputElement).value;
-    if (!file) {
-      setFormNotice("Choose a price CSV before uploading price history.");
-      return;
-    }
-    clearNotice();
-    setPendingForm("price");
-    try {
-      await props.onUploadPrice(file, symbol);
-      setFormNotice("Price history uploaded. Analysis will refresh when processing completes.");
-      form.reset();
-    } catch (error) {
-      setFormNotice(error instanceof Error ? error.message : "Price upload failed.");
-    } finally {
-      setPendingForm("");
-    }
-  };
-  const modelForm = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const form = event.currentTarget;
-    const file = (form.elements.namedItem("modelFile") as HTMLInputElement).files?.[0];
-    const name = (form.elements.namedItem("modelName") as HTMLInputElement).value;
-    const mandate = modelMandate || props.mandates[0]?.key || "";
-    const context = (form.elements.namedItem("modelContext") as HTMLTextAreaElement).value;
-    if (!file) {
-      setFormNotice("Choose a model CSV or spreadsheet before importing a model.");
-      return;
-    }
-    clearNotice();
-    setPendingForm("model");
-    try {
-      await props.onUploadModel(file, name, mandate, context);
-      setFormNotice("Model imported. Review holding coverage and validation before analysis.");
-      form.reset();
-    } catch (error) {
-      setFormNotice(error instanceof Error ? error.message : "Model upload failed.");
-    } finally {
-      setPendingForm("");
-    }
-  };
-  const liveForm = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const form = event.currentTarget;
-    const symbol = (form.elements.namedItem("liveSymbol") as HTMLInputElement).value.trim();
-    if (!symbol) {
-      setFormNotice("Enter a ticker symbol before fetching live data.");
-      return;
-    }
-    clearNotice();
-    setPendingForm("live");
-    try {
-      await props.onFetchLive(symbol);
-      setFormNotice("Live data fetched. Analysis will refresh when processing completes.");
-      form.reset();
-    } catch (error) {
-      setFormNotice(error instanceof Error ? error.message : "Live data fetch failed.");
-    } finally {
-      setPendingForm("");
-    }
-  };
-  const refreshLiveData = async () => {
-    clearNotice();
-    setPendingForm("refresh");
-    try {
-      await props.onRefreshData(undefined, true);
-      setFormNotice("Live refresh completed. Check Real Data Center for row counts and warnings.");
-    } catch (error) {
-      setFormNotice(error instanceof Error ? error.message : "Live refresh failed.");
-    } finally {
-      setPendingForm("");
-    }
-  };
-  const liveCount = props.tickers.filter((ticker) => ticker.source === "live").length;
-  const realDataReady = liveCount > 0 || Boolean(props.dataStatus?.data_mode_summary?.eligible_for_real_research);
-  const onboardingCopy = liveCount > 0
-    ? {
-        title: "Live refresh active",
-        body: `${liveCount} live ${liveCount === 1 ? "history is" : "histories are"} ready for real research. Automatic refresh keeps the local evidence set current while provenance checks remain visible.`,
-      }
-    : realDataReady
-      ? {
-          title: "Real data active",
-          body: "Uploaded histories are powering real research. Live refresh applies only to live-fetched symbols; uploaded files stay exactly as provided.",
-        }
-      : {
-          title: "Real Data Onboarding",
-          body: "Connect live or uploaded price history to unlock real research. No runtime research is generated without eligible evidence.",
-        };
-  return (
-    <section className="side-section onboarding">
-      <h2>{onboardingCopy.title}</h2>
-      <p>{onboardingCopy.body}</p>
-      {formNotice && <div className="form-feedback" role="status">{formNotice}</div>}
-      <form onSubmit={liveForm}>
-        <label htmlFor="shell-live-symbol">Fetch live ticker</label>
-        <div className="inline-form">
-          <input id="shell-live-symbol" name="liveSymbol" placeholder="e.g. SPY" aria-label="Live ticker symbol" disabled={!props.liveAvailable || pendingForm !== ""} />
-          <button type="submit" disabled={!props.liveAvailable || pendingForm !== ""}>{pendingForm === "live" ? "Fetching..." : "Fetch"}</button>
-        </div>
-        {!props.liveAvailable && <small className="form-hint">Live fetch is unavailable in this environment. Upload a price CSV to unlock real-data analysis.</small>}
-      </form>
-      <button
-        className="side-secondary-action"
-        type="button"
-        onClick={refreshLiveData}
-        disabled={!liveCount || pendingForm !== ""}
-      >
-        {pendingForm === "refresh" ? "Refreshing live data..." : `Refresh live data (${liveCount})`}
-      </button>
-      <form onSubmit={priceForm}>
-        <label htmlFor="shell-price-file">Upload price CSV</label>
-        <input id="shell-price-file" name="priceFile" type="file" accept=".csv" aria-label="Price CSV" disabled={pendingForm !== ""} />
-        <input name="priceSymbol" placeholder="Series symbol, e.g. MYFUND" aria-label="Uploaded series symbol" disabled={pendingForm !== ""} />
-        <button type="submit" disabled={pendingForm !== ""}>{pendingForm === "price" ? "Uploading..." : "Upload price history"}</button>
-      </form>
-      <form onSubmit={modelForm}>
-        <label htmlFor="shell-model-file">Upload model CSV/Excel</label>
-        <input id="shell-model-file" name="modelFile" type="file" accept=".xlsx,.xlsm,.csv,.tsv" aria-label="Model file" disabled={pendingForm !== ""} />
-        <input name="modelName" placeholder="Model name" aria-label="Model name" disabled={pendingForm !== ""} />
-        <TerminalSelect
-          name="modelMandate"
-          ariaLabel="Model mandate"
-          value={modelMandate}
-          options={mandateOptions}
-          onChange={setModelMandate}
-          disabled={pendingForm !== ""}
-          placeholder="Select mandate"
-        />
-        <textarea name="modelContext" rows={2} placeholder="Client context (optional)" aria-label="Model context" disabled={pendingForm !== ""} />
-        <button type="submit" disabled={pendingForm !== ""}>{pendingForm === "model" ? "Uploading..." : "Upload model"}</button>
-      </form>
-    </section>
   );
 }

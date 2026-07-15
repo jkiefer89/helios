@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api } from "../api/client";
-import type { AIResult, DataStatusResponse, ModelSummary, ReportResponse, ReportSnapshot, ReportSnapshotStorage, SignalJournalEntry, TickerSummary } from "../api/types";
+import { ApiError, api } from "../api/client";
+import type { AIResult, CloudAIConfirmation, CloudTransferDisclosure, DataStatusResponse, ModelSummary, ReportResponse, ReportSnapshot, ReportSnapshotStorage, SignalJournalEntry, TickerSummary } from "../api/types";
 import { AICopilotPanel, reportCopilotActions } from "../components/ai/AICopilotPanel";
 import { DataQualityBanner } from "../components/badges/DataModeBadge";
 import { Panel } from "../components/cards/Panel";
 import { EmptyState } from "../components/empty-states/EmptyState";
 import { TerminalSelect } from "../components/forms/TerminalSelect";
+import { RequestStatus, toRequestFailure, type RequestFailureState } from "../components/states/RequestStatus";
 import { useViewFetch } from "../hooks/useViewFetch";
 import { fmtAuto, fmtNumber, fmtPct, fmtTimestamp, titleCase } from "../utils/format";
 
@@ -29,10 +30,11 @@ export function Reports({
   // No first-ticker fallback: report targets are operator-chosen, never a silent default.
   const defaultTarget = selectedModel ? `model:${selectedModel}` : selectedInstrument ? `instrument:${selectedInstrument}` : "";
   const [target, setTarget] = useState(defaultTarget);
-  const { payload, error, isLoading, load, isCurrentTarget } = useViewFetch<ReportResponse>({ failureMessage: "Report build failed." });
+  const { payload, failure, staleResult, isLoading, load, retry, isCurrentTarget } = useViewFetch<ReportResponse>({ failureMessage: "Report build failed." });
   const [journalEntries, setJournalEntries] = useState<SignalJournalEntry[]>([]);
-  const [journalError, setJournalError] = useState("");
+  const [journalFailure, setJournalFailure] = useState<RequestFailureState | null>(null);
   const [snapshots, setSnapshots] = useState<ReportSnapshot[]>([]);
+  const [snapshotFailure, setSnapshotFailure] = useState<RequestFailureState | null>(null);
   const [snapshotError, setSnapshotError] = useState("");
   const [savingSnapshot, setSavingSnapshot] = useState(false);
   const [aiNarrative, setAiNarrative] = useState("");
@@ -57,7 +59,10 @@ export function Reports({
   const [preparedBy, setPreparedBy] = useState("");
   const [reviewer, setReviewer] = useState("");
   const [reportPurpose, setReportPurpose] = useState("advisor_review");
+  const [aumUsd, setAumUsd] = useState("");
+  const [aumAsOf, setAumAsOf] = useState(() => new Date().toISOString().slice(0, 10));
   const [snapshotStorage, setSnapshotStorage] = useState<ReportSnapshotStorage | null>(null);
+  const [pendingCloudSave, setPendingCloudSave] = useState<CloudTransferDisclosure | null>(null);
   const options = useMemo(() => [
     ...tickers.map((ticker) => ({ value: `instrument:${ticker.symbol}`, label: `${ticker.symbol} · ${ticker.name}` })),
     ...models.map((model) => ({ value: `model:${model.id}`, label: `${model.name} · model` })),
@@ -70,8 +75,11 @@ export function Reports({
     setAiNarrative("");
     if (kind === "model") onSelectModel(id);
     else onSelectInstrument(id);
-    void load(requestedTarget, () => kind === "model" ? api.reportModel(id) : api.reportInstrument(id));
-  }, [load, onSelectInstrument, onSelectModel]);
+    const parsedAum = Number(aumUsd.replace(/,/g, ""));
+    void load(requestedTarget, () => kind === "model"
+      ? api.reportModel(id, parsedAum > 0 ? parsedAum : undefined, parsedAum > 0 ? aumAsOf : undefined)
+      : api.reportInstrument(id));
+  }, [aumAsOf, aumUsd, load, onSelectInstrument, onSelectModel]);
 
   useEffect(() => {
     if (!defaultTarget || isCurrentTarget(defaultTarget)) return;
@@ -84,10 +92,11 @@ export function Reports({
       const history = await api.reportSnapshots();
       setSnapshots(history.snapshots);
       setSnapshotStorage(history.storage);
+      setSnapshotFailure(null);
       setSnapshotError(history.warning || "");
     } catch (err) {
-      setSnapshots([]);
-      setSnapshotError(err instanceof Error ? err.message : "Report history unavailable.");
+      setSnapshotError("");
+      setSnapshotFailure(toRequestFailure(err, "Report history unavailable."));
     }
   }, []);
 
@@ -101,13 +110,12 @@ export function Reports({
       .then((journal) => {
         if (!cancelled) {
           setJournalEntries(journal.entries);
-          setJournalError("");
+          setJournalFailure(null);
         }
       })
       .catch((err) => {
         if (!cancelled) {
-          setJournalEntries([]);
-          setJournalError(err instanceof Error ? err.message : "Signal Journal unavailable.");
+          setJournalFailure(toRequestFailure(err, "Signal Journal unavailable."));
         }
       });
     return () => { cancelled = true; };
@@ -115,7 +123,7 @@ export function Reports({
 
   useEffect(() => loadJournal(), [loadJournal, payload]);
 
-  const saveSnapshot = async () => {
+  const saveSnapshot = async (cloudConfirmation?: CloudAIConfirmation) => {
     const [kind, id] = target.split(":");
     if (!payload || !kind || !id) return;
     setSavingSnapshot(true);
@@ -130,11 +138,25 @@ export function Reports({
         prepared_by: preparedBy || undefined,
         reviewer: reviewer || undefined,
         report_purpose: reportPurpose,
+        aum_usd: kind === "model" && Number(aumUsd.replace(/,/g, "")) > 0 ? Number(aumUsd.replace(/,/g, "")) : undefined,
+        aum_as_of: kind === "model" && Number(aumUsd.replace(/,/g, "")) > 0 ? aumAsOf : undefined,
+        cloud_confirmation: cloudConfirmation,
       });
       setSnapshots((current) => [saved.snapshot, ...current.filter((row) => row.id !== saved.snapshot.id)]);
       setSnapshotStorage(saved.storage);
+      setPendingCloudSave(null);
     } catch (err) {
-      setSnapshotError(err instanceof Error ? err.message : "Report snapshot could not be saved.");
+      if (err instanceof ApiError && err.code === "cloud_ai_confirmation_required") {
+        const disclosure = err.details.cloud_transfer as CloudTransferDisclosure | undefined;
+        if (disclosure?.disclosure_hash) {
+          setPendingCloudSave(disclosure);
+          setSnapshotError("");
+        } else {
+          setSnapshotError("Cloud transfer confirmation metadata was incomplete.");
+        }
+      } else {
+        setSnapshotError(err instanceof Error ? err.message : "Report snapshot could not be saved.");
+      }
     } finally {
       setSavingSnapshot(false);
     }
@@ -164,11 +186,34 @@ export function Reports({
             { value: "client_review", label: "Client review" },
             { value: "investment_committee", label: "Investment committee" },
           ]} /></label>
+          {target.startsWith("model:") && <label>Current AUM (USD)<input inputMode="decimal" value={aumUsd} onChange={(event) => setAumUsd(event.target.value)} placeholder="e.g. 250000000" /></label>}
+          {target.startsWith("model:") && <label>AUM as of<input type="date" value={aumAsOf} max={new Date().toISOString().slice(0, 10)} onChange={(event) => setAumAsOf(event.target.value)} /></label>}
         </div>
+        {target.startsWith("model:") && reportPurpose !== "advisor_review" && !aumUsd.trim() && (
+          <p className="notice warning">Client and investment-committee exports require current AUM so Helios can size capacity and verify every holding has ADV.</p>
+        )}
       </Panel>
-      {error && <div className="notice danger" role="alert">{error}</div>}
+      <RequestStatus failure={failure} stale={staleResult} onRetry={retry} />
+      <RequestStatus failure={snapshotFailure} stale={Boolean(snapshots.length && snapshotFailure)} onRetry={() => void loadSnapshots()} />
       {snapshotError && <div className="notice warning no-print" role="alert">{snapshotError} <button type="button" onClick={() => void loadSnapshots()}>Retry history</button></div>}
-      <SignalJournalPanel entries={journalEntries} error={journalError} onRetry={() => { loadJournal(); }} />
+      {pendingCloudSave && (
+        <div className="ai-cloud-confirmation no-print" role="alert">
+          <strong>Confirm report narrative cloud transfer</strong>
+          <span>
+            Local DLP redacted {pendingCloudSave.redaction_count} sensitive value(s).
+            The sanitized report payload will be sent to the configured cloud provider before this snapshot is saved.
+          </span>
+          <div>
+            <button
+              type="button"
+              disabled={savingSnapshot}
+              onClick={() => void saveSnapshot({ confirmed: true, disclosure_hash: pendingCloudSave.disclosure_hash })}
+            >Confirm and save</button>
+            <button type="button" disabled={savingSnapshot} onClick={() => setPendingCloudSave(null)}>Cancel</button>
+          </div>
+        </div>
+      )}
+      <SignalJournalPanel entries={journalEntries} failure={journalFailure} onRetry={() => { loadJournal(); }} />
       <ReportHistoryPanel snapshots={snapshots} storage={snapshotStorage} />
       {isLoading ? (
         <div className="loading" role="status">Building the analysis-only report preview...</div>
@@ -190,7 +235,7 @@ function ReportHistoryPanel({ snapshots, storage }: { snapshots: ReportSnapshot[
         <div className="terminal-table terminal-data-table-shell" tabIndex={0} aria-label="Scrollable saved report snapshots">
           <table className="terminal-data-table report-history-data-table" aria-label="Saved report snapshots">
             <thead><tr>
-              <th scope="col">Saved</th><th scope="col">Report Version</th><th scope="col">Package</th><th scope="col">Research Status</th><th scope="col">Source</th><th scope="col">Input Range</th><th scope="col">Audit Trail</th><th scope="col">Exports</th>
+              <th scope="col">Saved</th><th scope="col">Report Version</th><th scope="col">Package</th><th scope="col">Research Status</th><th scope="col">Source</th><th scope="col">Input Range</th><th scope="col">AUM / Capacity</th><th scope="col">Audit Trail</th><th scope="col">Exports</th>
             </tr></thead>
             <tbody>{snapshots.slice(0, 12).map((snapshot) => (
               <tr key={snapshot.id}>
@@ -200,6 +245,7 @@ function ReportHistoryPanel({ snapshots, storage }: { snapshots: ReportSnapshot[
                 <td><strong>{snapshot.eligible_for_real_research ? "Research ready" : "Not eligible"}</strong><small>{snapshot.display_label || titleCase(snapshot.data_mode)}</small></td>
                 <td>{snapshot.source || "unknown"}<small>{formatSourceCounts(snapshot.source_counts)}</small></td>
                 <td>{snapshot.first_date || "—"} → {snapshot.last_date || "—"}<small>{snapshot.row_count} rows</small></td>
+                <td>{snapshot.capital_context?.aum_usd ? `$${fmtNumber(snapshot.capital_context.aum_usd, 0)}` : "Not applicable"}<small>{snapshot.capital_context?.aum_as_of || ""}{snapshot.capital_context?.capacity_status ? ` · ${titleCase(snapshot.capital_context.capacity_status)}` : ""}</small></td>
                 <td>{snapshot.audit_trail?.length || 0} events<small>{snapshot.ai_narrative_included ? "AI included" : snapshot.ai_narrative_status || "AI not included"}</small></td>
                 <td className="report-export-links">
                   <a href={snapshot.html_url} target="_blank" rel="noreferrer">HTML Snapshot</a>
@@ -214,14 +260,13 @@ function ReportHistoryPanel({ snapshots, storage }: { snapshots: ReportSnapshot[
   );
 }
 
-function SignalJournalPanel({ entries, error, onRetry }: { entries: SignalJournalEntry[]; error: string; onRetry: () => void }) {
+function SignalJournalPanel({ entries, failure, onRetry }: { entries: SignalJournalEntry[]; failure: RequestFailureState | null; onRetry: () => void }) {
   return (
     <Panel title="Signal Journal" meta="Paper tracking only" className="no-print signal-journal-panel">
-      {error ? (
-        <div className="notice warning" role="alert">{error} <button type="button" onClick={onRetry}>Retry journal</button></div>
-      ) : entries.length === 0 ? (
+      <RequestStatus failure={failure} stale={Boolean(entries.length && failure)} onRetry={onRetry} />
+      {entries.length === 0 && !failure ? (
         <EmptyState title="No signals logged yet" body="Run an instrument or model analysis to start tracking forward paper results." />
-      ) : (
+      ) : entries.length > 0 ? (
         <div className="terminal-table terminal-data-table-shell" tabIndex={0} aria-label="Scrollable Signal Journal paper performance">
           <table className="terminal-data-table report-signal-journal-data-table">
             <thead><tr><th scope="col">Date</th><th scope="col">Target</th><th scope="col">Action</th><th scope="col">Score</th><th scope="col">Input Range</th><th scope="col">Benchmark</th><th scope="col">Forward Result</th></tr></thead>
@@ -238,7 +283,7 @@ function SignalJournalPanel({ entries, error, onRetry }: { entries: SignalJourna
             ))}</tbody>
           </table>
         </div>
-      )}
+      ) : null}
     </Panel>
   );
 }

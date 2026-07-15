@@ -69,7 +69,7 @@ def test_positions_upload_records_snapshot(client):
     assert body["source_file"] == "positions.csv"
 
 
-def test_accounts_map_and_delete_lifecycle(client):
+def test_accounts_map_and_archive_lifecycle(client):
     assert _upload_fills(client, account_id="ACC-W3").status_code == 200
 
     accounts = client.get("/api/ledger/accounts").get_json()["accounts"]
@@ -87,11 +87,42 @@ def test_accounts_map_and_delete_lifecycle(client):
     row = next(a for a in mapped.get_json()["accounts"] if a["account_id"] == "ACC-W3")
     assert row["display_name"] == "IRA"
 
-    deleted = client.delete("/api/ledger/account/ACC-W3")
+    missing_reason = client.delete("/api/ledger/account/ACC-W3")
+    assert missing_reason.status_code == 400
+    deleted = client.delete(
+        "/api/ledger/account/ACC-W3",
+        json={"reason": "Retire a duplicate account import."},
+    )
     assert deleted.status_code == 200
-    assert deleted.get_json()["deleted"] is True
+    assert deleted.get_json()["archived"] is True
+    assert deleted.get_json()["deleted"] is False
+    assert deleted.get_json()["preserved"]["fills"] == 2
     assert not any(a["account_id"] == "ACC-W3"
                    for a in client.get("/api/ledger/accounts").get_json()["accounts"])
+    archived = client.get("/api/ledger/accounts?include_archived=1").get_json()["accounts"]
+    assert next(row for row in archived if row["account_id"] == "ACC-W3")["status"] == "archived"
+    blocked = _upload_fills(client, account_id="ACC-W3", rows=[
+        "2026-06-20,JPM,BUY,1,210.00,0.00,",
+    ])
+    assert blocked.status_code == 400
+    assert "archived and immutable" in blocked.get_json()["error"]
+    blocked_positions = client.post(
+        "/api/ledger/positions/upload",
+        data={
+            "file": (BytesIO(b"Symbol,Quantity,Price,Market Value\nJPM,1,210,210\n"), "positions.csv"),
+            "account_id": "ACC-W3",
+            "as_of": "2026-07-01",
+        },
+        content_type="multipart/form-data",
+    )
+    assert blocked_positions.status_code == 400
+    assert "archived and immutable" in blocked_positions.get_json()["error"]
+    remap = client.post(
+        "/api/ledger/account/map",
+        json={"account_id": "ACC-W3", "display_name": "Must not change"},
+    )
+    assert remap.status_code == 409
+    assert "archived and immutable" in remap.get_json()["error"]
 
 
 def test_performance_requires_account_and_reports_honestly(client):

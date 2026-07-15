@@ -5,12 +5,12 @@ import os
 
 from flask import Blueprint, make_response, request
 
-from engine import operations
+from engine import identity, operations, persistence, tenancy
 
 from .core import (
     AUTH_ENABLED, SESSION_COOKIE, _env_bool, _env_seconds,
     _institutional_controls_required, _session_token_from_request, _trusted_proxy,
-    create_session, current_principal, ok, revoke_session,
+    create_session, current_principal, issue_request_token, ok, revoke_session,
 )
 
 bp = Blueprint("security", __name__)
@@ -26,10 +26,13 @@ def security_status():
             "roles": list(principal.roles),
             "auth_method": principal.auth_method,
             "mfa_verified": principal.mfa_verified,
+            "tenant_id": principal.tenant_id,
+            "client_id": principal.client_id,
         },
         "authentication": {
             "enabled": AUTH_ENABLED,
-            "sso_enabled": _env_bool("HELIOS_SSO_ENABLED", False),
+            "sso_enabled": identity.sso_enabled(),
+            "enterprise_identity": identity.verifier_status(),
             "mfa_required_for_privileged_actions": (
                 _env_bool("HELIOS_REQUIRE_MFA", False) or _institutional_controls_required()
             ),
@@ -45,8 +48,14 @@ def security_status():
             "privileged_chain": operational["privileged_chain"],
             "application_chain": operational["audit_chain"],
         },
+        "workspace": {
+            **tenancy.configured_scope().public(),
+            "database_bound": bool(persistence.get_store().available),
+            "scope_mismatch": bool(getattr(persistence.get_store(), "scope_mismatch", False)),
+        },
+        "request_protection": issue_request_token(principal),
         "external_requirements": [
-            "Institutional SSO/MFA requires a user-managed identity provider and trusted reverse proxy.",
+            "Institutional SSO/MFA requires a user-managed identity provider and a trusted proxy that signs short-lived Helios assertions.",
             "True WORM retention requires forwarding privileged events to a separately administered SIEM or archive.",
         ],
     })

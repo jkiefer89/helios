@@ -9,7 +9,11 @@ modules that import from here.
 from __future__ import annotations
 
 import math
+import base64
+import binascii
 import hashlib
+import hmac
+import json
 import os
 import secrets
 import socket
@@ -24,6 +28,8 @@ import numpy as np
 import pandas as pd
 from flask import Flask, Response, g, jsonify, request, send_from_directory
 from werkzeug.exceptions import HTTPException
+
+from engine import identity, tenancy
 
 from .localenv import APP_ROOT
 
@@ -63,6 +69,9 @@ class Principal:
     roles: tuple[str, ...]
     auth_method: str
     mfa_verified: bool
+    tenant_id: str = tenancy.DEFAULT_TENANT_ID
+    client_id: str = tenancy.DEFAULT_CLIENT_ID
+    assertion_expires_at: float = 0.0
 
 
 @dataclass
@@ -93,6 +102,8 @@ PRIVILEGED_PERMISSIONS = {
 _SESSIONS: dict[str, SessionRecord] = {}
 _SESSIONS_LOCK = threading.Lock()
 SESSION_COOKIE = "helios_session"
+REQUEST_TOKEN_HEADER = "X-Helios-Request-Token"
+_REQUEST_TOKEN_SECRET = secrets.token_bytes(32)
 
 
 def _auth_ok(username: str, password: str) -> bool:
@@ -194,6 +205,117 @@ def _session_token_from_request() -> str:
     return request.cookies.get(SESSION_COOKIE, "").strip()
 
 
+def issue_request_token(principal: Principal) -> dict[str, object]:
+    """Issue a short-lived synchronizer token for unsafe browser requests."""
+    institutional = _institutional_controls_required()
+    active_session = _active_session_matches(principal)
+    bootstrap = institutional and not active_session
+    ttl = (
+        min(_env_seconds("HELIOS_REQUEST_TOKEN_SECONDS", 1800, 300, 7200), 300)
+        if bootstrap
+        else _env_seconds("HELIOS_REQUEST_TOKEN_SECONDS", 1800, 300, 7200)
+    )
+    expires_at = int(time.time()) + ttl
+    payload = {
+        "v": 1,
+        "exp": expires_at,
+        "nonce": secrets.token_urlsafe(12),
+        "principal": principal.username,
+        "tenant_id": principal.tenant_id,
+        "client_id": principal.client_id,
+        "binding": _request_token_binding(principal),
+        "scope": "session_bootstrap" if bootstrap else "unsafe",
+    }
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii").rstrip("=")
+    signature = hmac.new(
+        _REQUEST_TOKEN_SECRET, encoded.encode("ascii"), hashlib.sha256,
+    ).hexdigest()
+    return {
+        "header": REQUEST_TOKEN_HEADER,
+        "token": f"{encoded}.{signature}",
+        "expires_at": expires_at,
+        "expires_in_seconds": ttl,
+        "available": True,
+        "binding": "session_bootstrap" if bootstrap else (
+            "session" if _session_token_from_request() else "principal"
+        ),
+        "reason": (
+            "Use this short-lived token only to start a secured Helios session."
+            if bootstrap else ""
+        ),
+    }
+
+
+def _request_token_binding(principal: Principal) -> str:
+    session_token = _session_token_from_request()
+    if session_token:
+        return "session:" + hashlib.sha256(session_token.encode("utf-8")).hexdigest()
+    material = "|".join((
+        principal.username,
+        principal.auth_method,
+        principal.tenant_id,
+        principal.client_id,
+    ))
+    return "principal:" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _active_session_matches(principal: Principal) -> bool:
+    session_principal = _session_principal(_session_token_from_request())
+    return bool(
+        session_principal is not None
+        and session_principal.username == principal.username
+        and session_principal.tenant_id == principal.tenant_id
+        and session_principal.client_id == principal.client_id
+    )
+
+
+def _valid_request_token(token: str, principal: Principal) -> bool:
+    try:
+        encoded, signature = token.rsplit(".", 1)
+        expected = hmac.new(
+            _REQUEST_TOKEN_SECRET, encoded.encode("ascii"), hashlib.sha256,
+        ).hexdigest()
+        if not compare_digest(signature, expected):
+            return False
+        padded = encoded + "=" * (-len(encoded) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
+        binding = str(payload.get("binding") or "")
+        token_scope = str(payload.get("scope") or "unsafe")
+        session_bootstrap = request.method == "POST" and request.path == "/api/auth/session"
+        scope_valid = (
+            token_scope == "session_bootstrap"
+            if session_bootstrap and _institutional_controls_required()
+            else token_scope == "unsafe"
+        )
+        binding_valid = (
+            binding.startswith("principal:")
+            if session_bootstrap and _institutional_controls_required()
+            else (not _institutional_controls_required() or binding.startswith("session:"))
+        )
+        return bool(
+            int(payload.get("v") or 0) == 1
+            and int(payload.get("exp") or 0) >= int(time.time())
+            and compare_digest(str(payload.get("principal") or ""), principal.username)
+            and compare_digest(str(payload.get("tenant_id") or ""), principal.tenant_id)
+            and compare_digest(str(payload.get("client_id") or ""), principal.client_id)
+            and scope_valid
+            and binding_valid
+            and compare_digest(binding, _request_token_binding(principal))
+        )
+    except (ValueError, TypeError, json.JSONDecodeError, UnicodeDecodeError, binascii.Error):
+        return False
+
+
+def _request_token_required() -> bool:
+    if request.method in _CSRF_SAFE_METHODS:
+        return False
+    if app.testing and not _env_bool("HELIOS_TEST_ENFORCE_REQUEST_TOKEN", False):
+        return False
+    return True
+
+
 def _session_principal(token: str) -> Principal | None:
     if not token:
         return None
@@ -220,21 +342,72 @@ def _trusted_proxy() -> bool:
 
 
 def _sso_principal() -> Principal | None:
-    if not _env_bool("HELIOS_SSO_ENABLED", False) or not _trusted_proxy():
+    assertion = request.headers.get(identity.ASSERTION_HEADER, "").strip()
+    if not identity.sso_enabled():
+        if assertion:
+            raise identity.IdentityAssertionError(
+                "Enterprise identity assertions are not accepted while SSO is disabled."
+            )
         return None
-    username = request.headers.get("X-Helios-User", "").strip()
-    if not username:
-        return None
-    roles = _roles(request.headers.get("X-Helios-Roles", "viewer"))
-    mfa = request.headers.get("X-Helios-MFA", "").strip().lower() in {"1", "true", "verified", "yes"}
-    return Principal(username[:120], roles, "trusted_proxy_sso", mfa)
+    if not _trusted_proxy():
+        if identity.basic_fallback_allowed():
+            return None
+        raise identity.IdentityAssertionError(
+            "Enterprise identity requests must originate from a configured trusted proxy."
+        )
+    if not assertion:
+        if identity.basic_fallback_allowed():
+            return None
+        raise identity.IdentityAssertionError("A signed enterprise identity assertion is required.")
+    claims = identity.verify_assertion(assertion)
+    return Principal(
+        claims["username"],
+        tuple(claims["roles"]),
+        "signed_proxy_assertion",
+        bool(claims["mfa_verified"]),
+        claims["tenant_id"],
+        claims["client_id"],
+        float(claims["expires_at"]),
+    )
+
+
+def _scope_principal(username: str, roles: tuple[str, ...], method: str, mfa: bool) -> Principal:
+    scope = tenancy.configured_scope()
+    return Principal(username, roles, method, mfa, scope.tenant_id, scope.client_id)
+
+
+def _bare_identity_headers() -> list[str]:
+    return [name for name in identity.BARE_IDENTITY_HEADERS if request.headers.get(name) is not None]
+
+
+def _principal_scope_matches(principal: Principal) -> bool:
+    scope = tenancy.configured_scope()
+    return principal.tenant_id == scope.tenant_id and principal.client_id == scope.client_id
+
+
+def _storage_scope_guard():
+    try:
+        tenancy.configured_scope()
+        from engine import persistence
+
+        store = persistence.get_store()
+    except ValueError as exc:
+        return _guard_response(str(exc), 503)
+    except Exception:
+        app.logger.exception("Could not validate the configured workspace scope")
+        return _guard_response("Workspace scope validation failed.", 503)
+    if getattr(store, "scope_mismatch", False):
+        return _guard_response(
+            "The configured database belongs to a different tenant/client scope.", 503,
+        )
+    return None
 
 
 def _basic_principal() -> Principal | None:
     auth = request.authorization
     if not auth or auth.type != "basic" or not _auth_ok(auth.username or "", auth.password or ""):
         return None
-    return Principal(
+    return _scope_principal(
         (auth.username or AUTH_USER)[:120],
         _roles(os.environ.get("HELIOS_BASIC_ROLES", "admin"), default="admin"),
         "basic",
@@ -243,6 +416,12 @@ def _basic_principal() -> Principal | None:
 
 
 def _authenticate_request() -> Principal | None:
+    # A caller that explicitly supplies an enterprise assertion must have that
+    # assertion verified even when a browser session cookie is also present.
+    # Otherwise a replayed/forged assertion could be silently masked by the
+    # existing session and never reach the verifier.
+    if request.headers.get(identity.ASSERTION_HEADER, "").strip():
+        return _sso_principal()
     principal = _session_principal(_session_token_from_request())
     if principal is not None:
         return principal
@@ -276,6 +455,14 @@ def _required_permission() -> str:
         payload = request.get_json(silent=True) if request.is_json else {}
         status = str((payload or {}).get("approval_status") or "").lower()
         return "governance_approve" if status in {"approved", "rejected"} else "governance_submit"
+    if path.startswith(("/api/model/upload", "/api/model-library/import", "/api/model/thesis")):
+        return "governance_submit"
+    if path.startswith("/api/trials"):
+        if path.endswith("/close"):
+            payload = request.get_json(silent=True) if request.is_json else {}
+            status = str((payload or {}).get("status") or "").lower()
+            return "governance_approve" if status == "completed" else "governance_submit"
+        return "governance_submit"
     if path.startswith("/api/models/") and path.endswith("/editor"):
         return "governance_submit"
     if path.startswith(("/api/live", "/api/upload", "/api/data/", "/api/model/upload")):
@@ -305,7 +492,13 @@ def _security_event(action: str, outcome: str, principal: Principal | None = Non
             resource=request.path,
             outcome=outcome,
             source_ip=request.remote_addr or "",
-            details=details or {},
+            details={
+                **(details or {}),
+                **({
+                    "tenant_id": principal.tenant_id,
+                    "client_id": principal.client_id,
+                } if principal else {}),
+            },
         )
         return recorded is not None
     except Exception:
@@ -415,7 +608,7 @@ def _rollback_privileged_state() -> None:
 
 def current_principal() -> Principal:
     principal = getattr(g, "helios_principal", None)
-    return principal or Principal("local-operator", ("admin",), "local", True)
+    return principal or _scope_principal("local-operator", ("admin",), "local", True)
 
 
 def current_actor() -> str:
@@ -427,6 +620,9 @@ def create_session(principal: Principal) -> tuple[str, dict]:
     token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
     now = time.time()
     absolute_seconds = _env_seconds("HELIOS_SESSION_ABSOLUTE_SECONDS", 28_800, 300, 604_800)
+    if principal.auth_method == "signed_proxy_assertion" and principal.assertion_expires_at:
+        remaining = max(1, int(principal.assertion_expires_at - now))
+        absolute_seconds = min(absolute_seconds, remaining)
     with _SESSIONS_LOCK:
         _prune_sessions(now)
         if len(_SESSIONS) >= 200:
@@ -438,6 +634,8 @@ def create_session(principal: Principal) -> tuple[str, dict]:
         "roles": list(principal.roles),
         "auth_method": principal.auth_method,
         "mfa_verified": principal.mfa_verified,
+        "tenant_id": principal.tenant_id,
+        "client_id": principal.client_id,
         "absolute_expires_in_seconds": absolute_seconds,
         "idle_timeout_seconds": _env_seconds("HELIOS_SESSION_IDLE_SECONDS", 900, 60, 86_400),
     }
@@ -461,11 +659,16 @@ def _prune_sessions(now: float) -> None:
         _SESSIONS.pop(key, None)
 
 
-def _guard_response(message: str, code: int, headers: dict | None = None) -> Response:
+def _guard_response(
+    message: str,
+    code: int,
+    headers: dict | None = None,
+    details: dict | None = None,
+) -> Response:
     """Auth/CSRF/lockout refusal: JSON error envelope for API paths, plain text
     elsewhere so the browser Basic-auth prompt keeps working."""
     if request.path.startswith("/api/"):
-        resp = jsonify({"error": message})
+        resp = jsonify({"error": message, **(details or {})})
         resp.status_code = code
     else:
         resp = Response(message, code)
@@ -482,9 +685,32 @@ def _require_auth():
     if request.method not in _CSRF_SAFE_METHODS and _is_cross_site_request():
         _security_event("csrf_rejected", "denied")
         return _guard_response("Forbidden.", 403)
+    bare_headers = _bare_identity_headers()
+    if bare_headers:
+        _security_event(
+            "unsigned_identity_headers_rejected", "denied",
+            details={"headers": sorted(bare_headers)},
+        )
+        return _guard_response("Unsigned identity headers are not accepted.", 401)
+    scope_error = _storage_scope_guard()
+    if scope_error is not None:
+        return scope_error
     if not AUTH_ENABLED:
-        principal = Principal("local-operator", ("admin",), "auth_disabled", True)
+        if identity.sso_enabled():
+            return _guard_response(
+                "Enterprise SSO requires HELIOS_AUTH=1; refusing an authentication bypass configuration.",
+                503,
+            )
+        principal = _scope_principal("local-operator", ("admin",), "auth_disabled", True)
         g.helios_principal = principal
+        if _request_token_required() and not _valid_request_token(
+            request.headers.get(REQUEST_TOKEN_HEADER, ""), principal,
+        ):
+            _security_event("request_token_rejected", "denied", principal)
+            return _guard_response(
+                "A valid unsafe-request token is required.", 403,
+                details={"code": "request_token_invalid", "retryable": True},
+            )
         permission = _required_permission()
         g.helios_permission = permission
         return _privileged_preflight(principal, permission)
@@ -492,10 +718,25 @@ def _require_auth():
     if _auth_locked_out(remote):
         _security_event("authentication_lockout", "denied")
         return _guard_response("Too many failed login attempts — try again shortly.", 429)
-    principal = _authenticate_request()
+    try:
+        principal = _authenticate_request()
+    except identity.IdentityAssertionError as exc:
+        _security_event("enterprise_identity_rejected", "denied", details={"reason": str(exc)})
+        return _guard_response(str(exc), exc.status_code)
     if principal is not None:
+        if not _principal_scope_matches(principal):
+            _security_event("principal_scope_rejected", "denied", principal)
+            return _guard_response("Authenticated principal is outside this tenant/client scope.", 403)
         _clear_auth_failures(remote)
         g.helios_principal = principal
+        if _request_token_required() and not _valid_request_token(
+            request.headers.get(REQUEST_TOKEN_HEADER, ""), principal,
+        ):
+            _security_event("request_token_rejected", "denied", principal)
+            return _guard_response(
+                "A valid unsafe-request token is required.", 403,
+                details={"code": "request_token_invalid", "retryable": True},
+            )
         permission = _required_permission()
         g.helios_permission = permission
         if permission not in _permissions(principal):
@@ -693,17 +934,26 @@ def ok(payload):
     return jsonify(clean(payload))
 
 
-def err(message, code=400):
-    return jsonify({"error": message}), code
+def err(message, status_code=400, **details):
+    return jsonify(clean({"error": message, **details})), status_code
 
 
-def _safe_int_arg(name: str, default: int, min_value: int, max_value: int) -> tuple[int | None, str | None]:
+def _safe_int_arg(
+    name: str,
+    default: int,
+    min_value: int,
+    max_value: int,
+    *,
+    clamp: bool = True,
+) -> tuple[int | None, str | None]:
     """Parse an int query arg: unparseable values yield a 400 message,
     out-of-range values are clamped into [min_value, max_value]."""
     raw = request.args.get(name, default)
     try:
         value = int(raw)
     except (TypeError, ValueError):
+        return None, f"{name} must be an integer between {min_value} and {max_value}."
+    if not clamp and not min_value <= value <= max_value:
         return None, f"{name} must be an integer between {min_value} and {max_value}."
     return max(min_value, min(value, max_value)), None
 

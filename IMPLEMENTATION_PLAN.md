@@ -1,6 +1,6 @@
 # Helios Institutional Readiness Implementation Record
 
-**Updated:** 2026-07-13
+**Updated:** 2026-07-14
 **Review baseline:** `6ba715e40a44fba88178c08f377e7cb1e2a97e07`
 **Source review:** external review supplied out of band; this plan is the tracked implementation record.
 
@@ -61,6 +61,13 @@ Implemented:
   is withheld when measured edge is absent.
 - Governance, independent-validation, provider, operational, and report-purpose
   gates block approval or external-facing export when required evidence is absent.
+- Historical validation exposes separate data-valid, method-valid, and
+  edge-supported verdicts. Only the edge verdict, after mandate-specific economic
+  floors and capacity checks, can satisfy the historical research gate.
+- Missing average-daily-volume evidence blocks material rebalance sizing; it is
+  never converted into unlimited liquidity. Governed overrides remain explicit.
+- Client and investment-committee model reports require current AUM, an as-of
+  date, and sized capacity evidence before external-ready export.
 
 Exit criterion: an action cannot look investable merely because the benchmark,
 cost, cash, or implementation facts were omitted.
@@ -131,15 +138,29 @@ Implemented in Helios:
   authentication, MFA/SSO, and trusted TLS assertion.
 - Independent model-review records with sponsor/validator separation, dated
   outcomes, bounded exceptions, expiration, and review evidence.
+- Every unsafe browser request requires a short-lived synchronizer token bound to
+  the authenticated principal, tenant/client scope, and active session;
+  institutional mode has no principal-only write fallback and protects session
+  creation with a short-lived principal-bound bootstrap token scoped only to that
+  operation.
+- Cloud AI transfers pass camelCase-aware, contextual-name, and payload-derived
+  local DLP redaction
+  and require confirmation of the exact final provider/model/task/prompt
+  fingerprint before any provider call. Local AI is unaffected.
+- Encryption supports active-key metadata plus decrypt-only recovery keys for
+  rotation. Off-host exports are encrypted, checksummed, scope-bound, and
+  audit-head-bound; mandatory audit exports must have a current WORM/SIEM
+  checkpoint; restore drills use the exported snapshot and manifest and measure
+  configured RPO/RTO objectives.
 
 External controls still required:
 
 - Executed primary and backup data-provider contracts, entitlements, and SLA.
 - A separately managed IdP with enrolled MFA and a trusted reverse proxy or
   approved certificate authority.
-- Off-host key custody, separately administered immutable audit retention/WORM or
-  SIEM, backup custody, scheduled restore drills, incident runbooks, and named
-  operational ownership.
+- An operator-managed KMS/HSM/vault, separately administered immutable audit
+  retention/WORM or SIEM, off-host backup custody, scheduled execution of the
+  built-in restore drills, incident runbooks, and named operational ownership.
 - Independent human model validation and investment-committee authorization.
 
 Helios cannot create or truthfully mark those external facts complete. The product
@@ -151,6 +172,8 @@ evidence.
 Implemented:
 
 - Five task-oriented groups: Setup, Research, Evidence & Risk, Decisions, Reports.
+- A first-class Data Setup route combines live fetch/refresh, uploads, model
+  intake, persistence, model coverage, and per-symbol provider remediation.
 - Command Center presents readiness, blockers, recent changes, and direct
   remediation rather than decorative research rows.
 - Shared data-quality gates provide the same reason and next action across
@@ -161,7 +184,10 @@ Implemented:
   data-heavy journal and instrument surfaces use semantic tables with contained
   scrolling.
 - Loading, blocked, empty, error, and retry states are explicit. A transient
-  Command Center failure can be retried in place.
+  request preserves the last good result, exposes a reason code/next step and
+  diagnostics where supplied, and can be retried in place.
+- Evidence Lab controls enforce the same bounded integer contract as the server
+  and show invalid parameters inline instead of silently substituting values.
 - Playwright covers blocked first run, price import, partial model coverage,
   missing-holding repair, validation, ranking, model analysis, explicit signal
   recording, strategy and evidence review, portfolio risk, decision recording,

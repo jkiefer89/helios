@@ -1,5 +1,5 @@
 import app as helios
-from engine import data, portfolio
+from engine import data, model_library, persistence, portfolio
 
 
 def test_model_library_api_returns_governed_templates():
@@ -52,6 +52,35 @@ def test_model_library_import_creates_normal_model_without_network_or_real_promo
     assert "Benchmark:" in model.mandate_context
     assert "Rebalance:" in model.mandate_context
     assert "Risk limits:" in model.mandate_context
+
+
+def test_persisted_model_library_import_creates_pending_governance_event(monkeypatch, tmp_path):
+    monkeypatch.setenv("HELIOS_DB_PATH", str(tmp_path / "library.db"))
+    persistence.reset_store_for_tests()
+    store = persistence.get_store()
+    assert store.available
+
+    response = helios.app.test_client().post(
+        "/api/model-library/import", json={"slug": "cash-defensive"},
+    )
+
+    assert response.status_code == 200
+    events = store.model_governance_events("CASH-DEFENSIVE", limit=10)
+    assert len(events) == 1
+    assert events[0]["action"] == "model_imported"
+    assert events[0]["approval_status"] == "pending_review"
+
+
+def test_direct_library_helper_cannot_create_ungoverned_durable_model(monkeypatch, tmp_path):
+    monkeypatch.setenv("HELIOS_DB_PATH", str(tmp_path / "library-direct.db"))
+    persistence.reset_store_for_tests()
+    store = persistence.get_store()
+
+    model = model_library.import_template("cash-defensive")
+
+    assert model is not None
+    assert portfolio.get(model.id) is model
+    assert store.load_models() == []
 
 
 def test_starter_live_universe_covers_every_model_library_holding():

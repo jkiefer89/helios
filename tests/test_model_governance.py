@@ -1,10 +1,12 @@
 import numpy as np
 import pandas as pd
 import pytest
+import base64
 from io import BytesIO
 
 import app as helios
-from engine import data, model_governance, persistence, portfolio
+from engine import data, model_governance, persistence, portfolio, research_gate
+from helios_web import core as web_core
 
 
 def _use_db(monkeypatch, tmp_path):
@@ -23,7 +25,7 @@ def _client():
     return helios.app.test_client()
 
 
-def _make_research_ready(model, *extra_symbols):
+def _make_research_ready(monkeypatch, model, *extra_symbols):
     symbols = [holding.ticker for holding in model.holdings]
     symbols.extend(extra_symbols)
     symbols.extend(["SPY", "QQQ"])
@@ -37,6 +39,19 @@ def _make_research_ready(model, *extra_symbols):
         returns = np.resize(pattern, len(idx))
         close = pd.Series(100.0 * np.cumprod(1.0 + returns), index=idx, name="close")
         data.register(data.Instrument(symbol, symbol, close.to_frame(), "upload", []))
+    monkeypatch.setattr(
+        research_gate,
+        "_model_validation",
+        lambda _model: {
+            "passed": True,
+            "measured_count": 24,
+            "benchmark_coverage_pct": 100.0,
+            "benchmark": {"symbol": "SPY", "status": "available"},
+            "parameters": {"horizon_days": 21, "train_window": 252, "step": 21},
+            "reason": "Governance fixture supplies separately tested historical validation.",
+            "verdicts": {},
+        },
+    )
 
 
 def test_model_governance_tracks_versions_approval_risk_limits_and_history(monkeypatch, tmp_path):
@@ -48,7 +63,7 @@ def test_model_governance_tracks_versions_approval_risk_limits_and_history(monke
         "balanced",
         "Advisor-created model for governance review.",
     )
-    _make_research_ready(model)
+    _make_research_ready(monkeypatch, model)
     client = _client()
 
     initial = client.get("/api/model-governance").get_json()
@@ -105,7 +120,7 @@ def test_model_governance_blocks_approval_when_risk_limits_breach_and_allows_rej
         "balanced",
         "Committee review model with excessive concentration.",
     )
-    _make_research_ready(model)
+    _make_research_ready(monkeypatch, model)
     client = _client()
 
     blocked = client.post(
@@ -156,7 +171,7 @@ def test_model_editor_archives_before_after_diff_and_resets_approval(monkeypatch
         "balanced",
         "Approved model before a committee edit.",
     )
-    _make_research_ready(model, "AVGO")
+    _make_research_ready(monkeypatch, model, "AVGO")
     client = _client()
     approved = client.post(
         f"/api/model-governance/{model.id}/events",
@@ -213,7 +228,7 @@ def test_model_governance_approval_packet_exports_committee_evidence(monkeypatch
         "balanced",
         "Approval packet model.",
     )
-    _make_research_ready(model)
+    _make_research_ready(monkeypatch, model)
     client = _client()
     edit = client.post(
         f"/api/models/{model.id}/editor",
@@ -273,7 +288,7 @@ def test_model_governance_requires_verified_committee_identity_when_pin_configur
         "balanced",
         "Committee approval model with local identity verification.",
     )
-    _make_research_ready(model)
+    _make_research_ready(monkeypatch, model)
     client = _client()
 
     missing_identity = client.post(
@@ -377,7 +392,7 @@ def test_same_name_model_reupload_invalidates_prior_approval(monkeypatch, tmp_pa
         "balanced",
         "Original approved version.",
     )
-    _make_research_ready(model, "AVGO")
+    _make_research_ready(monkeypatch, model, "AVGO")
     client = _client()
     approval = client.post(
         f"/api/model-governance/{model.id}/events",
@@ -404,6 +419,170 @@ def test_same_name_model_reupload_invalidates_prior_approval(monkeypatch, tmp_pa
     row = next(item for item in client.get("/api/model-governance").get_json()["models"] if item["id"] == model.id)
     assert row["approval_status"] == "pending_review"
     assert row["approved_by"] == ""
+
+
+def test_initial_model_upload_creates_pending_governance_version(monkeypatch, tmp_path):
+    store = _use_db(monkeypatch, tmp_path)
+
+    upload = _client().post(
+        "/api/model/upload",
+        data={
+            "file": (BytesIO(b"Ticker,Weight\nAAPL,60\nMSFT,40\n"), "initial.csv"),
+            "name": "Initially Governed",
+            "mandate": "balanced",
+        },
+        content_type="multipart/form-data",
+    )
+
+    assert upload.status_code == 200
+    events = store.model_governance_events(upload.get_json()["id"], limit=10)
+    assert len(events) == 1
+    assert events[0]["version"] == 1
+    assert events[0]["action"] == "model_uploaded"
+    assert events[0]["approval_status"] == "pending_review"
+
+
+def _institutional_model_upload_setup(monkeypatch, tmp_path):
+    monkeypatch.setattr(web_core, "AUTH_ENABLED", True)
+    monkeypatch.setenv("HELIOS_INSTITUTIONAL_CONTROLS", "1")
+    monkeypatch.setenv("HELIOS_BASIC_ROLES", "model_sponsor")
+    monkeypatch.setenv("HELIOS_BASIC_MFA_VERIFIED", "1")
+    monkeypatch.setenv("HELIOS_SSO_ENABLED", "0")
+    monkeypatch.setenv("HELIOS_DB_PATH", str(tmp_path / "institutional-model.db"))
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION", "auto")
+    monkeypatch.setenv("HELIOS_DB_ENCRYPTION_KEY_PATH", str(tmp_path / "institutional-model.key"))
+    persistence.reset_store_for_tests()
+    store = persistence.get_store()
+    assert store.available is True
+    assert store.encryption["enabled"] is True
+    credentials = base64.b64encode(
+        f"{web_core.AUTH_USER}:{web_core.AUTH_PASSWORD}".encode()
+    ).decode()
+    return store, {"Authorization": f"Basic {credentials}"}
+
+
+def test_institutional_model_upload_commits_model_and_governance_atomically(monkeypatch, tmp_path):
+    store, headers = _institutional_model_upload_setup(monkeypatch, tmp_path)
+
+    response = _client().post(
+        "/api/model/upload",
+        headers=headers,
+        data={
+            "file": (BytesIO(b"Ticker,Weight\nAAPL,60\nMSFT,40\n"), "institutional.csv"),
+            "name": "Institutional Atomic Model",
+            "mandate": "balanced",
+        },
+        content_type="multipart/form-data",
+    )
+
+    assert response.status_code == 200
+    model_id = response.get_json()["id"]
+    assert portfolio.get(model_id) is not None
+    assert any(row.id == model_id for row in store.load_models())
+    event = store.model_governance_events(model_id, limit=1)[0]
+    assert event["action"] == "model_uploaded"
+    assert event["approval_status"] == "pending_review"
+
+
+def test_institutional_model_upload_rolls_back_when_final_http_audit_fails(monkeypatch, tmp_path):
+    store, headers = _institutional_model_upload_setup(monkeypatch, tmp_path)
+    before_ids = set(portfolio._MODELS)
+    real_security_event = web_core._security_event
+
+    def fail_final_http_audit(action, outcome, principal=None, details=None):
+        if action == "http_post" and outcome == "succeeded":
+            return False
+        return real_security_event(action, outcome, principal, details)
+
+    monkeypatch.setattr(web_core, "_security_event", fail_final_http_audit)
+    response = _client().post(
+        "/api/model/upload",
+        headers=headers,
+        data={
+            "file": (BytesIO(b"Ticker,Weight\nNVDA,55\nAVGO,45\n"), "rollback.csv"),
+            "name": "Must Roll Back",
+            "mandate": "balanced",
+        },
+        content_type="multipart/form-data",
+    )
+
+    assert response.status_code == 503
+    assert set(portfolio._MODELS) == before_ids
+    assert all(row.name != "Must Roll Back" for row in store.load_models())
+    with store._connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM model_governance_events").fetchone()[0] == 0
+
+
+def test_model_thesis_requires_note_and_records_version_diff(monkeypatch, tmp_path):
+    store = _use_db(monkeypatch, tmp_path)
+    model = portfolio.parse_model_file(
+        b"Ticker,Weight\nAAPL,50\nMSFT,50\n",
+        "thesis.csv", "Governed Thesis", "balanced", "Initial context.",
+    )
+    client = _client()
+
+    missing = client.post("/api/model/thesis", json={
+        "id": model.id, "thesis": "Revised thesis without note.",
+    })
+    assert missing.status_code == 400
+    assert "change note" in missing.get_json()["error"].lower()
+
+    saved = client.post("/api/model/thesis", json={
+        "id": model.id,
+        "thesis": "Focus on durable quality and measured downside control.",
+        "thesis_params": {"income_monthly_draw_usd": 5000},
+        "change_note": "Documented mandate interpretation for committee review.",
+    })
+
+    assert saved.status_code == 200
+    event = saved.get_json()["governance_event"]
+    assert event["action"] == "thesis_updated"
+    assert event["approval_status"] == "pending_review"
+    stored = store.model_governance_events(model.id, limit=1)[0]
+    diff = stored["snapshot"]["version_diff"]
+    assert diff["thesis_changed"] is True
+    assert diff["thesis_params_changed"] is True
+    assert stored["snapshot"]["after_snapshot"]["model"]["thesis"].startswith("Focus on durable")
+
+
+def test_model_thesis_rolls_back_persistence_and_memory_when_governance_fails(monkeypatch, tmp_path):
+    store = _use_db(monkeypatch, tmp_path)
+    model = portfolio.parse_model_file(
+        b"Ticker,Weight\nAAPL,50\nMSFT,50\n",
+        "thesis-atomic.csv", "Atomic Thesis", "balanced", "Initial context.",
+    )
+    original_thesis = model.thesis
+    monkeypatch.setattr(
+        model_governance,
+        "record_event",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("simulated thesis audit failure")),
+    )
+
+    response = _client().post("/api/model/thesis", json={
+        "id": model.id,
+        "thesis": "This must not survive.",
+        "change_note": "Attempt a revision that must roll back.",
+    })
+
+    assert response.status_code == 503
+    assert portfolio.get(model.id).thesis == original_thesis
+    persisted = next(item for item in store.load_models() if item.id == model.id)
+    assert (persisted.metadata or {}).get("thesis", "") == original_thesis
+    assert store.model_governance_events(model.id, limit=10) == []
+
+
+def test_direct_thesis_helper_cannot_change_durable_model_without_governance(monkeypatch, tmp_path):
+    store = _use_db(monkeypatch, tmp_path)
+    model = portfolio.parse_model_file(
+        b"Ticker,Weight\nAAPL,50\nMSFT,50\n",
+        "direct-thesis.csv", "Direct Thesis", "balanced", "Initial context.",
+    )
+
+    portfolio.set_thesis(model.id, "Process-local research note.")
+
+    persisted = next(item for item in store.load_models() if item.id == model.id)
+    assert persisted.metadata.get("thesis", "") == ""
+    assert store.model_governance_events(model.id, limit=10) == []
 
 
 def test_model_governance_is_unavailable_without_sqlite_persistence(monkeypatch):
@@ -472,6 +651,29 @@ def test_model_editor_previews_breaches_and_requires_change_note(monkeypatch, tm
 
     assert missing_note.status_code == 400
     assert "change note" in missing_note.get_json()["error"].lower()
+
+
+@pytest.mark.parametrize("weight", [0, -5, "not-a-number"])
+def test_model_editor_rejects_nonpositive_and_unreadable_weights(monkeypatch, tmp_path, weight):
+    _use_db(monkeypatch, tmp_path)
+    model = portfolio.parse_model_file(
+        b"Ticker,Weight\nAAPL,50\nMSFT,50\n",
+        "strict-weights.csv",
+        "Strict Weights",
+        "balanced",
+        "Reject malformed allocations.",
+    )
+
+    response = _client().post(
+        f"/api/models/{model.id}/editor/preview",
+        json={"holdings": [
+            {"ticker": "AAPL", "weight_pct": weight},
+            {"ticker": "MSFT", "weight_pct": 100},
+        ]},
+    )
+
+    assert response.status_code == 400
+    assert "weight" in response.get_json()["error"].lower()
 
 
 def test_model_editor_saves_normalized_holdings_and_governance_snapshot(monkeypatch, tmp_path):

@@ -731,7 +731,7 @@ function ModelValidationDashboard({
   const rows = validation?.models || [];
   const champion = validation?.champion || null;
   return (
-    <Panel title="Model Validation Dashboard" meta={validation ? `${validation.summary.eligible_count} evidence-ready / ${validation.summary.alert_count} alerts` : "Champion / Challenger"}>
+    <Panel title="Model Validation Dashboard" meta={validation ? `${validation.summary.eligible_count} edge-supported / ${validation.summary.alert_count} alerts` : "Champion / Challenger"}>
       <div className="model-validation-head">
         <div>
           <strong>Champion / Challenger</strong>
@@ -752,7 +752,7 @@ function ModelValidationDashboard({
         <div className="model-validation-workspace">
           <div className="metric-grid validation-summary" aria-label="Model validation summary">
             <div className="stat-tile"><span>Champion</span><strong>{champion?.model_name || "None"}</strong><small>{champion ? `Score ${fmtNumber(champion.validation_score, 1)} / grade ${champion.validation_grade} · best of ${validation.selection?.n_trials ?? "—"} (selection-biased upward)` : "No eligible model"}</small></div>
-            <div className="stat-tile"><span>Challengers</span><strong>{validation.summary.challenger_count}</strong><small>{validation.summary.eligible_count} evidence-ready</small></div>
+            <div className="stat-tile"><span>Challengers</span><strong>{validation.summary.challenger_count}</strong><small>{validation.summary.eligible_count} edge-supported</small></div>
             <div className="stat-tile"><span>Drift Alerts</span><strong className={validation.summary.alert_count ? "tone-warning" : "tone-positive"}>{validation.summary.alert_count}</strong><small>Blocked, high, and medium</small></div>
             <div className="stat-tile"><span>Governance</span><strong>{validation.summary.governance_available ? "Available" : "Unavailable"}</strong><small>Versions and approvals</small></div>
           </div>
@@ -785,7 +785,11 @@ function ModelValidationDashboard({
               <tbody>{rows.map((row) => (
               <tr className="validation-row" key={row.model_id}>
                 <th scope="row"><strong>{row.model_name}</strong><small>{row.model_id} · {formatStatus(row.mandate)}</small></th>
-                <td><b className={row.role === "champion" ? "tone-positive" : row.validation_state === "blocked" ? "tone-warning" : ""}>{formatStatus(row.role)}</b><small>Score {fmtNumber(row.validation_score, 1)} · Grade {row.validation_grade}</small></td>
+                <td>
+                  <b className={row.role === "champion" ? "tone-positive" : row.validation_state !== "edge_supported" ? "tone-warning" : ""}>{formatStatus(row.role)}</b>
+                  <small>Score {row.validation_score == null ? "—" : fmtNumber(row.validation_score, 1)} · Grade {row.validation_grade}</small>
+                  <small>Data {row.validation_verdicts.data_valid.passed ? "pass" : "fail"} · Method {row.validation_verdicts.method_valid.passed ? "pass" : "fail"} · Edge {row.validation_verdicts.edge_supported.passed ? "supported" : "not supported"}</small>
+                </td>
                 <td>{fmtPct(row.walk_forward.hit_rate_pct)} hit rate<small>{row.walk_forward.window_count || 0} windows · alpha {fmtPct(row.walk_forward.avg_alpha_pct)}</small></td>
                 <td>{row.false_positives.count || 0} flagged<small>{fmtPct(row.false_positives.rate_pct)} FP rate</small></td>
                 <td>{bestRegime(row) || "No regime bucket"}<small>{row.regime_sensitivity.length} buckets</small></td>

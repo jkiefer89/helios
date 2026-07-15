@@ -16,8 +16,10 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from hmac import compare_digest
 from typing import Any
 
+from . import dlp
 from ._common import dedupe as _dedupe
 from .persistence import redact_secrets
 
@@ -137,6 +139,93 @@ class AITimeoutError(AIError):
 
 class AIProviderError(AIError):
     pass
+
+
+class CloudConfirmationRequired(AIError):
+    status_code = 409
+
+    def __init__(self, disclosure: dict[str, Any], status: dict[str, Any] | None = None):
+        super().__init__(
+            "Confirm the locally redacted payload before sending it to the cloud AI provider.",
+            status,
+        )
+        self.disclosure = disclosure
+
+
+def prepare_provider_transfer(
+    provider: "AIProvider",
+    value: Any,
+    *,
+    task: str,
+    confirmation: dict[str, Any] | None = None,
+) -> tuple[Any, dict[str, Any]]:
+    """Redact locally and confirm the exact final cloud-transfer envelope."""
+    sanitized, disclosure = dlp.prepare(value)
+    status = provider.status()
+    provider_name = str(getattr(provider, "provider", status.get("provider") or "unknown"))
+    provider_mode = str(getattr(provider, "mode", status.get("mode") or "unknown"))
+    provider_model = str(getattr(provider, "model", status.get("model") or "unknown"))
+    cloud = provider_name in {"anthropic", "openai"} or provider_mode == "cloud"
+    config = getattr(provider, "config", None) or AIConfig.from_env()
+    if task == "dialogue":
+        messages = _clean_dialogue_messages((sanitized or {}).get("messages") or [])
+        payload = sanitize_payload((sanitized or {}).get("payload") or {}, config)
+        transfer_envelope = {
+            "provider": provider_name,
+            "model": provider_model,
+            "task": task,
+            "system": DIALOGUE_SYSTEM + _playbook_block(),
+            "messages": [{
+                "role": "user",
+                "content": (
+                    "HELIOS CONTEXT (sanitized engine output — authoritative numbers, do not "
+                    "recompute them):\n"
+                    + json.dumps(payload, sort_keys=True, separators=(",", ":"))
+                ),
+            }, *messages],
+        }
+    else:
+        wrapped = isinstance(sanitized, dict) and "payload" in sanitized
+        payload = sanitized.get("payload") if wrapped else sanitized
+        question = str(sanitized.get("question") or "") if wrapped else ""
+        prompt = build_prompt(task, sanitize_payload(payload or {}, config), question)
+        transfer_envelope = {
+            "provider": provider_name,
+            "model": provider_model,
+            "task": task,
+            "system": prompt["system"],
+            "user": prompt["user"],
+        }
+    canonical = json.dumps(
+        transfer_envelope, sort_keys=True, separators=(",", ":"), default=str,
+    )
+    transfer_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    disclosure = {
+        **disclosure,
+        "dlp_payload_hash": disclosure["disclosure_hash"],
+        "disclosure_hash": transfer_hash,
+        "provider": provider_name,
+        "model": provider_model,
+        "task": task,
+        "transfer_scope": "final_sanitized_provider_request",
+        "cloud_transfer": cloud,
+        "confirmed": False,
+    }
+    if not cloud:
+        return sanitized, {**disclosure, "confirmed": True, "confirmation_required": False}
+    supplied_hash = str((confirmation or {}).get("disclosure_hash") or "")
+    confirmed = (confirmation or {}).get("confirmed") is True
+    if not confirmed or not supplied_hash or not compare_digest(
+        supplied_hash, str(disclosure["disclosure_hash"]),
+    ):
+        raise CloudConfirmationRequired(
+            {**disclosure, "confirmation_required": True}, status,
+        )
+    return sanitized, {
+        **disclosure,
+        "confirmed": True,
+        "confirmation_required": False,
+    }
 
 
 @dataclass

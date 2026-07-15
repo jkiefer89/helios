@@ -102,7 +102,11 @@ def dashboard_payload(sync_alerts: bool = False) -> dict:
     active_thresholds = thresholds()
     instruments = data.all_instruments()
     models = portfolio.all_models()
-    refresh_logs = persistence.get_store().refresh_log(limit=250)
+    refresh_logs = [
+        ({**row, **data.live_failure_metadata(str(row.get("message") or "Live data operation failed."))}
+         if str(row.get("status") or "").lower() in {"error", "skipped"} else row)
+        for row in persistence.get_store().refresh_log(limit=250)
+    ]
     refresh_by_symbol = {}
     for row in refresh_logs:
         refresh_by_symbol.setdefault(row["symbol"], row)
@@ -159,8 +163,9 @@ def dashboard_payload(sync_alerts: bool = False) -> dict:
                 "refresh_failures",
                 "warning",
                 row["symbol"],
-                f"{row['symbol']} refresh failed: {row.get('message') or 'provider error'}",
-                "Retry refresh and keep the prior stored history until the provider succeeds.",
+                f"{row['symbol']} refresh failed ({row.get('reason_code') or 'provider_failed'}): "
+                f"{row.get('message') or 'provider error'}",
+                str(row.get("next_step") or "Retry refresh and keep the prior stored history until the provider succeeds."),
             ))
     # Rate-assumption honesty: mandate anchors and CD-alternative benchmarks are
     # keyed to HELIOS_RF; alert when it drifts materially from the live 3M bill

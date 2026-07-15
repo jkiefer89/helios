@@ -7,18 +7,22 @@ import type {
 import { Panel, StatTile } from "../components/cards/Panel";
 import { EmptyState } from "../components/empty-states/EmptyState";
 import { TerminalSelect } from "../components/forms/TerminalSelect";
+import { RequestStatus, toRequestFailure, type RequestFailureState } from "../components/states/RequestStatus";
+import { useViewFetch } from "../hooks/useViewFetch";
 import { fmtNumber, fmtTimestamp, titleCase } from "../utils/format";
 
 export function DataQuality() {
-  const [payload, setPayload] = useState<DataQualityResponse | null>(null);
   const [jobs, setJobs] = useState<DataJobsResponse | null>(null);
-  const [jobsError, setJobsError] = useState("");
+  const [jobsFailure, setJobsFailure] = useState<RequestFailureState | null>(null);
   const [providers, setProviders] = useState<ProvidersResponse | null>(null);
   const [operations, setOperations] = useState<OperationsStatusResponse | null>(null);
+  const [controlsFailure, setControlsFailure] = useState<RequestFailureState | null>(null);
   const [controlsError, setControlsError] = useState("");
   const [controlsBusy, setControlsBusy] = useState("");
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(true);
+  const { payload, failure, staleResult, isLoading: loading, load: loadQuality, retry } = useViewFetch<DataQualityResponse>({
+    failureMessage: "Data quality dashboard unavailable.",
+    keepPayloadWhileLoading: true,
+  });
 
   const loadInstitutionalControls = useCallback(async () => {
     const results = await Promise.allSettled([api.providers(), api.operationsStatus()]);
@@ -28,28 +32,22 @@ export function DataQuality() {
     if (results[1].status === "fulfilled") setOperations(results[1].value);
     else failures.push("operations status");
     setControlsError(failures.length ? `Unable to load ${failures.join(" and ")}.` : "");
+    const failedResult = results.find((result) => result.status === "rejected");
+    setControlsFailure(failedResult?.status === "rejected"
+      ? toRequestFailure(failedResult.reason, "Institutional controls unavailable.")
+      : null);
   }, []);
 
   const load = useCallback(async (sync = false) => {
-    setLoading(true);
-    setError("");
+    await loadQuality(sync ? "sync" : "read", () => sync ? api.syncDataQuality() : api.dataQuality());
     try {
-      setPayload(sync ? await api.syncDataQuality() : await api.dataQuality());
-      try {
-        setJobs(await api.dataJobs());
-        setJobsError("");
-      } catch (err) {
-        setJobs(null);
-        setJobsError(err instanceof Error ? err.message : "Jobs and freshness status unavailable.");
-      }
-      await loadInstitutionalControls();
+      setJobs(await api.dataJobs());
+      setJobsFailure(null);
     } catch (err) {
-      setPayload(null);
-      setError(err instanceof Error ? err.message : "Data quality dashboard unavailable.");
-    } finally {
-      setLoading(false);
+      setJobsFailure(toRequestFailure(err, "Jobs and freshness status unavailable."));
     }
-  }, [loadInstitutionalControls]);
+    await loadInstitutionalControls();
+  }, [loadInstitutionalControls, loadQuality]);
 
   useEffect(() => {
     void load(false);
@@ -70,7 +68,7 @@ export function DataQuality() {
         </form>
       </header>
 
-      {error && <div className="notice danger" role="alert">{error}</div>}
+      <RequestStatus failure={failure} stale={staleResult} onRetry={retry} />
       {payload ? (
         <>
           <section className="dashboard-grid three">
@@ -107,6 +105,7 @@ export function DataQuality() {
 
           {jobs && (
             <Panel title="Jobs & Freshness" meta={`auto-live ${jobs.auto_live.running ? "running" : "idle"} · last ${jobs.auto_live.last_run || "never"}`}>
+              <RequestStatus failure={jobsFailure} stale={Boolean(jobsFailure)} onRetry={() => void load(false)} />
               <div className="metric-grid compact-metrics">
                 <StatTile label="Stale symbols (>5d)" value={fmtNumber(jobs.stale_count, 0)} tone={jobs.stale_count ? "warning" : "positive"} />
                 <StatTile label="Recent failures" value={fmtNumber(jobs.recent_failures.length, 0)} tone={jobs.recent_failures.length ? "negative" : "positive"} />
@@ -134,12 +133,13 @@ export function DataQuality() {
               <p className="forecast-note">{jobs.basis}</p>
             </Panel>
           )}
-          {!jobs && jobsError && (
+          {!jobs && jobsFailure && (
             <Panel title="Jobs & Freshness" meta="panel unavailable">
-              <div className="notice warning" role="alert">{jobsError}</div>
-              <button type="button" onClick={() => void load(false)}>Retry jobs and freshness</button>
+              <RequestStatus failure={jobsFailure} onRetry={() => void load(false)} />
             </Panel>
           )}
+
+          <RequestStatus failure={controlsFailure} stale={Boolean((providers || operations) && controlsFailure)} onRetry={() => void loadInstitutionalControls()} />
 
           <InstitutionalControls
             providers={providers}
@@ -225,13 +225,13 @@ export function DataQuality() {
               ) : (
                 <div className="terminal-table terminal-data-table-shell" tabIndex={0} aria-label="Scrollable refresh failures">
                   <table className="terminal-data-table quality-four-data-table">
-                    <thead><tr><th scope="col">Symbol</th><th scope="col">Attempted</th><th scope="col">Rows</th><th scope="col">Message</th></tr></thead>
+                    <thead><tr><th scope="col">Symbol</th><th scope="col">Attempted</th><th scope="col">Rows</th><th scope="col">Reason / next step</th></tr></thead>
                     <tbody>{payload.refresh_failures.map((row) => (
                     <tr key={`${row.symbol}-${row.attempted_at}`}>
                       <th scope="row"><strong>{row.symbol}</strong><small>{row.source}</small></th>
                       <td>{fmtTimestamp(row.attempted_at)}</td>
                       <td>{fmtNumber(row.rows_added, 0)}</td>
-                      <td>{row.message}</td>
+                      <td><strong>{row.reason_code || "provider_failed"}</strong><small>{row.message}</small>{row.next_step && <small>{row.next_step}</small>}</td>
                     </tr>
                   ))}</tbody>
                   </table>
@@ -297,9 +297,7 @@ export function DataQuality() {
           <p className="report-disclaimer">{payload.disclaimer}</p>
         </>
       ) : (
-        <EmptyState title="Data quality unavailable" body="The backend did not return a data quality payload.">
-          <button type="button" onClick={() => void load(false)}>Retry data quality</button>
-        </EmptyState>
+        <EmptyState title="Data quality unavailable" body="The backend did not return a data quality payload." />
       )}
     </div>
   );
@@ -422,6 +420,34 @@ function InstitutionalControls({
     }
   };
 
+  const exportBackup = async () => {
+    setActionBusy("backup-export");
+    setActionNotice("");
+    try {
+      const result = await api.exportBackup();
+      setActionNotice(`Encrypted backup exported: ${String(result.export.snapshot || "manifest recorded")}.`);
+      onRetry();
+    } catch (caught) {
+      setActionNotice(caught instanceof Error ? caught.message : "Encrypted backup export failed.");
+    } finally {
+      setActionBusy("");
+    }
+  };
+
+  const checkpointAudit = async () => {
+    setActionBusy("audit-export");
+    setActionNotice("");
+    try {
+      await api.checkpointAuditExport();
+      setActionNotice("Privileged audit checkpoint appended to the configured destination.");
+      onRetry();
+    } catch (caught) {
+      setActionNotice(caught instanceof Error ? caught.message : "Audit checkpoint export failed.");
+    } finally {
+      setActionBusy("");
+    }
+  };
+
   return (
     <Panel title="Institutional Controls" meta={providers?.controls_required ? "enforced" : "local controls disabled"}>
       {error && <div className="notice warning" role="alert">{error}</div>}
@@ -442,9 +468,24 @@ function InstitutionalControls({
             <StatTile label="Audit chains" value={`${operations?.audit_chain.status || "unknown"} / ${operations?.privileged_chain.status || "unknown"}`} tone={operations?.audit_chain.status === "intact" && operations?.privileged_chain.status === "intact" ? "positive" : "warning"} />
             <StatTile label="Encrypted backups" value={fmtNumber(operations?.backup.count, 0)} tone={operations?.backup.count ? "positive" : "warning"} />
             <StatTile
-              label="Restore test"
-              value={operations?.latest_backup_verification?.details?.isolated_restore_tested ? "Passed" : "Not run"}
-              tone={operations?.latest_backup_verification?.details?.passed ? "positive" : "warning"}
+              label="Restore drill"
+              value={operations?.latest_backup_verification?.details?.restore_drill_passed ? "RPO/RTO met" : "Not current"}
+              tone={operations?.latest_backup_verification?.details?.restore_drill_passed ? "positive" : "warning"}
+            />
+            <StatTile
+              label="Key custody"
+              value={operations?.persistence_encryption.external_custody && operations.persistence_encryption.custody_attested ? `External v${operations.persistence_encryption.key_version || "?"}` : "Local / unattested"}
+              tone={operations?.persistence_encryption.external_custody && operations.persistence_encryption.custody_attested ? "positive" : "warning"}
+            />
+            <StatTile
+              label="Off-host backup"
+              value={operations?.backup_export.latest_export?.outcome === "passed" && operations.backup_export.offhost_attested ? "Exported" : "Not attested"}
+              tone={operations?.backup_export.latest_export?.outcome === "passed" && operations.backup_export.offhost_attested ? "positive" : "warning"}
+            />
+            <StatTile
+              label="WORM / SIEM"
+              value={operations?.audit_export.written && operations.audit_export.worm_siem_attested ? "Checkpointed" : "Not attested"}
+              tone={operations?.audit_export.written && operations.audit_export.worm_siem_attested ? "positive" : "warning"}
             />
             <StatTile label="Incident owner" value={operations?.incident_owner || "Unassigned"} tone={operations?.incident_owner && operations.incident_owner !== "Unassigned" ? "positive" : "warning"} />
             <StatTile label="Notification adapter" value={operations?.notification_adapter.configured ? "Configured" : "External"} tone={operations?.notification_adapter.configured ? "positive" : "warning"} />
@@ -509,8 +550,11 @@ function InstitutionalControls({
           <div className="row-actions institutional-actions">
             <button type="button" onClick={() => void onSync()} disabled={Boolean(busy)}>{busy === "sync" ? "Syncing..." : "Sync incidents"}</button>
             <button type="button" onClick={() => void onVerifyBackup()} disabled={Boolean(busy)}>{busy === "backup" ? "Verifying..." : "Verify latest backup"}</button>
+            <button type="button" onClick={() => void exportBackup()} disabled={Boolean(busy) || Boolean(actionBusy) || !operations?.backup_export.configured}>{actionBusy === "backup-export" ? "Exporting..." : "Export encrypted backup"}</button>
+            <button type="button" onClick={() => void checkpointAudit()} disabled={Boolean(busy) || Boolean(actionBusy) || !operations?.audit_export.configured}>{actionBusy === "audit-export" ? "Checkpointing..." : "Append audit checkpoint"}</button>
             <button type="button" onClick={onRetry} disabled={Boolean(busy)}>Refresh controls</button>
           </div>
+          <p className="forecast-note">Helios verifies encryption, manifests, checksums, and local append evidence. External KMS/HSM custody, off-host retention, and WORM/SIEM immutability remain operator-attested controls.</p>
           {providers?.disclaimer && <p className="forecast-note">{providers.disclaimer}</p>}
         </>
       )}

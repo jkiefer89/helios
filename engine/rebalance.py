@@ -181,10 +181,36 @@ def propose_rebalance(account_id: str, model_id: str,
         }
 
     adv: dict[str, float | None] = {t: _adv_usd(t) for t in tickers}
-    for ticker, value in adv.items():
-        if value is None:
-            warnings.append(f"{ticker}: ADV unavailable — the liquidity cap is not enforced "
-                            "for this ticker (flagged, not fabricated).")
+    required_move_usd = {
+        ticker: abs(target.get(ticker, 0.0) - current.get(ticker, 0.0)) * total_value
+        for ticker in tickers
+    }
+    missing_material_adv = [
+        {
+            "ticker": ticker,
+            "required_move_usd": round(required_move_usd[ticker], 2),
+            "minimum_material_trade_usd": float(cons["min_trade_usd"]),
+        }
+        for ticker, value in adv.items()
+        if value is None and required_move_usd[ticker] >= float(cons["min_trade_usd"])
+    ]
+    if missing_material_adv:
+        return {
+            "status": "blocked",
+            "reason": (
+                "Trade sizing is blocked because observed ADV is unavailable for one or "
+                "more material required trades. Unknown liquidity is never treated as "
+                "unlimited capacity."
+            ),
+            "liquidity_status": "adv_required",
+            "missing_adv": missing_material_adv,
+            "constraints": cons,
+            "required_action": (
+                "Refresh or upload real volume history for every listed ticker before "
+                "generating a rebalance proposal."
+            ),
+            "disclaimer": _PROPOSAL_DISCLAIMER,
+        }
 
     w_cur = np.array([current.get(t, 0.0) for t in tickers])
     w_tgt = np.array([target.get(t, 0.0) for t in tickers])
@@ -197,7 +223,7 @@ def propose_rebalance(account_id: str, model_id: str,
     horizon = max(cons["trade_horizon_days"], 0.25)
     # Per-ticker max weight-move budget from liquidity: participation × ADV × days.
     move_cap = np.array([
-        (part * adv[t] * horizon / total_value) if adv[t] else np.inf
+        (part * adv[t] * horizon / total_value) if adv[t] else 0.0
         for t in tickers
     ])
 

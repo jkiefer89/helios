@@ -7,6 +7,7 @@ import { Panel, StatTile } from "../components/cards/Panel";
 import { DonutChart, MiniBars } from "../components/charts/Charts";
 import { EmptyState } from "../components/empty-states/EmptyState";
 import { TerminalSelect } from "../components/forms/TerminalSelect";
+import { RequestStatus } from "../components/states/RequestStatus";
 import { useViewFetch } from "../hooks/useViewFetch";
 import { fmtAuto, fmtNumber, fmtPct, titleCase } from "../utils/format";
 
@@ -22,7 +23,7 @@ export function PortfolioClinic({
   // No first-model fallback: the clinic diagnoses the model the operator chose.
   const defaultModelId = selectedModel || "";
   const [modelId, setModelId] = useState(defaultModelId);
-  const { payload, error, isLoading, load, isCurrentTarget } = useViewFetch<ClinicResponse>({ failureMessage: "Portfolio Clinic failed." });
+  const { payload, failure, staleResult, isLoading, load, retry, isCurrentTarget } = useViewFetch<ClinicResponse>({ failureMessage: "Portfolio Clinic failed." });
   const modelOptions = models.length > 0
     ? models.map((model) => ({ value: model.id, label: `${model.name} · ${model.mandate_label}` }))
     : [{ value: "", label: "No models imported" }];
@@ -57,7 +58,7 @@ export function PortfolioClinic({
           <button type="submit" disabled={models.length === 0}>Diagnose</button>
         </form>
       </header>
-      {error && <div className="notice danger" role="alert">{error}</div>}
+      <RequestStatus failure={failure} stale={staleResult} onRetry={retry} />
       {isLoading && <div className="loading" role="status">Running mandate-aware model diagnostics...</div>}
       {selectedModelSummary && (
         <div className="source-context-strip">

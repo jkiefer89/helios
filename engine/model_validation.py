@@ -11,7 +11,7 @@ from typing import Any
 
 import numpy as np
 
-from . import costs, evidence_lab, model_governance, portfolio
+from . import costs, evidence_lab, model_governance, portfolio, trials
 from ._common import avg as _avg
 
 # Ranking uses the FIRST ~80% of walk-forward windows (chronological); the
@@ -44,9 +44,9 @@ def dashboard(
         )
         for model in current_models
     ]
-    eligible = [row for row in rows if row["validation_state"] == "eligible"]
+    eligible = [row for row in rows if row["validation_state"] == "edge_supported"]
     eligible.sort(key=lambda row: (row["validation_score"], row["walk_forward"]["window_count"], row["model_name"]), reverse=True)
-    blocked = [row for row in rows if row["validation_state"] != "eligible"]
+    blocked = [row for row in rows if row["validation_state"] != "edge_supported"]
     ordered = []
     for index, row in enumerate(eligible):
         role = "champion" if index == 0 else "challenger"
@@ -142,6 +142,7 @@ def _validation_row(
         step=step,
     )
     if evidence.get("evidence_unavailable") or not evidence.get("eligible_for_real_research"):
+        verdicts = historical_verdicts(model, evidence)
         return {
             "model_id": model.id,
             "model_name": model.name,
@@ -160,6 +161,7 @@ def _validation_row(
             "confidence_bands": evidence.get("confidence_bands") or {},
             "prospective_validation": evidence.get("prospective_validation") or {},
             "governance": _governance_summary(governance),
+            "validation_verdicts": verdicts,
             "drift_alerts": [{
                 "severity": "blocked",
                 "title": "Validation blocked",
@@ -179,24 +181,19 @@ def _validation_row(
     split = int(len(windows) * _RANKING_SPLIT)
     ranking_stats = _segment_stats(windows[:split])
     holdout_stats = _segment_stats(windows[split:])
-    if (
-        ranking_stats["measured_count"] < _RANKING_MIN_MEASURED
-        or (ranking_stats["benchmark_coverage_pct"] or 0.0) < _MIN_BENCHMARK_COVERAGE_PCT
-    ):
+    verdicts = historical_verdicts(model, evidence, ranking_stats=ranking_stats)
+    if not verdicts["method_valid"]["passed"]:
         return {
             "model_id": model.id,
             "model_name": model.name,
             "mandate": model.mandate_key,
             "role": "blocked",
-            "validation_state": "insufficient_evidence",
+            "validation_state": "method_invalid" if verdicts["data_valid"]["passed"] else "data_invalid",
             "validation_score": None,
             "validation_grade": "Insufficient evidence",
             "evidence_unavailable": True,
-            "reason": "Too little benchmark-measured directional evidence to rank this model.",
-            "required_action": (
-                f"Accumulate at least {_RANKING_MIN_MEASURED} actionable BUY/SELL windows "
-                f"with at least {_MIN_BENCHMARK_COVERAGE_PCT:.0f}% benchmark coverage."
-            ),
+            "reason": verdicts["method_valid"]["detail"],
+            "required_action": verdicts["method_valid"]["required_action"],
             "ranking_basis": {
                 **ranking_stats,
                 "min_measured": _RANKING_MIN_MEASURED,
@@ -209,6 +206,7 @@ def _validation_row(
             "confidence_bands": evidence.get("confidence_bands") or {},
             "prospective_validation": evidence.get("prospective_validation") or {},
             "governance": _governance_summary(governance),
+            "validation_verdicts": verdicts,
             "drift_alerts": [{
                 "severity": "blocked",
                 "title": "Validation evidence insufficient",
@@ -236,6 +234,13 @@ def _validation_row(
                                 "measured_count": holdout_stats["measured_count"],
                                 "min_required": _HOLDOUT_MIN_MEASURED}
     alerts = _drift_alerts(walk, false_positives, decay, evidence.get("prospective_validation") or {}, governance)
+    edge_supported = bool(verdicts["edge_supported"]["passed"])
+    if not edge_supported:
+        alerts.insert(0, {
+            "severity": "blocked",
+            "title": "Economic edge not supported",
+            "detail": verdicts["edge_supported"]["detail"],
+        })
     return {
         "ranking_basis": {
             "basis": ("Score is computed on the chronological first "
@@ -255,9 +260,9 @@ def _validation_row(
         "model_name": model.name,
         "mandate": model.mandate_key,
         "role": "candidate",
-        "validation_state": "eligible",
-        "validation_score": score,
-        "validation_grade": _grade(score),
+        "validation_state": "edge_supported" if edge_supported else "edge_not_supported",
+        "validation_score": score if edge_supported else None,
+        "validation_grade": _grade(score) if edge_supported else "Not supported",
         "evidence_unavailable": False,
         "reason": evidence.get("reason") or "",
         "required_action": evidence.get("required_action") or "",
@@ -268,9 +273,133 @@ def _validation_row(
         "confidence_bands": evidence.get("confidence_bands") or {},
         "prospective_validation": evidence.get("prospective_validation") or {},
         "governance": _governance_summary(governance),
+        "validation_verdicts": verdicts,
         "drift_alerts": alerts,
         "methodology": _row_methodology(),
         "disclaimer": evidence.get("disclaimer") or "",
+    }
+
+
+def historical_verdicts(
+    model: portfolio.Model,
+    evidence: dict[str, Any],
+    *,
+    ranking_stats: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Separate calculability, method integrity, and economic edge.
+
+    ``edge_supported`` is intentionally fail-closed. Missing metrics fail the
+    relevant check; no neutral default can turn unavailable evidence into a
+    champion or pass a research-readiness gate.
+    """
+    policy = trials.historical_threshold_policy(
+        target_kind="model", mandate_key=model.mandate_key,
+    )
+    floors = policy["floors"]
+    windows = sorted(
+        evidence.get("windows") or [], key=lambda row: str(row.get("signal_date") or ""),
+    )
+    if ranking_stats is None:
+        split = int(len(windows) * _RANKING_SPLIT)
+        ranking_stats = _segment_stats(windows[:split])
+    benchmark_status = str((evidence.get("benchmark") or {}).get("status") or "")
+    coverage = _number(ranking_stats.get("benchmark_coverage_pct"), default=0.0) or 0.0
+    data_checks = [
+        _verdict_check(
+            "eligible_real_data",
+            bool(evidence.get("eligible_for_real_research")) and not evidence.get("evidence_unavailable"),
+            evidence.get("data_mode"),
+            "eligible live or uploaded history",
+        ),
+        _verdict_check("benchmark_available", benchmark_status == "available", benchmark_status, "available"),
+        _verdict_check(
+            "benchmark_coverage_pct",
+            coverage >= float(floors["min_benchmark_coverage_pct"]),
+            coverage,
+            floors["min_benchmark_coverage_pct"],
+        ),
+    ]
+    data_passed = all(check["passed"] for check in data_checks)
+    methods = evidence.get("validation_methods") or {}
+    methodology = evidence.get("methodology") or {}
+    measured = int(ranking_stats.get("measured_count") or 0)
+    method_checks = [
+        _verdict_check("no_lookahead", methodology.get("no_lookahead") is True, methodology.get("no_lookahead"), True),
+        _verdict_check("rolling_method", bool((methods.get("rolling") or {}).get("summary")), bool(methods.get("rolling")), True),
+        _verdict_check("anchored_method", bool((methods.get("anchored") or {}).get("summary")), bool(methods.get("anchored")), True),
+        _verdict_check("measured_observations", measured >= int(floors["min_observations"]), measured, floors["min_observations"]),
+    ]
+    method_passed = data_passed and all(check["passed"] for check in method_checks)
+    hit_rate = _number(ranking_stats.get("hit_rate_pct"), default=None)
+    net_alpha = _number(ranking_stats.get("avg_alpha_after_default_costs_pct"), default=None)
+    false_positive = _number(ranking_stats.get("false_positive_rate_pct"), default=None)
+    covered_regimes = sum(
+        1 for row in evidence.get("regime_sensitivity") or []
+        if int(row.get("count") or row.get("measured_count") or 0) >= 3
+    )
+    regime_robustness = evidence.get("regime_robustness") or {}
+    edge_checks = [
+        _verdict_check("hit_rate_pct", hit_rate is not None and hit_rate >= float(floors["min_hit_rate_pct"]), hit_rate, floors["min_hit_rate_pct"]),
+        _verdict_check("net_alpha_pct", net_alpha is not None and net_alpha >= float(floors["min_net_alpha_pct"]), net_alpha, floors["min_net_alpha_pct"]),
+        _verdict_check("false_positive_rate_pct", false_positive is not None and false_positive <= float(floors["max_false_positive_rate_pct"]), false_positive, floors["max_false_positive_rate_pct"], operator="max"),
+        _verdict_check("covered_regimes", covered_regimes >= int(floors["min_regime_count"]), covered_regimes, floors["min_regime_count"]),
+        _verdict_check(
+            "regime_robustness",
+            regime_robustness.get("passed") is True,
+            regime_robustness.get("status") or "unavailable",
+            "passed",
+        ),
+    ]
+    edge_passed = method_passed and all(check["passed"] for check in edge_checks)
+    return {
+        "policy": policy,
+        "data_valid": _verdict_block(
+            data_passed, data_checks,
+            "Eligible real data and benchmark coverage pass." if data_passed else "Data or benchmark coverage is not valid for economic validation.",
+            "Provide eligible real histories and benchmark coverage before validation.",
+        ),
+        "method_valid": _verdict_block(
+            method_passed, method_checks,
+            "Rolling and anchored no-lookahead methods meet the observation floor." if method_passed else "The historical method or observation floor is incomplete.",
+            f"Accumulate at least {int(floors['min_observations'])} benchmark-measured ranking windows using both validation methods.",
+        ),
+        "edge_supported": _verdict_block(
+            edge_passed, edge_checks,
+            "Mandate-specific after-cost economic floors pass." if edge_passed else "One or more mandate-specific economic-quality floors did not pass.",
+            "Review failed economic checks; do not promote this model from historical availability alone.",
+        ),
+    }
+
+
+def _verdict_check(
+    name: str,
+    passed: bool,
+    actual: Any,
+    required: Any,
+    *,
+    operator: str = "min",
+) -> dict[str, Any]:
+    return {
+        "name": name,
+        "passed": bool(passed),
+        "actual": actual,
+        "required": required,
+        "operator": operator,
+    }
+
+
+def _verdict_block(
+    passed: bool,
+    checks: list[dict[str, Any]],
+    detail: str,
+    required_action: str,
+) -> dict[str, Any]:
+    return {
+        "passed": bool(passed),
+        "detail": detail,
+        "required_action": "" if passed else required_action,
+        "checks": checks,
+        "failed_checks": [check["name"] for check in checks if not check["passed"]],
     }
 
 

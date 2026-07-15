@@ -15,12 +15,21 @@ def list_trials():
     limit, limit_error = _safe_int_arg("limit", 200, 1, 1000)
     if limit_error:
         return err(limit_error, 400)
+    target_kind = str(request.args.get("target_kind") or "")
+    target_id = str(request.args.get("target_id") or "")
+    threshold_policy = None
+    if target_kind and target_id:
+        try:
+            threshold_policy = trials.threshold_policy(target_kind, target_id)
+        except ValueError as exc:
+            return err(str(exc), 400)
     return ok({
         "trials": trials.list_trials(
             limit=limit,
-            target_kind=str(request.args.get("target_kind") or ""),
-            target_id=str(request.args.get("target_id") or ""),
+            target_kind=target_kind,
+            target_id=target_id,
         ),
+        "threshold_policy": threshold_policy,
         "storage_available": persistence.get_store().available,
         "disclaimer": ANALYSIS_ONLY_DISCLAIMER,
     })

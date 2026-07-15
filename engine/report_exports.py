@@ -68,6 +68,7 @@ def build_snapshot(
     disclosure_blocks = _disclosure_blocks(report)
     signal_journal_payload = _dict(signal_journal_evidence)
     client_risk_pack = _dict((sections.get("client_risk_pack") if isinstance(sections, dict) else {}) or {})
+    capital_context = _dict((sections.get("capital_context") if isinstance(sections, dict) else {}) or {})
     audit_trail = _audit_trail(
         report=report,
         created_at=created_at,
@@ -99,6 +100,7 @@ def build_snapshot(
         "model_metadata": _model_metadata(report) if target_kind == "model" else {},
         "signal_journal": signal_journal_payload,
         "client_risk_pack": client_risk_pack,
+        "capital_context": capital_context,
         "warnings": _list(report.get("warnings")),
         "report": report,
         "ai_narrative": _text(ai_narrative)[:6000],
@@ -129,6 +131,7 @@ def build_snapshot(
             "report_timestamp": _text(report.get("timestamp")),
             "signal_journal": signal_journal_payload,
             "client_risk_pack": client_risk_pack,
+            "capital_context": capital_context,
             "ai_narrative_status": ai_narrative_status or ("provided" if _text(ai_narrative) else "not_requested"),
             "ai_provider": ai_provider or {},
         },
@@ -175,6 +178,13 @@ def render_html(snapshot: dict[str, Any]) -> str:
         "Eligible For Real Research": "Yes" if snapshot.get("eligible_for_real_research") else "No",
         "Source Counts": snapshot.get("source_counts") or {},
     }
+    capital = snapshot.get("capital_context") if isinstance(snapshot.get("capital_context"), dict) else {}
+    if snapshot.get("target_kind") == "model":
+        rows.update({
+            "AUM As Of": capital.get("aum_as_of") or "Not supplied",
+            "AUM USD": capital.get("aum_usd") or "Not supplied",
+            "Capacity Status": capital.get("capacity_status") or "Unavailable",
+        })
     report = snapshot.get("report") or {}
     sections = report.get("sections") if isinstance(report.get("sections"), dict) else {}
     return "\n".join([
@@ -379,6 +389,21 @@ def _rl_provenance_page(pdf, snapshot: dict[str, Any], width: float, height: flo
         ("Research Eligible", "Yes" if snapshot.get("eligible_for_real_research") else "No"),
     ]
     _rl_card_grid(pdf, cards, 42, 564, 252, 58, colors)
+
+    capital = snapshot.get("capital_context") if isinstance(snapshot.get("capital_context"), dict) else {}
+    if snapshot.get("target_kind") == "model":
+        _rl_text(
+            pdf,
+            (
+                f"AUM {capital.get('aum_usd') or 'not supplied'} as of "
+                f"{capital.get('aum_as_of') or 'not supplied'} | "
+                f"Capacity {_label(capital.get('capacity_status') or 'unavailable')}"
+            ),
+            42,
+            356,
+            9,
+            colors.HexColor("#9fb2c8"),
+        )
 
     audit = snapshot.get("audit_trail") if isinstance(snapshot.get("audit_trail"), list) else []
     y = 330

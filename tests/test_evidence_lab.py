@@ -1,6 +1,7 @@
 from io import BytesIO
 
 import pandas as pd
+import pytest
 
 import app as helios
 from engine import data, persistence, portfolio, signal_journal
@@ -117,6 +118,25 @@ def test_evidence_lab_endpoint_returns_real_model_walk_forward_payload():
     assert body["regime_sensitivity"]
     assert body["confidence_bands"]["forward_result_pct"]
     assert set(body["validation_methods"]) == {"rolling", "anchored"}
+
+
+@pytest.mark.parametrize(
+    "query, field",
+    [
+        ("horizon=4", "horizon"),
+        ("horizon=253", "horizon"),
+        ("horizon=21.5", "horizon"),
+        ("train_window=89", "train_window"),
+        ("train_window=757", "train_window"),
+        ("step=4", "step"),
+        ("step=64", "step"),
+    ],
+)
+def test_evidence_lab_api_rejects_out_of_range_or_noninteger_controls(query, field):
+    response = _client().get(f"/api/evidence-lab?kind=model&id=missing&{query}")
+
+    assert response.status_code == 400
+    assert field in response.get_json()["error"]
 
 
 def test_evidence_lab_endpoint_blocks_missing_real_model_data(monkeypatch):

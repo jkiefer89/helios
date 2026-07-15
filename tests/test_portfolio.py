@@ -35,6 +35,25 @@ def test_parse_model_missing_weight_column_equal_weights():
     assert weights(model) == {"AAPL": 0.333333, "MSFT": 0.333333, "NVDA": 0.333333}
 
 
+@pytest.mark.parametrize(
+    "csv_text",
+    [
+        "Ticker,Weight\nAAPL,-25\nMSFT,125\n",
+        "Ticker,Weight\nAAPL,0\nMSFT,100\n",
+        "Ticker,Weight\nAAPL,-50\nMSFT,-50\n",
+        "Ticker,Weight\nAAPL,50\nAAPL,-50\nMSFT,100\n",
+    ],
+)
+def test_parse_model_rejects_nonpositive_or_signed_explicit_weights(csv_text):
+    with pytest.raises(ValueError, match="strictly positive"):
+        parse_model(csv_text)
+
+
+def test_parse_model_rejects_unreadable_weight_column_instead_of_equal_weighting():
+    with pytest.raises(ValueError, match="blank or unreadable"):
+        parse_model("Ticker,Weight\nAAPL,not-a-weight\nMSFT,also-bad\n")
+
+
 def test_parse_model_duplicate_tickers_merge_weights():
     model = parse_model("Ticker,Weight\nAAPL,30\nMSFT,40\nAAPL,30\n")
 

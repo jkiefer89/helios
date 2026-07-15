@@ -113,6 +113,32 @@ def backup_verify():
         return err(str(exc), 503)
 
 
+@bp.route("/api/operations/backup/export", methods=["POST"])
+def backup_export():
+    try:
+        return ok({"export": operations.export_encrypted_backup(actor=current_actor())})
+    except (OSError, RuntimeError) as exc:
+        return err(
+            str(exc), 503,
+            code="backup_export_failed",
+            retryable=True,
+            next_step="Verify the encrypted backup destination is configured, mounted, writable, and externally attested.",
+        )
+
+
+@bp.route("/api/operations/audit-export/checkpoint", methods=["POST"])
+def audit_export_checkpoint():
+    try:
+        return ok({"checkpoint": operations.audit_export_checkpoint(actor=current_actor())})
+    except (OSError, RuntimeError) as exc:
+        return err(
+            str(exc), 503,
+            code="audit_export_failed",
+            retryable=True,
+            next_step="Verify the append destination is configured, writable, and governed by the external WORM/SIEM retention policy.",
+        )
+
+
 @bp.route("/api/models/<model_id>/independent-validation")
 def independent_validation_status(model_id: str):
     model = portfolio.get(model_id)

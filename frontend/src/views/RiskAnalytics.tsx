@@ -6,6 +6,7 @@ import { Panel, StatTile } from "../components/cards/Panel";
 import { DonutChart, MiniBars } from "../components/charts/Charts";
 import { EmptyState } from "../components/empty-states/EmptyState";
 import { TerminalSelect } from "../components/forms/TerminalSelect";
+import { RequestStatus } from "../components/states/RequestStatus";
 import { useViewFetch } from "../hooks/useViewFetch";
 import { fmtMoney, fmtNumber, fmtPct, titleCase } from "../utils/format";
 
@@ -22,7 +23,7 @@ export function RiskAnalytics({
   const defaultModelId = selectedModel || "";
   const [modelId, setModelId] = useState(defaultModelId);
   const [aumInput, setAumInput] = useState("");
-  const { payload, error, isLoading, load, isCurrentTarget } = useViewFetch<RiskAnalyticsResponse>({ failureMessage: "Risk analytics failed." });
+  const { payload, failure, staleResult, isLoading, load, retry, isCurrentTarget } = useViewFetch<RiskAnalyticsResponse>({ failureMessage: "Risk analytics failed." });
   const modelOptions = models.length > 0
     ? models.map((model) => ({ value: model.id, label: `${model.name} · ${model.mandate_label}` }))
     : [{ value: "", label: "No models imported" }];
@@ -61,7 +62,7 @@ export function RiskAnalytics({
           <button type="submit" disabled={models.length === 0}>Analyze risk</button>
         </form>
       </header>
-      {error && <div className="notice danger" role="alert">{error}</div>}
+      <RequestStatus failure={failure} stale={staleResult} onRetry={retry} />
       {isLoading && <div className="loading" role="status">Loading portfolio-level risk analytics...</div>}
       {models.length === 0 && (
         <Panel title="Risk Analytics Gate" meta="model required">

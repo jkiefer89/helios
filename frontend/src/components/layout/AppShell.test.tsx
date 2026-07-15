@@ -13,7 +13,7 @@ describe("workspace navigation mapping", () => {
     for (const id of all) expect(isViewId(id)).toBe(true);
     // Every declared ViewId is reachable from some workspace.
     const reachable = new Set(all);
-    for (const id of ["command", "instruments", "models", "opportunities", "strategy",
+    for (const id of ["command", "setup", "instruments", "models", "opportunities", "strategy",
       "evidence", "clinic", "risk", "reports", "journal", "decisions",
       "data-quality", "analysis"]) {
       expect(reachable.has(id as never)).toBe(true);

@@ -1,11 +1,13 @@
 """Preregistered trial identity, linkage, assessment, and API contracts."""
 from __future__ import annotations
 
+import json
+
 import app as helios
 import pandas as pd
 import pytest
 
-from engine import costs, data, evidence, persistence, portfolio, signal_journal, trials
+from engine import costs, data, evidence, persistence, portfolio, research_gate, signal_journal, trials
 from tests.conftest import price_csv, price_series
 
 
@@ -33,11 +35,11 @@ def _protocol() -> dict:
             "idle_cash_pct": 2,
         },
         "success_thresholds": {
-            "min_observations": 5,
-            "min_hit_rate_pct": 50,
-            "min_net_alpha_pct": 0,
-            "max_false_positive_rate_pct": 50,
-            "confidence_level_pct": 90,
+            "min_observations": 60,
+            "min_hit_rate_pct": 57,
+            "min_net_alpha_pct": 0.15,
+            "max_false_positive_rate_pct": 43,
+            "confidence_level_pct": 95,
         },
         "regimes": ["risk_on", "neutral", "risk_off"],
         "owner": "Research Committee",
@@ -67,6 +69,8 @@ def test_trial_protocol_is_explicit_immutable_and_one_open_per_target(monkeypatc
     assert trial["protocol_hash"]
     assert trial["registration_snapshot_hash"]
     assert trial["protocol"]["expected_aum_usd"] == 1_000_000_000
+    assert trial["protocol"]["threshold_policy"]["version"] == "institutional-v1"
+    assert trial["protocol"]["threshold_policy"]["non_overridable"] is True
 
     duplicate = trials.register(
         target_kind="instrument", target_id="TRIALX", protocol={**_protocol(), "hypothesis": "Other"}, actor="Owner",
@@ -86,6 +90,61 @@ def test_trial_rejects_implicit_or_incomplete_protocol(monkeypatch, tmp_path):
             target_kind="instrument", target_id="TRIALX",
             protocol={"hypothesis": "incomplete"}, actor="Owner",
         )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("min_observations", 29),
+        ("min_hit_rate_pct", 51.99),
+        ("min_net_alpha_pct", 0.09),
+        ("max_false_positive_rate_pct", 48.01),
+        ("confidence_level_pct", 94.99),
+    ],
+)
+def test_instrument_trial_rejects_thresholds_below_deployment_floor(monkeypatch, tmp_path, field, value):
+    _store(monkeypatch, tmp_path)
+    _upload()
+    protocol = _protocol()
+    protocol["success_thresholds"][field] = value
+
+    with pytest.raises(ValueError, match="non-overridable"):
+        trials.register(
+            target_kind="instrument", target_id="TRIALX", protocol=protocol, actor="Owner",
+        )
+
+
+@pytest.mark.parametrize(
+    ("mandate", "expected"),
+    [
+        ("pure_growth", {"min_observations": 40, "min_hit_rate_pct": 53.0, "min_net_alpha_pct": 0.15, "max_false_positive_rate_pct": 47.0, "confidence_level_pct": 95.0}),
+        ("balanced", {"min_observations": 50, "min_hit_rate_pct": 54.0, "min_net_alpha_pct": 0.10, "max_false_positive_rate_pct": 46.0, "confidence_level_pct": 95.0}),
+        ("income", {"min_observations": 50, "min_hit_rate_pct": 55.0, "min_net_alpha_pct": 0.08, "max_false_positive_rate_pct": 45.0, "confidence_level_pct": 95.0}),
+        ("capital_preservation", {"min_observations": 60, "min_hit_rate_pct": 56.0, "min_net_alpha_pct": 0.05, "max_false_positive_rate_pct": 44.0, "confidence_level_pct": 95.0}),
+        ("cd_alternative", {"min_observations": 60, "min_hit_rate_pct": 57.0, "min_net_alpha_pct": 0.03, "max_false_positive_rate_pct": 43.0, "confidence_level_pct": 95.0}),
+    ],
+)
+def test_model_trial_policy_selects_and_enforces_each_mandate_floor(mandate, expected):
+    model = portfolio.Model(
+        id=f"POLICY-{mandate}", name=f"Policy {mandate}", mandate_key=mandate,
+        mandate_context="", holdings=[],
+    )
+    portfolio.register(model)
+    policy = trials.threshold_policy("model", model.id)
+    assert policy["profile"] == mandate
+    assert policy["floors"] == expected
+
+    for field, floor in expected.items():
+        protocol = _protocol()
+        protocol["success_thresholds"].update(expected)
+        protocol["success_thresholds"][field] = (
+            floor + 0.01 if field == "max_false_positive_rate_pct" else floor - 0.01
+        )
+        status = trials.deployment_policy_status(
+            protocol, target_kind="model", target_id=model.id,
+        )
+        assert status["passed"] is False
+        assert field in status["blockers"]
 
 
 def test_only_scheduled_post_registration_signals_link_to_trial(monkeypatch, tmp_path):
@@ -162,6 +221,40 @@ def test_completed_trial_requires_passing_replay_verified_assessment(monkeypatch
             trial["trial_id"], status="completed",
             note="Attempt completion without sealed evidence.", actor="Owner",
         )
+
+
+def test_legacy_weak_completed_trial_cannot_unlock_research_gate(monkeypatch, tmp_path):
+    store = _store(monkeypatch, tmp_path)
+    _upload("WEAKA", days=120)
+    model = portfolio.Model(
+        id="WEAK-LEGACY", name="Weak Legacy", mandate_key="balanced", mandate_context="",
+        holdings=[portfolio.Holding("WEAKA", 1.0)],
+    )
+    portfolio.register(model)
+    trial = trials.register(
+        target_kind="model", target_id=model.id, protocol=_protocol(), actor="Owner",
+    )["trial"]
+    weak = dict(trial["protocol"])
+    weak["success_thresholds"] = {
+        "min_observations": 5,
+        "min_hit_rate_pct": 50,
+        "min_net_alpha_pct": 0,
+        "max_false_positive_rate_pct": 50,
+        "confidence_level_pct": 90,
+    }
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE prospective_trials SET status = 'completed', protocol_json = ? WHERE trial_id = ?",
+            (json.dumps(weak, sort_keys=True, separators=(",", ":")), trial["trial_id"]),
+        )
+    monkeypatch.setenv("HELIOS_INSTITUTIONAL_CONTROLS", "1")
+    monkeypatch.setattr(trials, "assess", lambda _trial: {"passed": True})
+    monkeypatch.setattr(trials, "verified_assessment_evidence", lambda _trial_id: {"evidence_id": "verified"})
+
+    control = research_gate._prospective_trial_control(model)
+
+    assert control["passed"] is False
+    assert control["state"] == "blocked"
 
 
 def test_instrument_trial_allows_new_bars_but_detects_restatement(monkeypatch, tmp_path):
@@ -257,7 +350,7 @@ def test_trial_enforces_declared_multiplicity_and_regime_coverage(monkeypatch, t
     )["trial"]
     assessment = trial["assessment"]
     assert assessment["multiplicity"]["declared_variant_count"] == 2
-    assert assessment["multiplicity"]["adjusted_confidence_pct"] == 95.0
+    assert assessment["multiplicity"]["adjusted_confidence_pct"] == 97.5
     assert assessment["multiplicity"]["enforced_in_confidence_check"] is True
     assert assessment["checks"]["regime_coverage"] is False
     implementation = assessment["implementation_evidence"]
@@ -328,6 +421,11 @@ def test_trial_routes_are_read_pure_and_close_is_explicit_post(monkeypatch, tmp_
     with store._connect() as conn:
         before = int(conn.execute("SELECT COUNT(*) FROM audit_chain").fetchone()[0])
     assert client.get("/api/trials").status_code == 200
+    policy_response = client.get(
+        "/api/trials?target_kind=instrument&target_id=TRIALX"
+    )
+    assert policy_response.status_code == 200
+    assert policy_response.get_json()["threshold_policy"]["floors"]["min_observations"] == 30
     assert client.get(f"/api/trials/{trial_id}").status_code == 200
     with store._connect() as conn:
         after = int(conn.execute("SELECT COUNT(*) FROM audit_chain").fetchone()[0])
