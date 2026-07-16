@@ -111,6 +111,20 @@ def _auto_live_worker(config: dict) -> None:
             _eb.breadth_snapshot()
         except Exception:
             pass
+        # Warm the per-instrument fundamentals cache so the strategic (CMA)
+        # track — and the leveraged/daily-reset product guard — are populated
+        # for standalone instrument analysis, which reads cached-only (never
+        # fetches inside the GET). The 6h fetch TTL makes this a no-op on most
+        # cycles; bounded and best-effort like the SEC/macro warmers above.
+        try:
+            from engine import fundamentals as _fnd, provenance as _prov2
+            for inst in data.all_instruments():
+                if _AUTO_LIVE_STOP.is_set():
+                    break
+                if _prov2.is_real_source(inst.source):
+                    _fnd.fetch(inst.symbol)
+        except Exception:
+            pass  # fundamentals are best-effort; never fail the refresh loop
         # Daily composite auto-record: the prospective evidence track accrues
         # for every real-eligible target even when the operator doesn't click
         # (view-triggered-only recording had a usage bias — review finding).

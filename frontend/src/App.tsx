@@ -417,6 +417,7 @@ export default function App() {
       <Analysis
         tickers={tickers}
         models={models}
+        mandates={mandates}
         selectedInstrument={selectedInstrument}
         selectedModel={selectedModel}
         onSelectInstrument={selectInstrumentOnly}

@@ -22,6 +22,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+from . import assumptions as _assumptions
 from . import macro as _macro
 from . import mandate as _mnd
 
@@ -46,11 +47,40 @@ class HoldingReturn:
     blocks: dict
 
 
+def _display_name(ticker: str, fundamentals) -> str:
+    """Best-effort instrument display name for structure detection: the
+    in-memory store's name (yfinance shortName / upload label), else the
+    fundamentals provider's name field when present."""
+    try:
+        from . import data as _data
+
+        inst = _data.get(ticker)
+        if inst is not None and inst.name and inst.name != ticker:
+            return str(inst.name)
+    except Exception:
+        pass
+    return str(getattr(fundamentals, "name", "") or "")
+
+
 def holding_expected_return(ticker, weight_pct, asset_class, fundamentals,
                             mandate_key="balanced", horizon_years=REVERSION_HORIZON_Y) -> HoldingReturn:
     """Forward expected return for one underlying holding."""
     label = (asset_class or "").lower()
     is_equity = label.startswith("equity") or label in ("", "other")
+
+    # Leveraged/daily-reset wrappers (Direxion Daily 3X, ProShares Ultra, ...):
+    # the provider's "fundamentals" describe the TRUST (FMP tags SOXL a
+    # financial-services company with a meaningless P/E — verified live), and
+    # sector anchors / valuation reversion / long-horizon anchoring do not
+    # model daily-reset compounding. Refuse the equity block outright; the
+    # rating honestly falls back to the technical blend.
+    display_name = _display_name(ticker, fundamentals)
+    if _assumptions.is_leveraged_product_name(display_name):
+        return HoldingReturn(ticker, weight_pct, None, "generic", False, {
+            "reason": ("leveraged/daily-reset wrapper — equity fundamentals, sector "
+                       "anchors, and valuation reversion do not apply; tactical "
+                       "(technical) signals only"),
+            "product_structure": "leveraged_daily_reset"})
 
     # Non-equity sleeve: anchor off asset class (we know the sleeve, not the name).
     if not is_equity:
@@ -59,6 +89,24 @@ def holding_expected_return(ticker, weight_pct, asset_class, fundamentals,
                              {"asset_class_anchor": round(er, 4)})
 
     if fundamentals is not None and getattr(fundamentals, "usable", False):
+        # Fund wrappers (ETF/ETN/mutual fund): a single-security P/E mean-
+        # reversion and a sector-growth anchor are a category error on a
+        # diversified basket — and FMP mis-tags most equity ETFs "Financial
+        # Services" (SOXX/QQQ/ARTY verified live), which fabricated ~2% E[r]
+        # and spurious strategic SELLs across the operator's book. Refuse the
+        # single-security block; the rating falls back to the technical blend,
+        # and a real fundamentals view comes from importing the fund as a
+        # model (its holdings look through to a genuine aggregate CMA).
+        # (Non-equity fund sleeves — bond/commodity ETFs with a known
+        # asset_class — are handled by the asset-class branch above and keep
+        # their sleeve anchor.)
+        if getattr(fundamentals, "is_fund", False):
+            return HoldingReturn(ticker, weight_pct, None, "generic", False, {
+                "reason": ("fund wrapper (ETF/ETN/fund) — single-security fundamentals "
+                           "and sector anchors do not apply to a diversified basket; "
+                           "technical signals only. Import it as a model for a "
+                           "look-through fundamentals view."),
+                "product_structure": "fund_wrapper"})
         pe = fundamentals.forward_pe or fundamentals.trailing_pe
         # Equity evidence means a real earnings signal: reported growth or a
         # positive P/E. A provider-stamped SECTOR label alone does not count —
@@ -144,6 +192,11 @@ def instrument_forward(ticker: str, fnd, mandate_key: str = "balanced") -> dict:
         "assumptions_version": _macro.SECTOR_ANCHORS_AS_OF,
         "horizon_basis": "annualized — independent of the chart horizon",
     }
+    if hr.blocks.get("product_structure"):
+        out["product_structure"] = hr.blocks["product_structure"]
+        out["reason"] = hr.blocks.get("reason", "")
+    elif not out["usable"] and hr.blocks.get("reason"):
+        out["reason"] = hr.blocks["reason"]
     if out["usable"]:
         out["expected_return_pct"] = round(hr.expected_return * 100.0, 2)
         out["gap_vs_anchor_pct"] = round((hr.expected_return - anchor) * 100.0, 2)

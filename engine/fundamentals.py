@@ -79,6 +79,14 @@ class Fundamentals:
     # "trailing_quarter_yoy" (yfinance — one noisy comp, shrunk in the CMA).
     growth_basis: str = ""
     sector: str = ""
+    # Provider display name (FMP companyName / yfinance longName): the input
+    # for product-structure detection (leveraged/daily-reset wrappers).
+    name: str = ""
+    # True when the provider marks this a fund wrapper (FMP isEtf/isFund,
+    # yfinance quoteType ETF/MUTUALFUND). Single-security fundamentals (P/E
+    # reversion, sector growth) are a category error on a diversified basket —
+    # and FMP mis-tags most ETFs "Financial Services" — so the CMA refuses them.
+    is_fund: bool = False
     source: str = "none"                  # "yfinance" | "<provider>" | "none"
     # Quality / analyst extras (all optional; None = provider had no value).
     roe: float | None = None              # return on equity, fraction
@@ -168,6 +176,8 @@ def _yfinance_provider(ticker: str) -> dict:
         "trailing_pe": info.get("trailingPE"),
         "earnings_growth": info.get("earningsGrowth"),
         "sector": info.get("sector") or "",
+        "name": info.get("longName") or info.get("shortName") or "",
+        "is_fund": str(info.get("quoteType") or "").upper() in ("ETF", "MUTUALFUND", "FUND"),
         "source": "yfinance",
         "roe": info.get("returnOnEquity"),                 # fraction
         "profit_margin": info.get("profitMargins"),        # fraction
@@ -317,6 +327,8 @@ def _fmp_provider(ticker: str) -> dict:
         "trailing_pe": trailing_pe,
         "earnings_growth": growth,
         "sector": profile.get("sector") or "",
+        "name": profile.get("companyName") or profile.get("name") or "",
+        "is_fund": bool(profile.get("isEtf") or profile.get("isFund")),
         "source": "fmp",
         "roe": _num(ratios.get("returnOnEquityTTM")),
         "profit_margin": _num(ratios.get("netProfitMarginTTM")),
@@ -664,6 +676,8 @@ def fetch(ticker: str, provider=None) -> Fundamentals:
             earnings_growth=_num(raw.get("earnings_growth")),
             growth_basis=str(raw.get("growth_basis") or ""),
             sector=str(raw.get("sector") or ""),
+            name=str(raw.get("name") or ""),
+            is_fund=bool(raw.get("is_fund")),
             source=str(raw.get("source") or ("yfinance" if use_default else "provider")),
             # roe/margins/revenue growth are true fractions from both providers and
             # can legitimately exceed 1.5 (buyback-inflated ROE), so no percent

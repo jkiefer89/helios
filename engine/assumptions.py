@@ -103,3 +103,35 @@ LIQUIDITY_ADV_PROXIES = {
         "BTC-USD": 20_000_000_000,
     },
 }
+
+
+# --------------------------------------------------------------------------- #
+# Leveraged / daily-reset product detection (as_of 2026-07)
+#
+# Methodology: name-pattern matching against issuer conventions for geared and
+# inverse wrappers (Direxion "Daily ... Bull/Bear NX", ProShares "Ultra/
+# UltraPro/Short", generic "2X/3X/-1X" share classes). These products reset
+# leverage daily: point-in-time fundamentals, sector anchors, and long-horizon
+# GBM cones do not model their compounding, so the strategic/fundamentals
+# track must refuse rather than fabricate. Patterns are conservative —
+# a miss means an unlabeled product, a false positive silences a usable
+# strategic track — reviewed with each ASSUMPTIONS_VERSION bump.
+# --------------------------------------------------------------------------- #
+import re as _re
+
+LEVERAGED_NAME_PATTERNS = (
+    r"\b[123](?:\.\d+)?x\b",         # "3X Shares", "2x", "1.5x"
+    r"\bultrapro\b",
+    r"\bproshares ultra\b",
+    r"\bproshares short\b",
+    r"\bdirexion daily\b",
+    r"\bdaily .{0,40}\b(bull|bear)\b",
+    r"\bleveraged\b",
+    r"\binverse\b",
+)
+_LEVERAGED_RE = _re.compile("|".join(LEVERAGED_NAME_PATTERNS), _re.IGNORECASE)
+
+
+def is_leveraged_product_name(name: str | None) -> bool:
+    """True when an instrument NAME matches a geared/inverse wrapper convention."""
+    return bool(name) and bool(_LEVERAGED_RE.search(str(name)))
