@@ -51,6 +51,43 @@ def test_analyze_valid_uploaded_ticker(client):
     assert guidance["paths"]
 
 
+@pytest.mark.parametrize("label,days", [("6M", 126), ("1Y", 252), ("3Y", 756), ("5Y", 1260)])
+def test_analyze_uploaded_ticker_supports_strategic_horizons(client, label, days):
+    symbol = f"LONG{label.replace('Y', '')}"
+    upload = client.post(
+        "/api/upload",
+        data={"file": (BytesIO(price_csv(days=260)), f"{symbol.lower()}.csv"), "symbol": symbol},
+        content_type="multipart/form-data",
+    )
+    assert upload.status_code == 200
+
+    resp = client.get(f"/api/analyze?ticker={symbol}&horizon={label}")
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["horizon"]["kind"] == "long"
+    assert body["horizon"]["label"] == label
+    assert body["horizon"]["available_long"] == ["6M", "1Y", "3Y", "5Y"]
+    assert body["forecast"]["kind"] == "long"
+    assert body["forecast"]["label"] == label
+    assert body["forecast"]["horizon_days"] == days
+    assert body["forecast_short"]["horizon_days"] == 21
+
+
+def test_analyze_rejects_strategic_horizon_without_required_history(client):
+    upload = client.post(
+        "/api/upload",
+        data={"file": (BytesIO(price_csv(days=80)), "short-strategic.csv"), "symbol": "SHORTSTRAT"},
+        content_type="multipart/form-data",
+    )
+    assert upload.status_code == 200
+
+    resp = client.get("/api/analyze?ticker=SHORTSTRAT&horizon=6M")
+
+    assert resp.status_code == 400
+    assert "requires at least 90 observed sessions" in resp.get_json()["error"]
+
+
 def test_analyze_mandate_anchor_is_operator_selectable(client):
     client.post(
         "/api/upload",
@@ -381,6 +418,37 @@ def test_model_upload_and_analyze_smoke(client, monkeypatch):
     assert guidance["score_bridge"]["final_conviction_pct"] == body["signal"]["conviction_pct"]
 
 
+@pytest.mark.parametrize("label,days", [("6M", 126), ("1Y", 252), ("3Y", 756), ("5Y", 1260)])
+def test_model_analyze_supports_each_strategic_horizon(client, monkeypatch, label, days):
+    monkeypatch.setattr(data, "HAS_YF", False)
+    for symbol in ("AAPL", "MSFT"):
+        response = client.post(
+            "/api/upload",
+            data={"file": (BytesIO(price_csv(days=260)), f"{symbol.lower()}-{label}.csv"), "symbol": symbol},
+            content_type="multipart/form-data",
+        )
+        assert response.status_code == 200
+    upload = client.post(
+        "/api/model/upload",
+        data={
+            "file": (BytesIO(b"Ticker,Weight\nAAPL,60\nMSFT,40\n"), f"model-{label}.csv"),
+            "name": f"Strategic {label} Model",
+            "mandate": "balanced",
+        },
+        content_type="multipart/form-data",
+    )
+    assert upload.status_code == 200
+
+    response = client.get(f"/api/model/analyze?id={upload.get_json()['id']}&horizon={label}")
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["forecast"]["kind"] == "long"
+    assert body["forecast"]["label"] == label
+    assert body["forecast"]["horizon_days"] == days
+    assert body["forecast_short"]["horizon_days"] == 21
+
+
 def test_model_analyze_invalid_horizon_returns_400_json_not_fallback(client, monkeypatch):
     monkeypatch.setattr(data, "HAS_YF", False)
     payload = {
@@ -398,7 +466,7 @@ def test_model_analyze_invalid_horizon_returns_400_json_not_fallback(client, mon
     assert "horizon" in resp.get_json()["error"].lower()
 
 
-def test_model_analyze_unavailable_long_horizon_clears_stale_label(client, monkeypatch):
+def test_model_analyze_unavailable_long_horizon_returns_explicit_error(client, monkeypatch):
     mdl = portfolio.Model(
         id="SHORT-HISTORY",
         name="Short History",
@@ -441,11 +509,8 @@ def test_model_analyze_unavailable_long_horizon_clears_stale_label(client, monke
 
     resp = client.get("/api/model/analyze?id=SHORT-HISTORY&horizon=5Y")
 
-    assert resp.status_code == 200
-    horizon = resp.get_json()["horizon"]
-    assert horizon["kind"] == "short"
-    assert horizon["value"] == 21
-    assert horizon["label"] is None
+    assert resp.status_code == 400
+    assert "requires at least 250 observed sessions" in resp.get_json()["error"]
 
 
 # --------------------------------------------------------------------------- #

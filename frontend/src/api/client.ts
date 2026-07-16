@@ -288,9 +288,9 @@ export const api = {
         body: JSON.stringify(body),
       },
     ),
-  analyzeInstrument: (symbol: string, horizon: number, mandate?: string) =>
+  analyzeInstrument: (symbol: string, horizon: string | number, mandate?: string) =>
     request<AnalysisResponse>(
-      `/api/analyze?ticker=${encodeURIComponent(symbol)}&horizon=${horizon}`
+      `/api/analyze?ticker=${encodeURIComponent(symbol)}&horizon=${encodeURIComponent(String(horizon))}`
       + (mandate ? `&mandate=${encodeURIComponent(mandate)}` : "")),
   analyzeModel: (id: string, horizon: string | number) =>
     request<AnalysisResponse>(`/api/model/analyze?id=${encodeURIComponent(id)}&horizon=${encodeURIComponent(String(horizon))}`),

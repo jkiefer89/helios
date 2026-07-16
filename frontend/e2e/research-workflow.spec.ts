@@ -113,6 +113,28 @@ test("first run remains blocked until real evidence is imported", async ({ page,
   await page.getByRole("option", { name: /E2E Real Model/ }).click();
   await page.getByRole("button", { name: "Analyze" }).click();
   await expect(page.getByText("E2E Real Model", { exact: true }).first()).toBeVisible();
+  for (const horizon of ["6M", "1Y", "3Y", "5Y"]) {
+    await page.getByRole("button", { name: horizon, exact: true }).click();
+    await expect(page.getByRole("heading", { name: new RegExp(`${horizon} Strategic Value Projection`) })).toBeVisible();
+  }
+  const convictionPanel = page.getByRole("heading", { name: "How Conviction Can Improve" }).locator("xpath=ancestor::section[1]");
+  await expect(convictionPanel.getByText("How Helios receives evidence", { exact: true })).toBeVisible();
+  await expect(convictionPanel.getByText("Sources", { exact: true }).first()).toBeVisible();
+  const convictionOverflow = await convictionPanel.evaluate((node) => ({
+    clientWidth: node.clientWidth,
+    scrollWidth: node.scrollWidth,
+  }));
+  expect(convictionOverflow.scrollWidth).toBeLessThanOrEqual(convictionOverflow.clientWidth + 1);
+  await page.setViewportSize({ width: 390, height: 844 });
+  const narrowOverflow = await page.evaluate(() => ({
+    viewport: document.documentElement.clientWidth,
+    body: document.body.scrollWidth,
+    conviction: document.querySelector(".conviction-guidance")?.scrollWidth || 0,
+    convictionWidth: document.querySelector(".conviction-guidance")?.clientWidth || 0,
+  }));
+  expect(narrowOverflow.body).toBeLessThanOrEqual(narrowOverflow.viewport + 1);
+  expect(narrowOverflow.conviction).toBeLessThanOrEqual(narrowOverflow.convictionWidth + 1);
+  await page.setViewportSize({ width: 1280, height: 720 });
   await page.getByRole("button", { name: "Record Helios signal" }).click();
   await expect(page.getByRole("button", { name: "Signal recorded" })).toBeVisible();
 

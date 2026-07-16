@@ -105,6 +105,9 @@ def test_conviction_guidance_explains_actual_math_and_forecast_gate():
     assert "0%" in forecast_path["current"]
     assert "55%" in forecast_path["what_changes_it"]
     assert "Do not tune" in forecast_path["next_evidence"]
+    assert "Later realized closes" in forecast_path["evidence_sources"]
+    assert forecast_path["capture_method"] == "Prospective journal measurement"
+    assert "Signal Journal" in forecast_path["workflow"]
     assert "manual score overrides" in guidance["guardrail"]
     assert "Higher conviction can support BUY or SELL" in guidance["guardrail"]
 
@@ -176,5 +179,6 @@ def test_long_forecast_returns_mandate_fields_and_disclaimer():
     assert fc["label"] == "1Y"
     assert "cagr_pct" in fc
     assert "prob_breach_maxdd" in fc
+    assert fc["max_drawdown_tolerance_pct"] == 22.0
     assert "mandate_target_pct" in fc
     assert "not a trading forecast" in fc["disclaimer"]

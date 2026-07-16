@@ -163,6 +163,69 @@ def _conviction_band(conviction_pct: float) -> str:
     return "very high"
 
 
+_CONVICTION_EVIDENCE_WORKFLOWS = {
+    "component_alignment": {
+        "evidence_sources": [
+            "Adjusted daily close history",
+            "Provider headlines",
+            "Provider-normalized fundamentals and SEC/company filings",
+            "Macro and event feeds",
+        ],
+        "capture_method": "Automatic provider refresh",
+        "workflow": "Real Data Center refreshes prices and supporting provider context; no score is entered manually.",
+    },
+    "action_threshold": {
+        "evidence_sources": ["The independently computed signal components listed above"],
+        "capture_method": "Automatic engine recomputation",
+        "workflow": "Refresh eligible evidence and rerun Analysis. BUY/HOLD/SELL thresholds remain fixed.",
+    },
+    "forecast_edge": {
+        "evidence_sources": ["Recorded Helios signals", "Later realized closes", "Benchmark outcomes"],
+        "capture_method": "Prospective journal measurement",
+        "workflow": "Use Record Helios signal once; Signal Journal resolves outcomes after the horizon as live bars arrive.",
+    },
+    "volatility_penalty": {
+        "evidence_sources": ["Adjusted daily close history", "Governed holdings and weights for models"],
+        "capture_method": "Automatic prices; governed model input",
+        "workflow": "Refresh prices in Real Data Center. Change model construction only through Model Editor and governance.",
+    },
+    "mandate_fit": {
+        "evidence_sources": ["Approved mandate", "Risk limits", "Holdings and weights", "Observed price history"],
+        "capture_method": "Governed model workflow",
+        "workflow": "Maintain the mandate and portfolio in Models; Helios recomputes fit from observed risk.",
+    },
+    "event_risk": {
+        "evidence_sources": [
+            "Federal Reserve releases and calendar",
+            "Government policy releases",
+            "Geopolitical news",
+            "Earnings breadth",
+        ],
+        "capture_method": "Automatic macro/event refresh",
+        "workflow": "Refresh macro intelligence or allow the live refresh worker to update the cached source feeds.",
+    },
+    "strategic_fundamentals": {
+        "evidence_sources": [
+            "SEC/company filings",
+            "Normalized growth, margin, ROE, leverage, valuation, and yield fields",
+            "Provider consensus context when available",
+        ],
+        "capture_method": "Automatic configured fundamentals provider",
+        "workflow": "Configure and refresh a fundamentals provider. Helios does not accept typed estimates as scored facts.",
+    },
+    "track_agreement": {
+        "evidence_sources": ["Tactical market evidence", "Sourced strategic fundamentals"],
+        "capture_method": "Automatic dual-track comparison",
+        "workflow": "Refresh both source sets and rerun Analysis; disagreement remains visible until the evidence converges.",
+    },
+    "history_depth": {
+        "evidence_sources": ["Successive eligible daily market bars"],
+        "capture_method": "Automatic live persistence",
+        "workflow": "Keep the symbol in the live universe. History and untouched validation outcomes accumulate over time.",
+    },
+}
+
+
 def _conviction_guidance(
     *,
     action: str,
@@ -367,6 +430,13 @@ def _conviction_guidance(
             ),
             "next_evidence": "Accumulate real observations and rerun validation; never fabricate or backfill history.",
         })
+
+    for path in paths:
+        path.update(_CONVICTION_EVIDENCE_WORKFLOWS.get(str(path.get("key") or ""), {
+            "evidence_sources": ["Eligible source evidence named in this constraint"],
+            "capture_method": "Automatic or governed source workflow",
+            "workflow": "Use the source workflow that produced the underlying deterministic component; never enter a desired score.",
+        }))
 
     limiter_count = sum(path["status"] != "supportive" for path in paths)
     return {

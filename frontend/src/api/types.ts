@@ -1672,10 +1672,12 @@ export interface LongForecast {
   drawdown_median_pct: number;
   drawdown_p95_pct: number;
   prob_breach_maxdd: number;
+  max_drawdown_tolerance_pct: number;
   params: {
     mu_long_pct: number;
     mu_hist_pct: number;
     mu_anchor_pct: number;
+    anchor_basis: string;
     anchor_weight_lambda: number;
     sigma_ann_pct: number;
     sigma_eff_pct: number;
@@ -1733,6 +1735,9 @@ export interface ConvictionGuidancePath {
   current: string;
   what_changes_it: string;
   next_evidence: string;
+  evidence_sources?: string[];
+  capture_method?: string;
+  workflow?: string;
 }
 
 export interface ConvictionGuidance {
@@ -1828,6 +1833,8 @@ export interface AnalysisHorizon {
   value: number;
   label?: string | null;
   available_long: string[];
+  history_rows?: number;
+  minimum_history?: Record<string, number>;
 }
 
 export interface AnalysisHolding {

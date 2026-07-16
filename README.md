@@ -729,7 +729,7 @@ engine/
 | `POST /api/model/upload` | import an Excel/CSV model (multipart `file`, `name`, `mandate`, `context`) |
 | `GET /api/model/analyze?id=ID&horizon=H` | full model analysis (`H` = 5–90 or `6M`/`1Y`/`3Y`/`5Y`), including the engine's `data_provenance` verdict |
 | `GET /api/tickers` | list single instruments + last price/change |
-| `GET /api/analyze?ticker=SYM&horizon=N` | single-instrument analysis payload, including the engine's `data_provenance` verdict |
+| `GET /api/analyze?ticker=SYM&horizon=H` | single-instrument analysis (`H` = 5–90 or `6M`/`1Y`/`3Y`/`5Y`), including tactical evidence, strategic projection metadata, and the engine's `data_provenance` verdict |
 | `POST /api/upload` | import a single-instrument price CSV (multipart `file`, optional `symbol`) |
 | `POST /api/live` | fetch live data `{ "symbol": "GOOG" }` |
 | `GET /api/providers` | provider configuration, license/entitlement/SLA status and approved cutovers |

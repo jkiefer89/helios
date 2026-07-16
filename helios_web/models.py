@@ -337,24 +337,11 @@ def model_upload():
 
 def _resolve_horizon(raw: str):
     """Return (kind, value, error). kind 'short' -> int days; 'long' -> preset days."""
-    raw = (raw or "21").strip().upper()
-    if raw in forecast.LONG_HORIZONS:
-        return "long", forecast.LONG_HORIZONS[raw], None
-    try:
-        return "short", max(5, min(int(float(raw)), 90)), None
-    except (TypeError, ValueError, OverflowError):
-        return None, None, "horizon must be an integer between 5 and 90 or one of 6M, 1Y, 3Y, 5Y."
+    return forecast.resolve_horizon(raw)
 
 
 def _available_long(n_days: int) -> list[str]:
-    out = []
-    if n_days >= 90:           # don't project 6 months from < ~4 months of data
-        out.append("6M")
-    if n_days >= 126:
-        out.append("1Y")
-    if n_days >= 252:
-        out += ["3Y", "5Y"]
-    return out
+    return forecast.available_long_horizons(n_days)
 
 
 @bp.route("/api/model/analyze")
@@ -384,8 +371,12 @@ def model_analyze():
     avail = _available_long(ps.n_days)
     long_label = forecast._long_label(hval) if hkind == "long" else None
     if hkind == "long" and long_label not in avail:
-        hkind, hval = "short", 21  # requested long horizon unavailable for this history
-        long_label = None
+        required = forecast.LONG_HORIZON_MIN_HISTORY.get(long_label or "", 250)
+        return err(
+            f"{long_label or 'Long-horizon'} strategic projection requires at least "
+            f"{required} observed sessions; {ps.n_days} are available.",
+            400,
+        )
 
     # Aggregate only headlines persisted with explicit live-data ingestion.
     headlines = []
@@ -449,7 +440,8 @@ def model_analyze():
         # "provenance" block above is kept unchanged for backward compatibility.
         "data_provenance": research_provenance,
         "horizon": {"kind": hkind, "value": hval, "label": long_label,
-                    "available_long": avail},
+                    "available_long": avail, "history_rows": ps.n_days,
+                    "minimum_history": dict(forecast.LONG_HORIZON_MIN_HISTORY)},
         "forecast": forecast_panel,
         "forecast_short": fc_short,
         "signal": sig,

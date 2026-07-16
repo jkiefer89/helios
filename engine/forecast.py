@@ -17,6 +17,7 @@ from . import mandate as mnd
 
 # Long-horizon presets -> trading days (21/month, 252/year).
 LONG_HORIZONS = {"6M": 126, "1Y": 252, "3Y": 756, "5Y": 1260}
+LONG_HORIZON_MIN_HISTORY = {"6M": 90, "1Y": 126, "3Y": 250, "5Y": 250}
 # Horizon-uncertainty floor: the cone widens beyond pure GBM the further out we
 # look, because volatility itself is non-stationary and uncertain.
 _KAPPA_H = ([126, 252, 756, 1260], [1.10, 1.20, 1.35, 1.50])
@@ -24,6 +25,35 @@ LONG_SHARPE_CAP = 0.60   # half-ish the 1.5 tactical cap: we believe edge less f
 LONG_N_PATHS = 4000
 LONG_BASE_VALUE = 10_000.0
 OUTER_BAND_VOL_INFLATION = 1.15  # vol-of-vol haircut on p05/p95
+
+
+def resolve_horizon(raw: object) -> tuple[str | None, int | None, str | None]:
+    """Resolve tactical sessions or a governed strategic preset.
+
+    HTTP routes share this parser so instrument and model analysis expose the
+    same horizon contract. Long labels remain distinct from tactical sessions;
+    callers decide whether enough history exists for the requested projection.
+    """
+    value = str(raw or "21").strip().upper()
+    if value in LONG_HORIZONS:
+        return "long", LONG_HORIZONS[value], None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None, None, "horizon must be an integer between 5 and 90 or one of 6M, 1Y, 3Y, 5Y."
+    if not numeric.is_integer():
+        return None, None, "horizon must be an integer between 5 and 90 or one of 6M, 1Y, 3Y, 5Y."
+    sessions = int(numeric)
+    return "short", max(5, min(sessions, 90)), None
+
+
+def available_long_horizons(history_rows: int) -> list[str]:
+    """Return strategic presets supported by the observed history depth."""
+    rows = max(0, int(history_rows or 0))
+    return [
+        label for label in LONG_HORIZONS
+        if rows >= LONG_HORIZON_MIN_HISTORY[label]
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -386,6 +416,7 @@ def forecast_long(close: pd.Series, horizon_days: int, mandate_key: str = "balan
         "drawdown_median_pct": float(np.median(path_dd) * 100),
         "drawdown_p95_pct": float(np.percentile(path_dd, 5) * 100),  # 5th pct = worst tail
         "prob_breach_maxdd": float(np.mean(path_dd < tol)),
+        "max_drawdown_tolerance_pct": float(mnd.get(mandate_key)["max_drawdown_tolerance_pct"]),
         "params": {
             "mu_long_pct": round(mu_lt * 100, 2),
             "mu_hist_pct": round(mu_hist * 100, 2),

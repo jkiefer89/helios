@@ -647,9 +647,11 @@ def analyze():
     symbol = data.clean_symbol(request.args.get("ticker", ""), fallback="")
     if not symbol:
         return err("Provide a ticker symbol.", 400)
-    horizon, error = _safe_int_arg("horizon", 21, 5, 90)
-    if error:
-        return err(error, 400)
+    horizon_kind, horizon_value, horizon_error = forecast.resolve_horizon(
+        request.args.get("horizon", "21"),
+    )
+    if horizon_error or horizon_kind is None or horizon_value is None:
+        return err(horizon_error or "Invalid horizon.", 400)
     inst = data.get(symbol)
     if inst is None:
         return err(f"Unknown ticker '{symbol}'.", 404)
@@ -669,6 +671,16 @@ def analyze():
             409,
         )
 
+    available_long = forecast.available_long_horizons(len(close))
+    long_label = forecast._long_label(horizon_value) if horizon_kind == "long" else None
+    if horizon_kind == "long" and long_label not in available_long:
+        required = forecast.LONG_HORIZON_MIN_HISTORY.get(long_label or "", 252)
+        return err(
+            f"{long_label or 'Long-horizon'} strategic projection requires at least "
+            f"{required} observed sessions; {len(close)} are available.",
+            400,
+        )
+
     # Mandate anchor the strategic (CMA) track is judged against. Operator-
     # selectable per evaluation; "auto" infers it from the instrument's OWN
     # realized-vol risk profile (never the portfolio it happens to sit in), so
@@ -686,7 +698,8 @@ def analyze():
         resolved_mandate = mandate.DEFAULT
         mandate_basis = "default"
 
-    fc = forecast.forecast(close, horizon=horizon)
+    tactical_horizon = horizon_value if horizon_kind == "short" else 21
+    fc_short = forecast.forecast(close, horizon=tactical_horizon)
     sent = sentiment.score_headlines(list(inst.headlines or []))
     fnd = fundamentals.fetch_cached(inst.symbol) or fundamentals.Fundamentals(
         ticker=inst.symbol, source="none")
@@ -697,9 +710,19 @@ def analyze():
         "available": False,
         "reason": "No cached SEC event evidence is available; refresh real-data context explicitly.",
     }
-    sig = signals.evaluate(close, fc, sent, history_days=len(close),
+    sig = signals.evaluate(close, fc_short, sent, history_days=len(close),
                            fundamental_result=fwd, macro_context=macro_ctx,
                            mandate_key=resolved_mandate)
+    anchor_kwargs = {}
+    if fwd.get("usable") and isinstance(fwd.get("expected_return_pct"), (int, float)):
+        anchor_kwargs = {
+            "anchor_return": float(fwd["expected_return_pct"]) / 100.0,
+            "anchor_basis": f"instrument_building_block_cma:{fwd.get('source') or 'sourced_fundamentals'}",
+        }
+    forecast_panel = (
+        forecast.forecast_long(close, horizon_value, resolved_mandate, **anchor_kwargs)
+        if horizon_kind == "long" else fc_short
+    )
     bt = backtest.run(close)
     metrics = indicators.metrics_summary(close)
     context = research_context.instrument_context(inst.symbol) or {
@@ -719,7 +742,16 @@ def analyze():
         "research_context": context,
         "metrics": metrics,
         "series": _series_payload(close, markers=True),
-        "forecast": fc,
+        "horizon": {
+            "kind": horizon_kind,
+            "value": horizon_value,
+            "label": long_label,
+            "available_long": available_long,
+            "history_rows": len(close),
+            "minimum_history": dict(forecast.LONG_HORIZON_MIN_HISTORY),
+        },
+        "forecast": forecast_panel,
+        "forecast_short": fc_short,
         "sentiment": sent,
         "fundamentals": fwd,
         # Which mandate anchor the strategic track was judged against, and why —

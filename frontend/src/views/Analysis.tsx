@@ -28,6 +28,7 @@ import { useViewFetch } from "../hooks/useViewFetch";
 import { fmtAuto, fmtMoney, fmtNumber, fmtPct, titleCase } from "../utils/format";
 
 const LONG_HORIZON_PRESETS = ["6M", "1Y", "3Y", "5Y"] as const;
+const TACTICAL_HORIZON_PRESETS = [21, 63, 90] as const;
 
 export function Analysis({
   tickers,
@@ -59,27 +60,43 @@ export function Analysis({
     ...tickers.map((ticker) => ({ value: `instrument:${ticker.symbol}`, label: `${ticker.symbol} · ${ticker.name}` })),
     ...models.map((model) => ({ value: `model:${model.id}`, label: `${model.name} · model` })),
   ], [tickers, models]);
-  const targetIsModel = (target || defaultTarget).startsWith("model:");
-  // Only trust availability once a model payload for the current target exists.
-  const availableLong = payload?.horizon && targetIsModel ? payload.horizon.available_long : targetIsModel ? [...LONG_HORIZON_PRESETS] : [];
+  const currentTarget = target || defaultTarget;
+  const targetIsModel = currentTarget.startsWith("model:");
+  const payloadTarget = payload?.id
+    ? `model:${payload.id}`
+    : payload?.symbol
+      ? `instrument:${payload.symbol}`
+      : "";
+  const horizonMetadataIsCurrent = Boolean(payload?.horizon && payloadTarget === currentTarget);
+  const availableLong = horizonMetadataIsCurrent ? payload?.horizon?.available_long || [] : [];
+  const unavailableLongSummary = horizonMetadataIsCurrent
+    ? LONG_HORIZON_PRESETS
+      .filter((label) => !availableLong.includes(label))
+      .map((label) => `${label} needs ${payload?.horizon?.minimum_history?.[label] ?? "more"} sessions`)
+      .join(" · ")
+    : "";
+
+  const syncHorizonSelection = useCallback((result: AnalysisResponse) => {
+    if (!result.horizon) return;
+    setHorizon(result.horizon.kind === "long"
+      ? result.horizon.label || result.horizon.value
+      : result.horizon.value);
+  }, []);
 
   const runAnalysis = useCallback((requestedTarget: string, requestedHorizon: string | number) => {
     const [kind, id] = requestedTarget.split(":");
     if (!kind || !id) return;
     if (kind === "model") {
       onSelectModel(id);
-      void load(requestedTarget, () => api.analyzeModel(id, requestedHorizon), (result) => {
-        // The backend may downgrade an unavailable long preset to a 21d tactical signal.
-        if (result.horizon) setHorizon(result.horizon.kind === "long" ? result.horizon.label || result.horizon.value : result.horizon.value);
-      });
+      void load(requestedTarget, () => api.analyzeModel(id, requestedHorizon), syncHorizonSelection);
     } else {
       onSelectInstrument(id);
       // Omit the default so the payload honestly reads "default" until the
       // operator actually changes the anchor.
       const m = mandateSel === "balanced" ? undefined : mandateSel;
-      void load(requestedTarget, () => api.analyzeInstrument(id, Number(requestedHorizon) || 21, m));
+      void load(requestedTarget, () => api.analyzeInstrument(id, requestedHorizon, m), syncHorizonSelection);
     }
-  }, [load, onSelectInstrument, onSelectModel, mandateSel]);
+  }, [load, onSelectInstrument, onSelectModel, mandateSel, syncHorizonSelection]);
 
   useEffect(() => {
     if (!defaultTarget || isCurrentTarget(defaultTarget)) return;
@@ -87,9 +104,9 @@ export function Analysis({
     runAnalysis(defaultTarget, horizon);
   }, [defaultTarget, horizon, isCurrentTarget, runAnalysis]);
 
-  const applyPreset = (label: string) => {
-    setHorizon(label);
-    runAnalysis(target || defaultTarget, label);
+  const applyPreset = (value: string | number) => {
+    setHorizon(value);
+    runAnalysis(currentTarget, value);
   };
 
   // Changing the anchor re-runs the current instrument immediately (models
@@ -101,7 +118,7 @@ export function Analysis({
       const [, id] = current.split(":");
       onSelectInstrument(id);
       const m = value === "balanced" ? undefined : value;
-      void load(current, () => api.analyzeInstrument(id, Number(horizon) || 21, m));
+      void load(current, () => api.analyzeInstrument(id, horizon, m), syncHorizonSelection);
     }
   };
   const mandateOptions = [
@@ -115,9 +132,9 @@ export function Analysis({
     <div className="view-stack">
       <header className="view-head">
         <div><div className="section-label">Analysis</div><h1>Instrument and model detail</h1><p>Forecast cones, momentum oscillators, and weighted signal evidence in the React terminal.</p></div>
-        <form className="toolbar" onSubmit={(event) => { event.preventDefault(); runAnalysis(target || defaultTarget, horizon); }}>
+        <form className="toolbar analysis-toolbar" onSubmit={(event) => { event.preventDefault(); runAnalysis(currentTarget, horizon); }}>
           <label>Target<TerminalSelect ariaLabel="Analysis target" value={target} onChange={setTarget} options={options} /></label>
-          <label>Horizon (5–90d)
+          <label>Tactical horizon (5–90d)
             <input
               type="number"
               min={5}
@@ -136,20 +153,53 @@ export function Analysis({
               disabled={targetIsModel}
             />
           </label>
-          <div className="horizon-presets" role="group" aria-label="Strategic projection horizon">
-            {LONG_HORIZON_PRESETS.map((label) => (
-              <button
-                key={label}
-                type="button"
-                className={horizon === label ? "active" : ""}
-                disabled={!targetIsModel || !availableLong.includes(label)}
-                onClick={() => applyPreset(label)}
-              >
-                {label}
-              </button>
-            ))}
+          <div className="analysis-horizon-groups">
+            <div className="analysis-horizon-group">
+              <span>Tactical presets</span>
+              <div className="horizon-presets" role="group" aria-label="Tactical forecast horizon">
+                {TACTICAL_HORIZON_PRESETS.map((days) => (
+                  <button
+                    key={days}
+                    type="button"
+                    className={horizon === days ? "active" : ""}
+                    disabled={!currentTarget}
+                    onClick={() => applyPreset(days)}
+                  >
+                    {days}D
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="analysis-horizon-group">
+              <span>Strategic projection</span>
+              <div className="horizon-presets" role="group" aria-label="Strategic projection horizon">
+                {LONG_HORIZON_PRESETS.map((label) => {
+                  const required = payload?.horizon?.minimum_history?.[label];
+                  const observed = payload?.horizon?.history_rows;
+                  const unavailable = horizonMetadataIsCurrent && !availableLong.includes(label);
+                  return (
+                    <button
+                      key={label}
+                      type="button"
+                      className={horizon === label ? "active" : ""}
+                      disabled={!currentTarget || unavailable}
+                      title={unavailable && required
+                        ? `${label} requires ${required} observed sessions; ${observed ?? 0} are available.`
+                        : `Run the ${label} strategic projection.`}
+                      onClick={() => applyPreset(label)}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
           </div>
           <button type="submit">Analyze</button>
+          <p className="analysis-horizon-note">
+            Tactical horizons drive the short-term signal. Strategic horizons run a separate value and drawdown projection without pretending a multi-year tab is a multi-year trading signal.
+            {unavailableLongSummary ? ` Unavailable for this history: ${unavailableLongSummary}.` : ""}
+          </p>
         </form>
       </header>
       <RequestStatus failure={failure} stale={staleResult} onRetry={retry} />
@@ -211,7 +261,7 @@ function AnalysisPayload({ payload }: { payload: AnalysisResponse }) {
           <div className="warning-list">{payload.warnings.map((w) => <span key={w}>{w}</span>)}</div>
         ) : null}
       </Panel>
-      {eligible && <ConvictionGuidancePanel signal={payload.signal} />}
+      {eligible && <ConvictionGuidancePanel signal={payload.signal} payload={payload} />}
       <section className="dashboard-grid">
         <Panel title={`Price, Trend and Signal Markers${panelSuffix}`} className="span-2">
           <PriceTrendChart
@@ -636,7 +686,7 @@ function TacticalForecastPanel({ forecast, series }: { forecast: TacticalForecas
 function LongForecastPanel({ forecast, mandate }: { forecast: LongForecast; mandate?: AnalysisMandate }) {
   const cagr = forecast.cagr_pct;
   const breachPct = forecast.prob_breach_maxdd * 100;
-  const tolerance = mandate?.max_drawdown_tolerance_pct;
+  const tolerance = mandate?.max_drawdown_tolerance_pct ?? forecast.max_drawdown_tolerance_pct;
   const stats = [
     { label: "Median value", value: fmtMoney(forecast.terminal.p50), tone: "neutral" },
     { label: "Median CAGR", value: fmtPct(cagr.p50), tone: toneFor(cagr.p50) },
@@ -657,7 +707,7 @@ function LongForecastPanel({ forecast, mandate }: { forecast: LongForecast; mand
       </div>
       <ForecastConeChart points={longConePoints(forecast)} baseline={forecast.base_value} ariaLabel={`${forecast.label} strategic value projection cone`} />
       <p className="forecast-note">
-        drift {fmtPct(forecast.params.mu_long_pct)}/yr (λ{fmtNumber(forecast.params.anchor_weight_lambda, 2)} to anchor) · vol {fmtNumber(forecast.params.sigma_eff_pct, 1)}% · {forecast.disclaimer}
+        drift {fmtPct(forecast.params.mu_long_pct)}/yr (λ{fmtNumber(forecast.params.anchor_weight_lambda, 2)} to {titleCase(forecast.params.anchor_basis)}) · vol {fmtNumber(forecast.params.sigma_eff_pct, 1)}% · {forecast.disclaimer}
       </p>
     </div>
   );
@@ -700,10 +750,12 @@ function longConePoints(forecast: LongForecast): ForecastConePoint[] {
   return [start, ...projection];
 }
 
-export function ConvictionGuidancePanel({ signal }: { signal: AnalysisSignal }) {
+export function ConvictionGuidancePanel({ signal, payload }: { signal: AnalysisSignal; payload?: AnalysisResponse }) {
   const guidance = signal.conviction_guidance;
   if (!guidance) return null;
   const bridge = guidance.score_bridge;
+  const contextConfigured = Boolean(payload?.research_context?.configured || payload?.thesis);
+  const providerSummary = convictionProviderSummary(payload);
   return (
     <Panel
       title="How Conviction Can Improve"
@@ -713,6 +765,16 @@ export function ConvictionGuidancePanel({ signal }: { signal: AnalysisSignal }) 
       <div className="conviction-guidance__intro">
         <p>{guidance.summary}</p>
         <span>{titleCase(guidance.direction)} evidence</span>
+      </div>
+      <div className="conviction-guidance__intake">
+        <div>
+          <strong>How Helios receives evidence</strong>
+          <p>Score-bearing facts arrive through provider refreshes and prospective outcomes. Do not type a desired score or unsupported estimate.</p>
+        </div>
+        <dl>
+          <div><dt>Market/provider state</dt><dd>{providerSummary}</dd></div>
+          <div><dt>Operator input</dt><dd>{contextConfigured ? "Governed thesis context is configured" : "Add thesis, mandate, benchmark, and invalidation rules in the governed research workflow"}</dd></div>
+        </dl>
       </div>
       <dl className="conviction-guidance__bridge" aria-label="Conviction score bridge">
         <div><dt>Base component evidence</dt><dd>{fmtNumber(bridge.base_component_conviction_pct, 1)}%</dd></div>
@@ -732,6 +794,8 @@ export function ConvictionGuidancePanel({ signal }: { signal: AnalysisSignal }) 
             <dl>
               <div><dt>What changes it</dt><dd>{path.what_changes_it}</dd></div>
               <div><dt>Next evidence</dt><dd>{path.next_evidence}</dd></div>
+              {!!path.evidence_sources?.length && <div><dt>Sources</dt><dd>{path.evidence_sources.join(" · ")}</dd></div>}
+              {path.capture_method && <div><dt>Feed</dt><dd><b>{path.capture_method}</b>{path.workflow ? ` — ${path.workflow}` : ""}</dd></div>}
             </dl>
           </article>
         ))}
@@ -739,6 +803,31 @@ export function ConvictionGuidancePanel({ signal }: { signal: AnalysisSignal }) 
       <p className="conviction-guidance__guardrail">{guidance.guardrail}</p>
     </Panel>
   );
+}
+
+function convictionProviderSummary(payload?: AnalysisResponse): string {
+  if (!payload) return "Use eligible live/uploaded histories and configured supporting providers";
+  const parts: string[] = [];
+  if (payload.source) parts.push(`prices: ${payload.source}`);
+  else {
+    const countedSources = Object.entries(payload.data_provenance?.source_counts || {})
+      .filter(([, count]) => Number(count) > 0)
+      .map(([source, count]) => `${source} ${count}`);
+    if (countedSources.length) {
+      parts.push(`prices: ${countedSources.join(", ")}`);
+    } else {
+      const weightedSources = Object.entries(payload.data_provenance?.source_weight_pct || {})
+        .filter(([, weight]) => Number(weight) > 0)
+        .map(([source, weight]) => `${source} ${fmtNumber(Number(weight), 0)}%`);
+      if (weightedSources.length) parts.push(`prices: ${weightedSources.join(", ")}`);
+    }
+  }
+  const fundamentalSource = String(payload.fundamentals?.source || "").trim();
+  if (fundamentalSource && fundamentalSource !== "none") parts.push(`fundamentals: ${fundamentalSource}`);
+  if (payload.sentiment?.count) parts.push(`headlines: ${payload.sentiment.count}`);
+  if (payload.sec_events?.available) parts.push("filings/events: SEC EDGAR");
+  if (payload.macro) parts.push("macro: cached primary-source feeds");
+  return parts.length ? parts.join(" · ") : "Supporting provider evidence is not yet available";
 }
 
 function SignalBreakdown({ signal, forecast }: { signal: AnalysisSignal; forecast?: TacticalForecast }) {

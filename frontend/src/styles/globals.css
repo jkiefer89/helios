@@ -5083,10 +5083,12 @@ button.locked-table-row:hover {
 }
 
 .conviction-guidance__intro p {
+  min-width: 0;
   margin: 0;
   color: var(--soft);
   font-size: 0.78rem;
   line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 .conviction-guidance__intro span,
@@ -5138,13 +5140,66 @@ button.locked-table-row:hover {
   font-variant-numeric: tabular-nums;
 }
 
+.conviction-guidance__intake {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.8fr) minmax(0, 1.2fr);
+  gap: 1rem;
+  align-items: start;
+  border: 1px solid rgba(92, 157, 255, 0.28);
+  background: rgba(92, 157, 255, 0.055);
+  padding: 0.75rem 0.85rem;
+}
+
+.conviction-guidance__intake strong {
+  color: var(--text);
+  font-size: 0.74rem;
+}
+
+.conviction-guidance__intake p {
+  margin: 0.28rem 0 0;
+  color: var(--muted);
+  font-size: 0.68rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.conviction-guidance__intake dl {
+  display: grid;
+  gap: 0.45rem;
+  margin: 0;
+}
+
+.conviction-guidance__intake dl > div {
+  display: grid;
+  grid-template-columns: minmax(110px, 0.35fr) minmax(0, 1fr);
+  gap: 0.65rem;
+}
+
+.conviction-guidance__intake dt {
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 0.57rem;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.conviction-guidance__intake dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--soft);
+  font-size: 0.68rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
 .conviction-guidance__paths {
   display: grid;
 }
 
 .conviction-path {
   display: grid;
-  grid-template-columns: minmax(150px, 0.7fr) minmax(220px, 1fr) minmax(300px, 1.6fr);
+  grid-template-columns: minmax(140px, 0.65fr) minmax(0, 1fr) minmax(0, 1.7fr);
   gap: 0.8rem;
   align-items: start;
   border-bottom: 1px solid var(--line);
@@ -5172,6 +5227,7 @@ button.locked-table-row:hover {
 .conviction-path header {
   display: grid;
   gap: 0.25rem;
+  min-width: 0;
 }
 
 .conviction-path header strong {
@@ -5190,29 +5246,39 @@ button.locked-table-row:hover {
 }
 
 .conviction-path > p {
+  min-width: 0;
   margin: 0;
   color: var(--muted);
   font-size: 0.7rem;
   line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 .conviction-path dl {
   display: grid;
   gap: 0.45rem;
+  min-width: 0;
   margin: 0;
 }
 
 .conviction-path dl > div {
   display: grid;
-  grid-template-columns: 104px minmax(0, 1fr);
+  grid-template-columns: minmax(84px, 104px) minmax(0, 1fr);
   gap: 0.55rem;
 }
 
 .conviction-path dd {
+  min-width: 0;
   margin: 0;
   color: var(--soft);
   font-size: 0.68rem;
   line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.conviction-path dd b {
+  color: var(--text);
+  font-weight: 650;
 }
 
 .conviction-guidance__guardrail {
@@ -5223,6 +5289,7 @@ button.locked-table-row:hover {
   padding: 0.55rem 0.7rem;
   font-size: 0.68rem;
   line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 /* Dual-track rating: tactical (horizon-sensitive) vs strategic (horizon-free) */
@@ -5230,6 +5297,7 @@ button.locked-table-row:hover {
   display: flex;
   flex-wrap: wrap;
   gap: 0.6rem;
+  min-width: 0;
   margin-top: 0.7rem;
 }
 
@@ -5263,6 +5331,7 @@ button.locked-table-row:hover {
   min-width: 0;
   color: var(--soft);
   font-size: 0.72rem;
+  overflow-wrap: anywhere;
 }
 
 .signal-track--empty .signal-track__detail {
@@ -5729,8 +5798,12 @@ button.locked-table-row:hover {
 
 .holdings-table {
   display: grid;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
   max-height: 340px;
   overflow: auto;
+  contain: inline-size;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: rgba(6, 9, 15, 0.55);
@@ -5763,12 +5836,14 @@ button.locked-table-row:hover {
 
 .horizon-presets {
   display: inline-flex;
+  flex-wrap: wrap;
   align-self: end;
   border: 1px solid var(--line);
   border-radius: var(--radius-control);
   background: rgba(5, 8, 13, 0.7);
   padding: 3px;
   gap: 2px;
+  max-width: 100%;
 }
 
 .horizon-presets button {
@@ -5792,6 +5867,49 @@ button.locked-table-row:hover {
   background: linear-gradient(180deg, #1a3d6e, #14304f);
   color: #eaf2ff;
   box-shadow: var(--inset-sheen);
+}
+
+.horizon-presets button:disabled {
+  color: var(--faint);
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.analysis-toolbar {
+  max-width: min(860px, 100%);
+}
+
+.analysis-horizon-groups {
+  display: flex;
+  flex: 1 1 100%;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.55rem;
+}
+
+.analysis-horizon-group {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.analysis-horizon-group > span {
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 0.56rem;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.analysis-horizon-note {
+  flex: 1 1 100%;
+  max-width: none !important;
+  color: var(--faint) !important;
+  font-size: 0.64rem !important;
+  line-height: 1.45 !important;
+  text-align: right;
+  overflow-wrap: anywhere;
 }
 
 .forecast-panel {
@@ -7786,6 +7904,10 @@ button.locked-table-row:hover {
     display: grid;
   }
 
+  .conviction-guidance__intake {
+    grid-template-columns: 1fr;
+  }
+
   .conviction-guidance__bridge {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -7826,6 +7948,18 @@ button.locked-table-row:hover {
 
   .horizon-presets button {
     flex: 1 1 0;
+  }
+
+  .analysis-horizon-groups {
+    justify-content: stretch;
+  }
+
+  .analysis-horizon-group {
+    flex: 1 1 210px;
+  }
+
+  .analysis-horizon-note {
+    text-align: left;
   }
 
   .dashboard-grid,
@@ -8043,6 +8177,27 @@ button.locked-table-row:hover {
   .conviction-path dl > div {
     grid-template-columns: 1fr;
     gap: 0.2rem;
+  }
+
+  .conviction-guidance__intake dl > div {
+    grid-template-columns: 1fr;
+    gap: 0.2rem;
+  }
+
+  .signal-track {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
+  }
+
+  .signal-track__label {
+    min-width: 0;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .signal-track__detail {
+    grid-column: 1 / -1;
   }
 }
 
