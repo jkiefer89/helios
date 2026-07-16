@@ -451,3 +451,49 @@ def test_mandate_override_changes_the_anchor():
     # smaller (more demanding) gap — the honest direction.
     assert grw["anchor_pct"] > bal["anchor_pct"]
     assert grw["gap_vs_anchor_pct"] < bal["gap_vs_anchor_pct"]
+
+
+# --------------------------------------------------------------------------- #
+# Growth-and-quality-conditioned fair value (stop penalizing compounders for a
+# multiple their growth earns; still discipline names stretched even for it)
+# --------------------------------------------------------------------------- #
+def test_conditioned_fair_pe_rewards_growth_and_quality():
+    fair, d = cma._conditioned_fair_pe(24.0, 0.25, 0.12, 0.30, 0.25)
+    assert d["growth_mult"] == pytest.approx(1.65, abs=0.01)   # 1 + 5*(0.25-0.12)
+    assert d["quality_mult"] == pytest.approx(1.12, abs=0.01)
+    assert fair == pytest.approx(24.0 * 1.65 * 1.12, rel=1e-3)
+    assert fair > 24.0                                          # premium over the sector base
+
+
+def test_conditioned_fair_pe_falls_back_to_sector_base_without_edge():
+    fair, d = cma._conditioned_fair_pe(24.0, 0.12, 0.12, None, None)
+    assert d["growth_mult"] == pytest.approx(1.0)
+    assert d["quality_mult"] == pytest.approx(1.0)
+    assert fair == pytest.approx(24.0)                          # unchanged when no edge
+
+
+def test_conditioned_fair_pe_is_bounded():
+    # Hyper-growth + buyback-inflated ROE cannot blow past the caps.
+    fair, d = cma._conditioned_fair_pe(24.0, 1.0, 0.05, 1.5, 0.9)
+    assert d["growth_mult"] == 2.5                     # growth cap binds
+    # Quality maxes at 1.20 (0.8 * 0.25 max credit) — below the 1.25 belt cap.
+    assert d["quality_mult"] == pytest.approx(1.20)
+    assert fair == pytest.approx(24.0 * 2.5 * 1.20)
+
+
+def test_growth_conditioning_rewards_fair_priced_compounder():
+    # High growth + quality at a moderate multiple -> POSITIVE reversion, where
+    # the static sector anchor (24) would have ignored/penalized a 30x multiple.
+    f = _f(ticker="CMP", forward_pe=30.0, earnings_growth=0.25, roe=0.30,
+           profit_margin=0.25, dividend_yield=0.0, sector="Technology")
+    fwd = cma.instrument_forward("CMP", f)
+    assert fwd["blocks_pct"]["valuation_reversion"] > 0
+    assert fwd["fair_pe_conditioning"]["conditioned_fair_pe"] > 24.0
+
+
+def test_growth_conditioning_still_disciplines_overstretched():
+    # 110x for 17% growth stays stretched even after conditioning: -5% floor.
+    f = _f(ticker="RICH", forward_pe=110.0, earnings_growth=0.17, roe=0.05,
+           profit_margin=0.05, sector="Technology")
+    fwd = cma.instrument_forward("RICH", f)
+    assert fwd["blocks_pct"]["valuation_reversion"] == pytest.approx(-5.0, abs=0.01)

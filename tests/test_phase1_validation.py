@@ -104,7 +104,10 @@ def test_cma_labels_fair_pe_assumption():
                                   earnings_growth=0.10, growth_basis="forward_consensus_cagr",
                                   sector="technology", source="fake")
     out = cma.instrument_forward("LBL", f)
-    assert out["fair_pe_anchor"] == pytest.approx(24.0)       # NOT x100-scaled
+    # Conditioned: tech base 24 × growth_mult 0.90 (g 10% < sector norm 12%) = 21.6
+    assert out["fair_pe_anchor"] == pytest.approx(21.6, abs=0.05)   # NOT x100-scaled
+    assert out["fair_pe_conditioning"]["sector_base_pe"] == pytest.approx(24.0)
+    assert out["fair_pe_conditioning"]["growth_mult"] == pytest.approx(0.90, abs=0.01)
     assert out["anchor_as_of"] == assumptions.SECTOR_ANCHORS["as_of"]
     assert out["assumptions_version"] == assumptions.SECTOR_ANCHORS["as_of"]
     assert "fair_pe_anchor" not in out["blocks_pct"]

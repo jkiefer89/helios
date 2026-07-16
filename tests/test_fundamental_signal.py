@@ -36,8 +36,9 @@ def test_instrument_forward_building_blocks():
     fwd = cma.instrument_forward("TEST", _fnd())
     assert fwd["usable"] is True
     assert fwd["basis"] == "fundamentals"
-    # dy 2% + growth 9% + reversion ln(13/14)/5y ~ -1.48% => ~9.5%
-    assert fwd["expected_return_pct"] == pytest.approx(9.52, abs=0.05)
+    # dy 2% + growth 9% + conditioned reversion ln(14.3/14)/5y ~ +0.42% => ~11.42%
+    # (financials base 13 × growth_mult 1.10 for g 9% vs sector 7% -> fair 14.3)
+    assert fwd["expected_return_pct"] == pytest.approx(11.42, abs=0.05)
     assert fwd["gap_vs_anchor_pct"] == pytest.approx(fwd["expected_return_pct"] - fwd["anchor_pct"], abs=0.01)
 
 

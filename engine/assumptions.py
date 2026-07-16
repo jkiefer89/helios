@@ -41,6 +41,39 @@ SECTOR_ANCHORS = {
 }
 MARKET_ANCHOR = {"fair_pe": 17.0, "growth": 0.06}
 
+# Growth-and-quality conditioning of the fair P/E the CMA reverts toward.
+# A STATIC sector-average fair P/E penalizes the compounders you want to own:
+# it reverts a fast-growing, high-return franchise toward the same multiple as
+# a no-growth peer, and — because growth is ALSO credited additively in E[r] —
+# it taxes the market's pricing of the very growth the model rewards (a
+# double-count). Conditioning makes the fair multiple RISE with a company's
+# growth relative to its sector and with its capital quality, so the reversion
+# penalizes only a multiple ABOVE what growth+quality justify — not the
+# compounding itself. Everything is bounded, so a hyper-grower cannot earn an
+# unbounded multiple and a rate/cycle shock still bites a genuinely stretched
+# name. Growth uses the model's already-processed g (capped/shrunk), so a noisy
+# single-quarter comp cannot inflate the anchor; a name with no growth data
+# falls back to the static sector base (honest, never fabricated).
+FAIR_VALUE_CONDITIONING = {
+    "as_of": "2026-07",
+    "methodology": ("fair_pe = sector_base × growth_mult × quality_mult, all "
+                    "bounded. growth_mult scales with growth vs the sector norm; "
+                    "quality_mult with ROE and net margin vs baselines. Hand-set "
+                    "conservative sensitivities, not a fitted model."),
+    # multiple premium per unit of growth above the sector norm
+    "growth_sensitivity": 5.0,
+    "growth_excess_clip": [-0.15, 0.30],   # (company_g − sector_g), bounded
+    "growth_mult_clip": [0.60, 2.50],      # fair multiple is 0.6×–2.5× the sector base
+    # capital-quality premium — gentler than growth; ROE/margin clamped so a
+    # buyback-inflated ROE cannot earn unbounded credit.
+    "quality_sensitivity": 0.8,
+    "roe_baseline": 0.15,
+    "roe_credit_clip": [0.0, 0.40],
+    "margin_baseline": 0.10,
+    "margin_credit_clip": [0.0, 0.35],
+    "quality_mult_clip": [0.85, 1.25],
+}
+
 # Non-equity sleeve premia over the configured risk-free rate.
 ASSET_CLASS_PREMIA = {
     "as_of": "2026-07",

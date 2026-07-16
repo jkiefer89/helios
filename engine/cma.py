@@ -62,6 +62,34 @@ def _display_name(ticker: str, fundamentals) -> str:
     return str(getattr(fundamentals, "name", "") or "")
 
 
+def _conditioned_fair_pe(base_pe, g, g_sector, roe, margin):
+    """Growth-and-quality-adjusted fair P/E (assumptions.FAIR_VALUE_CONDITIONING):
+    the multiple a company's growth and capital quality justify, so the
+    reversion penalizes only a multiple ABOVE that — not the compounding itself.
+    Bounded; a name with no growth/quality edge over its sector reverts to the
+    static sector base unchanged.
+    """
+    cfg = _assumptions.FAIR_VALUE_CONDITIONING
+    g_excess = _clip(g - g_sector, *cfg["growth_excess_clip"])
+    growth_mult = _clip(1.0 + cfg["growth_sensitivity"] * g_excess, *cfg["growth_mult_clip"])
+    # Quality: mean of the available ROE and margin premia over baselines; each
+    # is optional (missing -> no credit), ROE clamped to drop buyback outliers.
+    q_terms = []
+    if roe is not None:
+        q_terms.append(_clip(roe, *cfg["roe_credit_clip"]) - cfg["roe_baseline"])
+    if margin is not None:
+        q_terms.append(_clip(margin, *cfg["margin_credit_clip"]) - cfg["margin_baseline"])
+    q_excess = (sum(q_terms) / len(q_terms)) if q_terms else 0.0
+    quality_mult = _clip(1.0 + cfg["quality_sensitivity"] * q_excess, *cfg["quality_mult_clip"])
+    fair = base_pe * growth_mult * quality_mult
+    return fair, {
+        "sector_base_pe": round(base_pe, 2),
+        "growth_mult": round(growth_mult, 3),
+        "quality_mult": round(quality_mult, 3),
+        "conditioned_fair_pe": round(fair, 2),
+    }
+
+
 def holding_expected_return(ticker, weight_pct, asset_class, fundamentals,
                             mandate_key="balanced", horizon_years=REVERSION_HORIZON_Y) -> HoldingReturn:
     """Forward expected return for one underlying holding."""
@@ -139,8 +167,20 @@ def holding_expected_return(ticker, weight_pct, asset_class, fundamentals,
         g = _clip(g_in, *_GROWTH_CAP)
         rev = 0.0
         fair = None
+        fair_detail = None
         if pe and pe > 0:
-            fair = _macro.sector_anchor(fundamentals.sector)["fair_pe"]
+            # Growth-and-quality-conditioned fair P/E: the multiple the company's
+            # growth and capital quality justify. Reverting to a STATIC sector
+            # average penalized compounders for a multiple their growth earned
+            # (and double-taxed the growth already credited above); conditioning
+            # makes the reversion flag only a multiple ABOVE what fundamentals
+            # justify. Still bounded ±5%/yr, so a rate/cycle shock bites a
+            # genuinely stretched name.
+            anchor = _macro.sector_anchor(fundamentals.sector)
+            fair, fair_detail = _conditioned_fair_pe(
+                anchor["fair_pe"], g, anchor["growth"],
+                getattr(fundamentals, "roe", None),
+                getattr(fundamentals, "profit_margin", None))
             rev = _clip(math.log(fair / pe) / horizon_years, *_REVERSION_CAP)
         er = _clip(dy + g + rev, *_ER_CAP)
         blocks = {
@@ -151,11 +191,13 @@ def holding_expected_return(ticker, weight_pct, asset_class, fundamentals,
         if growth_basis:
             blocks["growth_basis"] = growth_basis
         if fair is not None:
-            # The reversion target is a dated static ASSUMPTION, not a market
-            # observation — surface which anchor produced the block (review
-            # finding: the payload never said what fair_pe was used).
-            blocks["fair_pe_anchor"] = fair
+            # The reversion target is a dated ASSUMPTION, not a market
+            # observation — surface the conditioned fair P/E and its build so
+            # the payload shows exactly which multiple produced the block.
+            blocks["fair_pe_anchor"] = round(fair, 2)
             blocks["anchor_as_of"] = _macro.SECTOR_ANCHORS_AS_OF
+            if fair_detail:
+                blocks["fair_pe_conditioning"] = fair_detail
         return HoldingReturn(ticker, weight_pct, er, "fundamentals", True, blocks)
 
     # Equity name with no usable fundamentals: defer to the generic anchor.
@@ -181,9 +223,11 @@ def instrument_forward(ticker: str, fnd, mandate_key: str = "balanced") -> dict:
         "mandate": _mnd.key_or_default(mandate_key),
         "blocks_pct": {k: round(v * 100.0, 2) for k, v in hr.blocks.items()
                        if isinstance(v, (int, float)) and k != "fair_pe_anchor"},
-        # Dated static assumption behind valuation_reversion (a P/E multiple,
-        # NOT a percentage — kept out of blocks_pct's x100 scaling).
+        # Dated assumption behind valuation_reversion (a P/E multiple, NOT a
+        # percentage — kept out of blocks_pct's x100 scaling), plus the
+        # growth/quality build that conditioned it (sector base, multipliers).
         "fair_pe_anchor": hr.blocks.get("fair_pe_anchor"),
+        "fair_pe_conditioning": hr.blocks.get("fair_pe_conditioning"),
         "anchor_as_of": hr.blocks.get("anchor_as_of", ""),
         "source": getattr(fnd, "source", "none"),
         "fundamentals_as_of": getattr(fnd, "as_of", "") or "",
