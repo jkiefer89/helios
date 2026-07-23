@@ -125,6 +125,14 @@ def _auto_live_worker(config: dict) -> None:
                     _fnd.fetch(inst.symbol)
         except Exception:
             pass  # fundamentals are best-effort; never fail the refresh loop
+        # Warm the cross-sectional ranking panel (24h TTL — a no-op most
+        # cycles): walk-forward evidence + current ranks for the earned
+        # relative-strength leg. GET paths read cached-only.
+        try:
+            from engine import cross_section as _cs
+            _cs.warm_snapshot()
+        except Exception:
+            pass
         # Daily composite auto-record: the prospective evidence track accrues
         # for every real-eligible target even when the operator doesn't click
         # (view-triggered-only recording had a usage bias — review finding).

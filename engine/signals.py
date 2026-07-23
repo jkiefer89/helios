@@ -97,6 +97,11 @@ def _forecast_edge_multiplier(quality: dict | None) -> float:
 # horizon — it is the horizon-independent leg of the rating.
 _FUNDAMENTALS_GAP_SATURATION_PP = 6.0
 
+# Cross-sectional relative-strength leg: at most this share of the composite,
+# and only the fraction EARNED by measured walk-forward rank-IC evidence
+# (engine/cross_section.py edge_multiplier — zero until the t-stat floor).
+_RELATIVE_MAX_SHARE = 0.15
+
 # Macro event-risk damper bounds (multiplies conviction like the vol penalty —
 # it never flips a direction, it shrinks confidence ahead of known event risk).
 _FOMC_DAMPER = 0.90            # decision within FOMC_IMMINENT_DAYS of a meeting
@@ -143,6 +148,18 @@ def _fundamentals_score(fundamental_result: dict | None) -> float | None:
     if gap is None:
         return None
     return float(np.clip(gap / _FUNDAMENTALS_GAP_SATURATION_PP, -1, 1))
+
+
+def _relative_score(cross_section_result: dict | None) -> float | None:
+    """Score in [-1, 1] from the universe percentile rank, or None when the
+    ranking is absent. The EARNED WEIGHT (not this score) carries the evidence
+    gate — an unproven ranking scores but weighs zero."""
+    if not cross_section_result:
+        return None
+    pctile = cross_section_result.get("pctile")
+    if not isinstance(pctile, (int, float)):
+        return None
+    return float(np.clip(float(pctile) * 2.0 - 1.0, -1.0, 1.0))
 
 
 def _to_action(score: float) -> str:
@@ -468,7 +485,8 @@ def evaluate(close: pd.Series, forecast_result: dict, sentiment_result: dict,
              mandate_key: str | None = None, portfolio_meta: dict | None = None,
              history_days: int | None = None, data_honesty: dict | None = None,
              fundamental_result: dict | None = None,
-             macro_context: dict | None = None) -> dict:
+             macro_context: dict | None = None,
+             cross_section_result: dict | None = None) -> dict:
     """Composite signal with mandate-aware weights and a numbers-backed rationale.
 
     Every threshold quoted in the rationale is the value actually used in the
@@ -513,6 +531,19 @@ def evaluate(close: pd.Series, forecast_result: dict, sentiment_result: dict,
     # contributes less (or nothing), it does not inflate the other legs.
     eff_w["forecast"] = eff_w["forecast"] * edge_mult
 
+    # Cross-sectional relative strength: an EARNED share (measured rank-IC
+    # evidence via cross_section.edge_multiplier), never a granted one. All
+    # other legs scale by (1 - share) so the blend stays normalized; with the
+    # gate closed the share is zero and nothing below changes.
+    rel_raw = _relative_score(cross_section_result)
+    cs_edge = float((cross_section_result or {}).get("edge_multiplier") or 0.0)
+    rel_share = _RELATIVE_MAX_SHARE * np.clip(cs_edge, 0.0, 1.0) if rel_raw is not None else 0.0
+    has_relative = rel_share > 0.0
+    if has_relative:
+        eff_w = {k: v * (1.0 - rel_share) for k, v in eff_w.items()}
+        eff_w["relative"] = float(rel_share)
+        raw["relative"] = rel_raw
+
     contributions = {k: eff_w[k] * raw[k] for k in raw}
     base_composite = sum(contributions.values())
 
@@ -543,7 +574,12 @@ def evaluate(close: pd.Series, forecast_result: dict, sentiment_result: dict,
     # the user's chart horizon by construction).
     tactical_w = dict(tech_w)
     tactical_w["forecast"] = tactical_w["forecast"] * edge_mult
-    tactical_composite = sum(tactical_w[k] * raw[k] for k in ("trend", "momentum", "forecast", "sentiment"))
+    tactical_keys = ["trend", "momentum", "forecast", "sentiment"]
+    if has_relative:
+        tactical_w = {k: v * (1.0 - rel_share) for k, v in tactical_w.items()}
+        tactical_w["relative"] = float(rel_share)
+        tactical_keys.append("relative")
+    tactical_composite = sum(tactical_w[k] * raw[k] for k in tactical_keys)
     tactical_score = float(np.clip(tactical_composite * vol_penalty * mandate_fit * event_damper, -1, 1))
     tactical = {
         "action": _to_action(tactical_score),
@@ -583,6 +619,16 @@ def evaluate(close: pd.Series, forecast_result: dict, sentiment_result: dict,
     names = ("trend", "momentum", "forecast", "sentiment") + (("fundamentals",) if has_fundamentals else ())
     if has_fundamentals:
         clauses["fundamentals"] = _fundamentals_clause(raw, eff_w, contributions, fundamental_result)
+    if has_relative:
+        names = names + ("relative",)
+        _cs = cross_section_result or {}
+        _m = _cs.get("metrics") or {}
+        clauses["relative"] = (
+            f"Ranks #{_cs.get('rank')} of {_cs.get('universe_size')} in the eligible "
+            f"universe on predicted {_cs.get('horizon_days', 21)}d relative return "
+            f"(walk-forward rank IC {_m.get('mean_rank_ic')}, t {_m.get('ic_t_stat')} "
+            f"over {_m.get('n_dates')} independent windows — weight earned at "
+            f"{rel_share:.0%}).")
     components = [
         {"name": k, "raw": round(raw[k], 3),
          "base_weight": WEIGHTS.get(k, round(eff_w[k], 3)),
@@ -611,6 +657,15 @@ def evaluate(close: pd.Series, forecast_result: dict, sentiment_result: dict,
         else:
             caveats.append("No usable fundamentals for this instrument — rating is the "
                            "technical blend only (no strategic track).")
+    if cross_section_result is not None and rel_raw is not None and not has_relative:
+        _m = (cross_section_result.get("metrics") or {})
+        caveats.append(
+            f"Cross-sectional ranking computed (#{cross_section_result.get('rank')} of "
+            f"{cross_section_result.get('universe_size')}) but carries NO weight — "
+            f"measured evidence below the gate (rank-IC t "
+            f"{_m.get('ic_t_stat', 'n/a')} over {_m.get('n_dates', 0)} independent "
+            f"windows; weight requires >=12 windows AND t>1.5, full at t>=2.5 — "
+            f"the raised floor prices in the survivor-universe bias).")
     caveats.extend(event_reasons)
     # Sector-level policy pressure is context (never scored): flag it honestly.
     sector_policy = (macro_context or {}).get("sector_policy")

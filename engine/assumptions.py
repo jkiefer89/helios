@@ -168,3 +168,26 @@ _LEVERAGED_RE = _re.compile("|".join(LEVERAGED_NAME_PATTERNS), _re.IGNORECASE)
 def is_leveraged_product_name(name: str | None) -> bool:
     """True when an instrument NAME matches a geared/inverse wrapper convention."""
     return bool(name) and bool(_LEVERAGED_RE.search(str(name)))
+
+
+# Broad-index / market-proxy wrappers (as_of 2026-07): excluded from the
+# cross-sectional ranking universe. Ranking a total-market fund against the
+# single names it contains measures BETA, not selection skill — a probe on the
+# operator's real book showed index funds inflating measured rank IC from
+# +0.12 to +0.18. Same conservative name-pattern convention as the leveraged
+# detector; reviewed with each ASSUMPTIONS_VERSION bump.
+BROAD_INDEX_NAME_PATTERNS = (
+    r"\bs&p\s*500\b",
+    r"\bnasdaq[- ]?100\b",
+    r"\brussell\s*[123]000\b",
+    r"\bdow jones\b",
+    r"\btotal (stock )?market\b",
+    r"\bmsci\s+(world|acwi|eafe|usa)\b",
+    r"\bqqq trust\b",
+)
+_BROAD_INDEX_RE = _re.compile("|".join(BROAD_INDEX_NAME_PATTERNS), _re.IGNORECASE)
+
+
+def is_broad_index_name(name: str | None) -> bool:
+    """True when an instrument NAME matches a broad-market index wrapper."""
+    return bool(name) and bool(_BROAD_INDEX_RE.search(str(name)))

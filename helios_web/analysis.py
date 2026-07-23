@@ -8,7 +8,7 @@ import pandas as pd
 from flask import Blueprint, request
 
 from engine import (
-    backtest, cma, costs, data, data_quality, evidence_lab, forecast,
+    backtest, cma, costs, cross_section, data, data_quality, evidence_lab, forecast,
     fundamentals, holdings, indicators, macro, macro_events, mandate, opportunity,
     persistence, portfolio, provenance, provider_registry, regime, research_context,
     sec_events, sentiment, signal_journal, signals, strategy, trials,
@@ -523,8 +523,12 @@ def auto_record_daily_signals(max_targets: int = 200) -> dict:
                 ticker=inst.symbol, source="none")
             fwd = cma.instrument_forward(inst.symbol, fnd)
             ctx = macro_events.build_macro_context(fwd.get("sector") or "", macro_snap)
+            # SAME composite the interactive analyze serves (adversarial-review
+            # blocker): the prospective journal must never validate a blend
+            # nobody sees — the cross-sectional slice rides along, cached-only.
             sig = signals.evaluate(close, fc, sent, history_days=len(close),
-                                   fundamental_result=fwd, macro_context=ctx)
+                                   fundamental_result=fwd, macro_context=ctx,
+                                   cross_section_result=cross_section.for_symbol(inst.symbol))
             p = provenance.instrument(
                 inst.source, len(close), price_provider=getattr(inst, "price_provider", ""),
             )
@@ -710,9 +714,13 @@ def analyze():
         "available": False,
         "reason": "No cached SEC event evidence is available; refresh real-data context explicitly.",
     }
+    # Cross-sectional rank slice (cached-only — the auto-live loop builds the
+    # panel; a cold cache degrades to no relative leg, never blocks the GET).
+    cs_slice = cross_section.for_symbol(inst.symbol)
     sig = signals.evaluate(close, fc_short, sent, history_days=len(close),
                            fundamental_result=fwd, macro_context=macro_ctx,
-                           mandate_key=resolved_mandate)
+                           mandate_key=resolved_mandate,
+                           cross_section_result=cs_slice)
     anchor_kwargs = {}
     if fwd.get("usable") and isinstance(fwd.get("expected_return_pct"), (int, float)):
         anchor_kwargs = {
@@ -770,6 +778,9 @@ def analyze():
         # Cached 1h; offline -> {"available": False} rather than fabricated calm.
         "sec_events": sec,
         "macro": macro_events.compact_summary(macro_snap),
+        # Relative-strength evidence behind the (earned) fifth component; None
+        # while the daily panel is cold or the symbol is outside the universe.
+        "relative_strength": cs_slice,
         "signal": sig,
         "signal_journal_entry": None,
         "backtest": bt,
@@ -815,8 +826,11 @@ def record_instrument_signal():
         ticker=inst.symbol, source="none")
     fwd = cma.instrument_forward(inst.symbol, fnd)
     macro_ctx = macro_events.build_macro_context(fwd.get("sector") or "", macro_events.snapshot_cached())
+    # Parity with the analyze view: the recorded signal must equal what was on
+    # screen, including the (earned) cross-sectional leg when the gate is open.
     sig = signals.evaluate(close, fc, sent, history_days=len(close),
-                           fundamental_result=fwd, macro_context=macro_ctx)
+                           fundamental_result=fwd, macro_context=macro_ctx,
+                           cross_section_result=cross_section.for_symbol(inst.symbol))
     entry = _record_instrument_signal(inst, close, sig, horizon)
     return ok({"signal_journal_entry": entry, "disclaimer": ANALYSIS_ONLY_DISCLAIMER})
 

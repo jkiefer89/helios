@@ -247,6 +247,16 @@ function AnalysisPayload({ payload }: { payload: AnalysisResponse }) {
           <span>{eligible ? `${fmtNumber(payload.signal.conviction_pct, 0)}% conviction${payload.signal.conviction_band ? ` (${payload.signal.conviction_band})` : ""}` : "Research locked"}</span>
         </div>
         {eligible && <SignalTracks signal={payload.signal} mandateAnchor={payload.mandate_anchor} />}
+        {eligible && payload.relative_strength && (
+          <p className="forecast-note">
+            Relative strength: ranks <b>#{payload.relative_strength.rank} of {payload.relative_strength.universe_size}</b>{" "}
+            on predicted {payload.relative_strength.horizon_days}d relative return
+            (as of {payload.relative_strength.as_of}).{" "}
+            {payload.relative_strength.edge_multiplier > 0
+              ? `Weight earned: ${Math.round(payload.relative_strength.edge_multiplier * 15)}% of the composite (measured rank-IC t ${String(payload.relative_strength.metrics?.ic_t_stat ?? "n/a")} over ${String(payload.relative_strength.metrics?.n_dates ?? 0)} independent windows).`
+              : `Carries no weight yet — evidence below the gate (rank-IC t ${String(payload.relative_strength.metrics?.ic_t_stat ?? "n/a")} over ${String(payload.relative_strength.metrics?.n_dates ?? 0)} windows; weight requires ≥12 windows AND t>1.5, full at t≥2.5).`}
+          </p>
+        )}
         {eligible && <DecisionQuickLog payload={payload} />}
         {!eligible && <div className="warning-list"><span>{quality.required_action || "Replace ineligible or incomplete inputs before treating this as research evidence."}</span></div>}
         {payload.signal.caveats?.length ? <div className="warning-list">{payload.signal.caveats.map((caveat) => <span key={caveat}>{caveat}</span>)}</div> : null}

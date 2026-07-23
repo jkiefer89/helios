@@ -1891,6 +1891,20 @@ export interface AnalysisResponse {
   freshness?: FreshnessEvidence;
   research_context?: ResearchContext;
   mandate?: AnalysisMandate;
+  // Cross-sectional relative-strength evidence behind the earned fifth
+  // component; null while the daily panel is cold or the symbol is excluded.
+  relative_strength?: {
+    rank: number;
+    n: number;
+    pctile: number;
+    expected_rel_21d_pct: number;
+    as_of: string;
+    horizon_days: number;
+    universe_size: number;
+    edge_multiplier: number;
+    metrics: Record<string, number | string>;
+    basis: string;
+  } | null;
   // Which mandate anchor the strategic (CMA) track was judged against for a
   // standalone instrument, and why (operator-selected / auto-by-risk / default).
   mandate_anchor?: {
